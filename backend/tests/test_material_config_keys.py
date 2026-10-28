@@ -184,9 +184,9 @@ def source(db_session):
             "q1": q1, "g": g, "dom": dom, "m1": m1, "m2": m2}
 
 
-def _save(s, config: dict):
-    s["db"].add(Material(collection_id=s["coll"].id, material_type="chart", auto_name="x",
-                         source_tab="descriptives", config=json.dumps(config)))
+def _save(s, config: dict, *, source_tab: str = "descriptives", material_type: str = "chart"):
+    s["db"].add(Material(collection_id=s["coll"].id, material_type=material_type, auto_name="x",
+                         source_tab=source_tab, config=json.dumps(config)))
     s["db"].commit()
 
 
@@ -230,11 +230,14 @@ class TestTheImportFollowsEveryKind:
 
     def test_a_quantitative_charts_ids(self, source, tmp_path):
         s = source
+        # A COMPARISON row: `compare_by` is a comparison key, and since #1315 the
+        # import strips it from a Descriptives row (`material_config.normalise_rc_keys`)
+        # — the shape this fixture had was the leak that issue repairs.
         _save(s, {
-            "column_ids": [s["q1"].id], "domain_ids": [s["dom"].id],
+            "column_ids": [s["q1"].id], "domain_ids": [s["dom"].id], "rc_view": "comparisons",
             "compare_by": s["g"].id, "compare_by_2": s["g"].id,
             "custom_order": [s["m2"].id, s["m1"].id],
-        })
+        }, source_tab="comparisons", material_type="comparison_table")
         db = s["db"]
         pid = _roundtrip(db, tmp_path, 7001)
         cfg = _material_config(db, pid)
@@ -260,6 +263,9 @@ class TestTheImportFollowsEveryKind:
         archive = tmp_path / "x.mmproject"
         archive.write_bytes(export_project(db, 7001, docs).getvalue())
         db.get(User, 701).username = "Alice"  # the destination's id 701 is Alice
+        # #1352 — and Alice is someone else: a renamed row is still the same coder
+        # (`users.uuid`), so a second install is simulated by a second identity too.
+        db.get(User, 701).uuid = "00000000-0000-4000-8000-000000000701"
         db.flush()
         pid, _ = import_project(db, archive, tmp_path / "i", media_dir=None, user_id=1,
                                 import_mode="new")

@@ -1,7 +1,7 @@
 from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 from .common import UTCTimestamp
-from .segment import SegmentNoteInfo
+from .segment import SegmentNoteInfo, TextEditQuoteFields, TextEditPlanResponse
 
 
 # --- Request schemas ---
@@ -96,8 +96,22 @@ class ImagePositionUpdateRequest(BaseModel):
     after_sequence_order: int = Field(..., ge=0)
 
 
-class DocumentSegmentUpdateRequest(BaseModel):
+class DocumentSegmentUpdateRequest(TextEditQuoteFields):
     text: str = Field(..., min_length=1, max_length=100_000)
+
+
+class DocumentSegmentPreviewRequest(BaseModel):
+    """The text about to be saved (#1319) — read-only, nothing is written."""
+    text: str = Field(..., min_length=1, max_length=100_000)
+
+
+class DocumentSegmentUpdateResponse(BaseModel):
+    """The document edit door's answer (#1319): the stored text and what the edit
+    did to the paragraph's quotes."""
+    id: int
+    text: str
+    word_count: int
+    quote_rebase: TextEditPlanResponse
 
 
 class DocumentDetailResponse(BaseModel):

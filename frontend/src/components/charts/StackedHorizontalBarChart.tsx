@@ -10,12 +10,13 @@ import {
   ReferenceLine,
   ResponsiveContainer,
 } from 'recharts'
-import type { LabelProps } from 'recharts'
 import { DISPLAY_PRECISION, mergeFormatting, computeYAxisWidth, wrapLabel } from '@/lib/chart-data'
 import { useChartColors } from '@/lib/theme-context'
+import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
 import type { StackedBarData, DivergingStackedBarData, ChartFormatting, VariableNMode, SortOrder } from '@/lib/chart-data'
 import type { RechartsTooltipProps, RechartsPayloadEntry, ChartDataRow } from '@/lib/chart-types'
 import { ChartFigure } from './ChartFigure'
+import { barRowLabel } from './bar-row-label'
 
 interface StackedHorizontalBarChartProps {
   data: StackedBarData
@@ -65,7 +66,7 @@ function DivergingTooltip({ active, payload, label }: RechartsTooltipProps) {
   if (!row) return null
   // Collect all unique labels from the rendered payload (dedupe center halves)
   const seenLabels = new Set<string>()
-  const items: { label: string; pct: number; count: number; fill: string }[] = []
+  const items: { label: string; pct: number | null; count: number; fill: string }[] = []
   for (const entry of payload) {
     // Strip _left/_right suffix for center label deduplication
     let displayName = entry.name as string
@@ -74,9 +75,11 @@ function DivergingTooltip({ active, payload, label }: RechartsTooltipProps) {
     }
     if (seenLabels.has(displayName)) continue
     seenLabels.add(displayName)
+    const pct = row[`_pct_${displayName}`] as number | null | undefined
     items.push({
       label: displayName,
-      pct: (row[`_pct_${displayName}`] as number) ?? Math.abs(Number(entry.value) || 0),
+      // #1412: `null` is an undefined share (nobody answered) — never 0.0%.
+      pct: pct === null ? null : (pct ?? Math.abs(Number(entry.value) || 0)),
       count: (row[`_count_${displayName}`] as number) ?? 0,
       fill: entry.fill ?? '',
     })
@@ -90,7 +93,7 @@ function DivergingTooltip({ active, payload, label }: RechartsTooltipProps) {
           <span className="text-mm-text-secondary">{item.label}:</span>
           <span className="font-medium">
             {item.count}
-            <span className="text-mm-text-faint ml-1">({item.pct.toFixed(DISPLAY_PRECISION)}%)</span>
+            <span className="text-mm-text-faint ml-1">({item.pct == null ? NO_VALUE : `${item.pct.toFixed(DISPLAY_PRECISION)}%`})</span>
           </span>
         </div>
       ))}
@@ -166,6 +169,10 @@ function StandardRenderer({
         _metricId: row.metricId,
         _groupLabel: row.groupLabel,
         _isGroupEnd: row.isGroupEnd,
+        // #1412 — read by `StackedYAxisTick` (the `—` mark) in the 100% mode only:
+        // in count mode the empty stack is a real count of 0.
+        _undefinedStatistic: mode === '100%' && row.undefinedStatistic === true,
+        _undefinedReason: row.undefinedReason,
       }
       for (const seg of row.segments) {
         entry[seg.label] = mode === '100%' ? seg.percentage : seg.count
@@ -285,10 +292,11 @@ function StandardRenderer({
               fill={colors[label]}
               barSize={fmt.barSize}
               isAnimationActive={false}
-              label={fmt.dataLabels === 'none' ? false : (props: LabelProps) => {
-                const { x, y, width, height, index } = props as unknown as { x: number; y: number; width: number; height: number; index: number }
-                const row = chartData[index]
-                if (!row || row._metricId === -1) return null
+              // #1314: the label reads its own row — never `chartData[index]`, which the
+              // all-zero separator rows shift with no empty segment at all — and never the
+              // label's `value`, which is the stack's cumulative end (bar-row-label.ts).
+              label={fmt.dataLabels === 'none' ? false : barRowLabel<ChartDataRow>((row, { x, y, width, height }) => {
+                if (row._metricId === -1) return null
                 if (width < 40) return null
                 const val = mode === '100%'
                   ? row[`_pct_${label}`] as number | undefined
@@ -310,7 +318,7 @@ function StandardRenderer({
                     {val.toFixed(precision)}{valSuffix}
                   </text>
                 )
-              }}
+              })}
             />
           ))}
         </BarChart>
@@ -347,6 +355,8 @@ function DivergingRenderer({
         _metricId: row.metricId,
         _groupLabel: row.groupLabel,
         _isGroupEnd: row.isGroupEnd,
+        _undefinedStatistic: row.undefinedStatistic === true, // #1412
+        _undefinedReason: row.undefinedReason,
       }
       // Copy all segment values (already signed)
       for (const [key, val] of Object.entries(row.segments)) {
@@ -494,10 +504,10 @@ function DivergingRenderer({
               fill={def.fill}
               barSize={fmt.barSize}
               isAnimationActive={false}
-              label={fmt.dataLabels === 'none' ? false : (props: LabelProps) => {
-                const { x, y, width, height, index } = props as unknown as { x: number; y: number; width: number; height: number; index: number }
-                const row = chartData[index]
-                if (!row || row._metricId === -1) return null
+              // #1314: as in the standard renderer — the row, never `chartData[index]`.
+              // A segment left of zero has a NEGATIVE width.
+              label={fmt.dataLabels === 'none' ? false : barRowLabel<ChartDataRow>((row, { x, y, width, height }) => {
+                if (row._metricId === -1) return null
                 if (Math.abs(width) < 40) return null
                 // Show absolute percentage
                 const displayLabel = def.displayLabel
@@ -519,7 +529,7 @@ function DivergingRenderer({
                     {pct.toFixed(DISPLAY_PRECISION)}%
                   </text>
                 )
-              }}
+              })}
             />
           ))}
         </BarChart>
@@ -548,7 +558,16 @@ function StackedYAxisTick(props: StackedYAxisTickProps) {
   const { x, y, payload, chartData, showVariableN, chartN, fmt, maxCharsPerLine, isGrouped, colors } = props
   const row = chartData.find((d) => d.label === payload.value)
   if (row?._metricId === -1) return <g aria-hidden="true" />
-  const fullLabel = (row?._fullLabel as string) || String(payload.value)
+  // #1412 — a row nobody answered stacks nothing; mark it `—` where its bar
+  // would start, with the reason in the tick's title (#1363's tick idiom).
+  const undef = row?._undefinedStatistic === true
+  const baseLabel = (row?._fullLabel as string) || String(payload.value)
+  const fullLabel = undef ? `${baseLabel}: ${undefinedTooltip(row?._undefinedReason as string | null | undefined)}` : baseLabel
+  const undefMark = undef ? (
+    <text data-undefined-statistic="" x={x + 8} y={y} textAnchor="start" fill={colors.textMuted} style={{ fontSize: fmt.dataLabelFontSize }} dominantBaseline="central">
+      {NO_VALUE}
+    </text>
+  ) : null
   const n = row?._totalN as number | undefined
   const showN = showVariableN === 'all' ||
     (showVariableN === 'differing' && n != null && n !== chartN)
@@ -562,7 +581,7 @@ function StackedYAxisTick(props: StackedYAxisTickProps) {
     const lineHeight = fmt.labelFontSize + 2
     const groupFontSize = fmt.labelFontSize - 1
     const groupLineHeight = groupFontSize + 4
-    const isGroupFirst = fullLabel.startsWith(groupLabel)
+    const isGroupFirst = baseLabel.startsWith(groupLabel)
     const metricBlockHeight = lines.length * lineHeight
     const totalHeight = metricBlockHeight + groupLineHeight
     const blockStartY = y - totalHeight / 2
@@ -583,6 +602,7 @@ function StackedYAxisTick(props: StackedYAxisTickProps) {
           {showN && n != null && (
             <text x={x} y={metricStartY + lines.length * lineHeight + lineHeight / 2} textAnchor="end" fill={colors.textMuted} style={{ fontSize: fmt.dataLabelFontSize }} dominantBaseline="central">(n={n})</text>
           )}
+          {undefMark}
         </g>
       )
     }
@@ -602,6 +622,7 @@ function StackedYAxisTick(props: StackedYAxisTickProps) {
         {showN && n != null && (
           <text x={x} y={groupY + groupLineHeight} textAnchor="end" fill={colors.textMuted} style={{ fontSize: fmt.dataLabelFontSize }} dominantBaseline="central">(n={n})</text>
         )}
+        {undefMark}
       </g>
     )
   }
@@ -620,6 +641,7 @@ function StackedYAxisTick(props: StackedYAxisTickProps) {
       {showN && n != null && (
         <text x={x} y={startY + lines.length * lineHeight} textAnchor="end" fill={colors.textMuted} style={{ fontSize: fmt.dataLabelFontSize }} dominantBaseline="central">(n={n})</text>
       )}
+      {undefMark}
     </g>
   )
 }

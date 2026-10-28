@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Link } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Sun, Moon, Monitor, Download, FileInput, ChevronDown, LoaderCircle, ArrowLeft, Clock, Info, Lock, Unlock, Archive, ArchiveRestore, UserPlus, Copy, Quote, Plus, Minus, Pencil } from 'lucide-react'
@@ -34,7 +34,8 @@ import {
   backupFileRefusal, backupFreshness, backupsAheadSentence, backupTitle, nextBackupPhrase, scheduleSentences,
 } from '@/lib/backup-history'
 import { fileLimitLabel } from '@/lib/upload-limits'
-import { useCoders } from '@/hooks/useCoders'
+import { resetCoderRoster, ALL_CODERS_QUERY_KEY } from '@/hooks/useCoders'
+import { FOCUS_RING } from '@/lib/selection'
 import { useCoderSwitch } from '@/hooks/useCoderSwitch'
 import { useCreateCoder } from '@/hooks/useCreateCoder'
 import { coderColor, coderInitials } from '@/lib/coder-color'
@@ -727,16 +728,23 @@ function badgeDot(c: { id: number; username: string; display_color?: string | nu
  * a coder SWITCHES your active identity to them (with the #460 confirm) so the editor
  * below edits them — only a coder can change their own name/color, so there's no
  * edit-others endpoint. Archive/Unarchive sit per-row (you can't archive the coder
- * you're being, so Archive only shows on others). Shown only when ≥2 coders exist.
+ * you're being, so Archive only shows on others). Shown only when ≥2 coders exist,
+ * ARCHIVED ones included (D16): it is the only door to Unarchive.
  */
 function CoderRosterManager({
+  allCoders,
   activeId,
   onRequestSwitch,
   switching,
+  onRowMoved,
 }: {
+  /** The archive-inclusive roster — the parent's, which also decides this mounts. */
+  allCoders: Coder[]
   activeId: number | undefined
   onRequestSwitch: (t: { id: number; username: string }) => void
   switching: boolean
+  /** #1387 — an archive or unarchive moved the pressed row; the lists have answered. */
+  onRowMoved: () => void
 }) {
   const queryClient = useQueryClient()
   const [showArchived, setShowArchived] = useState(false)
@@ -744,27 +752,24 @@ function CoderRosterManager({
   // (#999). Null = the dialog is closed; the dialog itself renders nothing
   // without one, so there is no second `open` flag to keep in step.
   const [editingMachine, setEditingMachine] = useState<Coder | null>(null)
-  // Full roster incl. archived (the editor/switcher elsewhere use the non-archived
-  // ['coders']). Archive/unarchive/switch invalidate ['coders'], which prefix-matches
-  // this key too, so the list stays fresh.
-  const { data: allCoders = [] } = useQuery({
-    queryKey: ['coders', 'all'],
-    queryFn: () => authApi.listCoders(true),
-    staleTime: 60_000,
-  })
   const activeCoders = allCoders.filter(c => !c.archived)
   const archivedCoders = allCoders.filter(c => c.archived)
 
+  // Archive REMOVES a coder from the roster, so invalidating is enough: a stale
+  // roster that still holds the colleague keeps blind mode ON (#964's safe side).
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['coders'] })
   const archiveMut = useMutation({
     mutationFn: (id: number) => authApi.archiveCoder(id),
-    onSuccess: () => { invalidate(); toast.success('Coder archived') },
+    // #1387 — the row leaves only when the refetch lands, so the landing waits for it.
+    onSuccess: () => { void invalidate().then(onRowMoved); toast.success('Coder archived') },
     onError: (e: Error & { response?: { data?: { detail?: string } } }) =>
       toast.error(e.response?.data?.detail || 'Could not archive coder'),
   })
+  // 🔴 Unarchive ADDS a coder back, so the roster is RESET (#964, group C item 11):
+  // an invalidated one-person roster keeps answering — blind mode off — until it refetches.
   const unarchiveMut = useMutation({
     mutationFn: (id: number) => authApi.unarchiveCoder(id),
-    onSuccess: () => { invalidate(); toast.success('Coder unarchived') },
+    onSuccess: () => { void resetCoderRoster(queryClient).then(onRowMoved); toast.success('Coder unarchived') },
     onError: () => toast.error('Could not unarchive coder'),
   })
 
@@ -837,11 +842,13 @@ function CoderRosterManager({
               ) : (
                 <button
                   type="button"
-                  onClick={() => archiveMut.mutate(c.id)}
-                  disabled={archiveMut.isPending}
+                  // #1387 — busy is `aria-disabled` + this guard, never `disabled`:
+                  // Chrome blurs a focused button that becomes disabled (#959 §4).
+                  onClick={() => { if (!archiveMut.isPending) archiveMut.mutate(c.id) }}
+                  aria-disabled={archiveMut.isPending || undefined}
                   aria-label={`Archive ${c.username}`}
                   title="Archive — keeps their codings, removes from the roster"
-                  className="p-1 rounded text-mm-text-muted hover:text-mm-text"
+                  className="p-1 rounded text-mm-text-muted hover:text-mm-text aria-disabled:opacity-50"
                 >
                   <Archive className="w-3.5 h-3.5" />
                 </button>
@@ -871,10 +878,10 @@ function CoderRosterManager({
                   </span>
                   <button
                     type="button"
-                    onClick={() => unarchiveMut.mutate(c.id)}
-                    disabled={unarchiveMut.isPending}
+                    onClick={() => { if (!unarchiveMut.isPending) unarchiveMut.mutate(c.id) }}
+                    aria-disabled={unarchiveMut.isPending || undefined}
                     aria-label={`Unarchive ${c.username}`}
-                    className="inline-flex items-center gap-1 text-xs text-mm-green-text hover:underline"
+                    className="inline-flex items-center gap-1 text-xs text-mm-green-text hover:underline aria-disabled:opacity-50"
                   >
                     <ArchiveRestore className="w-3.5 h-3.5" />
                     Unarchive
@@ -913,9 +920,24 @@ function AddCoderControl({
       onCreated(coder)
     },
   })
+  // Closing the form (Add or Cancel) unmounts the control that was pressed, so
+  // focus fell to <body>; it returns to the button that opened the form — only
+  // on the CLOSE transition and only when focus was lost (#1091's rule).
+  const addButtonRef = useRef<HTMLButtonElement>(null)
+  const wasAdding = useRef(adding)
+  useEffect(() => {
+    const closed = wasAdding.current && !adding
+    wasAdding.current = adding
+    if (!closed) return
+    const active = document.activeElement
+    if (active && active !== document.body && active.isConnected) return
+    addButtonRef.current?.focus()
+  }, [adding])
   if (!adding) {
     return (
-      <Button type="button" variant="outline" size="sm" onClick={() => setAdding(true)} disabled={disabled}>
+      // `aria-disabled` + the guard, not `disabled`: creating switches to the new
+      // coder at once, so the button is busy in the very render focus returns to it.
+      <Button ref={addButtonRef} type="button" variant="outline" size="sm" onClick={() => { if (!disabled) setAdding(true) }} aria-disabled={disabled || undefined} className="aria-disabled:opacity-50">
         <UserPlus className="w-3.5 h-3.5 mr-1.5" />
         Add coder
       </Button>
@@ -949,12 +971,48 @@ function AddCoderControl({
   )
 }
 
-function CoderIdentitySection() {
+/** Exported for its test (`CoderIdentitySection.test.tsx`). */
+export function CoderIdentitySection() {
   const { user, refreshAuth } = useAuth()
-  const { coders, multiCoder } = useCoders()
   const queryClient = useQueryClient()
   const { requestSwitch, dialog: switchDialog, switching } = useCoderSwitch()
-  const me = coders.find(c => c.id === user?.id)
+  // 🔴 Group C item 11 — the roster manager is decided by the ARCHIVE-INCLUSIVE list,
+  // never `useCoders().multiCoder`. Creating or unarchiving a coder RESETS the active
+  // roster (#964), so `multiCoder` reads false until it answers: gated on it, the
+  // manager — the button just pressed, its open archived list, an open machine
+  // editor — unmounted for the whole refetch and the copy said "local-first"
+  // (DRIVEN). This list is only invalidated, so it keeps its answer meanwhile.
+  // Same set as `multiCoder` once answered: both exclude system coders.
+  const { data: allCoders = [] } = useQuery({
+    queryKey: ALL_CODERS_QUERY_KEY,
+    queryFn: () => authApi.listCoders(true),
+    staleTime: 60_000,
+  })
+  const multiCoder = allCoders.filter(c => !c.archived).length > 1
+  // 🔴 D16 (Batch 10) — the MANAGER mounts on the archive-INCLUSIVE count. It holds
+  // the only Unarchive buttons, so gated on `multiCoder` (two ACTIVE coders) every
+  // archived coder became unreachable once you were the one active coder left —
+  // archiving the last colleague hid the way back. The COPY stays on `multiCoder`:
+  // "Pick a coder below to code as them" is a claim about ACTIVE coders (an archived
+  // one cannot be picked), and what "Add a second coder" says switches on reads the
+  // active roster (`useCoders`).
+  const showRosterManager = allCoders.length > 1
+  // #1387 — an archive or unarchive moves the pressed row to the other list (or
+  // into a collapsed one), so focus fell to <body>. Land on the section heading —
+  // an EFFECT after the commit that moved it (#1130), and only when focus was lost.
+  const headingRef = useRef<HTMLHeadingElement>(null)
+  const [landingRequest, setLandingRequest] = useState(0)
+  useEffect(() => {
+    // Load-bearing (unlike #1130's panel): this section mounts with the page,
+    // when focus is on <body> — without it the page would open focused here.
+    if (landingRequest === 0) return
+    const active = document.activeElement
+    if (active && active !== document.body && active.isConnected) return
+    headingRef.current?.focus()
+  }, [landingRequest])
+  // From the archive-inclusive list too, so the badge preview does not drop to
+  // the palette colour while a reset roster refetches.
+  const me = allCoders.find(c => c.id === user?.id)
   const [name, setName] = useState(user?.username ?? '')
   // `undefined` = unedited → fall back to the saved color from the ['coders'] roster
   // (the canonical store; the /auth/status user also carries display_color now, #452).
@@ -1011,15 +1069,21 @@ function CoderIdentitySection() {
 
   return (
     <section className="rounded-lg border border-mm-surface-border bg-mm-surface shadow-mm-card p-4">
-      <h2 className="text-base font-semibold text-mm-text mb-1">Coder identity</h2>
+      <h2 ref={headingRef} tabIndex={-1} className={`text-base font-semibold text-mm-text mb-1 rounded-sm ${FOCUS_RING}`}>Coder identity</h2>
       <p className="text-xs text-mm-text-muted mb-4">
         Your coding is attributed to this name and color.{' '}
         {multiCoder
           ? 'Pick a coder below to code as them — only the coder you’re currently coding as can edit their own name and color.'
           : 'Mixed Measures is local-first — there is no account or password.'}
       </p>
-      {multiCoder && (
-        <CoderRosterManager activeId={user?.id} onRequestSwitch={requestSwitch} switching={switching} />
+      {showRosterManager && (
+        <CoderRosterManager
+          allCoders={allCoders}
+          activeId={user?.id}
+          onRequestSwitch={requestSwitch}
+          switching={switching}
+          onRowMoved={() => setLandingRequest(n => n + 1)}
+        />
       )}
       <div className="mb-4 space-y-1.5">
         <AddCoderControl

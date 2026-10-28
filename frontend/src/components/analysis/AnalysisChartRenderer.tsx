@@ -2,10 +2,8 @@ import { RefreshCw, Play, TriangleAlert } from 'lucide-react'
 import type { MetricDefinitionResponse, AnalysisCrossTabResponse } from '@/lib/api'
 import {
   getGroupValues,
-  shapeScalarBars,
-  shapeGroupedScalarBars,
-  shapeFrequencyBars,
-  shapeGroupedFrequencyBars,
+  shapeScalarBarFigure,
+  shapeFrequencyBarFigure,
   shapeHeatmapRows,
   shapeDumbbellRows,
   shapeStackedBars,
@@ -13,14 +11,12 @@ import {
   shapeDivergingStackedBars,
   shapeLineChart,
   computeLineChartN,
-  isGroupedMetrics,
   computeBarChartN,
   computeGroupedScalarChartN,
   computeHeatmapChartN,
   computeDumbbellChartN,
   computeStackedBarChartN,
   computeFreqBarChartN,
-  sortGroupValues,
   resolveGroupTextColors,
   type ChartType,
   type ChartFormatting,
@@ -349,14 +345,12 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
           </ChartExportWrapper>
         )
       }
-      // Scalar bar chart — grouped or ungrouped
-      if (isGroupedMetrics(orderedMetrics)) {
-        const allGroupVals = getGroupValues(orderedMetrics)
-        const filteredGroupVals = hiddenGroupValues.length > 0
-          ? allGroupVals.filter(gv => !hiddenGroupValues.includes(gv))
-          : allGroupVals
-        const visibleGroupVals = sortGroupValues(filteredGroupVals, sortOrder, orderedMetrics)
-        const groupedSections = shapeGroupedScalarBars(orderedMetrics, visibleGroupVals, activeLabelMap)
+      // Scalar bar chart — grouped or ungrouped, decided by the ONE function the
+      // Canvas embed and its export also ask (#1406).
+      const hFigure = shapeScalarBarFigure(orderedMetrics, { colorMap, labelMap: activeLabelMap, hiddenGroupValues, sortOrder })
+      if (hFigure.kind === 'grouped') {
+        const visibleGroupVals = hFigure.groupValues
+        const groupedSections = hFigure.sections
         const nInfo = computeGroupedScalarChartN(groupedSections)
         const autoFootnote = showChartN && nInfo.hasVaryingN ? varyingFootnote : undefined
         return (
@@ -388,7 +382,7 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
           </>
         )
       }
-      const barData = shapeScalarBars(orderedMetrics, colorMap, activeLabelMap)
+      const barData = hFigure.bars
       const nInfo = computeBarChartN(barData)
       const autoFootnote = showChartN && nInfo.hasVaryingN ? varyingFootnote : undefined
       return (
@@ -523,7 +517,7 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
       )
     }
     case 'table': {
-      const statsData = shapeSummaryStats(orderedMetrics, activeLabelMap, metricType)
+      const statsData = shapeSummaryStats(orderedMetrics, activeLabelMap, metricType, { hiddenGroupValues, sortOrder })
       const tablePropLabel = metricType === 'proportion'
         ? (proportionMode === 'values' && proportionValues.length > 0
           ? proportionValues.join(', ')
@@ -552,14 +546,11 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
     }
     case 'vertical_bar': {
       if (metricType === 'frequency_distribution') {
-        // Single-question freq → vertical bars
-        if (isGroupedMetrics(orderedMetrics)) {
-          const allGroupVals = getGroupValues(orderedMetrics)
-          const filteredGroupVals = hiddenGroupValues.length > 0
-            ? allGroupVals.filter(gv => !hiddenGroupValues.includes(gv))
-            : allGroupVals
-          const visibleGroupVals = sortGroupValues(filteredGroupVals, sortOrder, orderedMetrics)
-          const groupedFreqData = shapeGroupedFrequencyBars(orderedMetrics[0], visibleGroupVals, shapeOpts)
+        // Single-question freq → vertical bars (#1406: the shared decision)
+        const vFreq = shapeFrequencyBarFigure(orderedMetrics, { ...shapeOpts, hiddenGroupValues, sortOrder })
+        if (vFreq.kind === 'grouped') {
+          const visibleGroupVals = vFreq.groupValues
+          const groupedFreqData = vFreq.section
           const nInfo = computeFreqBarChartN(orderedMetrics)
           const autoFootnote = showChartN && nInfo.hasVaryingN ? varyingFootnote : undefined
           return (
@@ -581,7 +572,7 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
             </ChartExportWrapper>
           )
         }
-        const freqBars = shapeFrequencyBars(orderedMetrics[0], shapeOpts)
+        const freqBars = vFreq.bars
         const nInfo = computeFreqBarChartN(orderedMetrics)
         const autoFootnote = showChartN && nInfo.hasVaryingN ? varyingFootnote : undefined
         return (
@@ -601,14 +592,11 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
           </ChartExportWrapper>
         )
       }
-      // Scalar ungrouped / grouped
-      if (isGroupedMetrics(orderedMetrics)) {
-        const allGroupVals = getGroupValues(orderedMetrics)
-        const filteredGroupVals = hiddenGroupValues.length > 0
-          ? allGroupVals.filter(gv => !hiddenGroupValues.includes(gv))
-          : allGroupVals
-        const visibleGroupVals = sortGroupValues(filteredGroupVals, sortOrder, orderedMetrics)
-        const groupedSections = shapeGroupedScalarBars(orderedMetrics, visibleGroupVals, activeLabelMap)
+      // Scalar ungrouped / grouped (#1406: the shared decision)
+      const vFigure = shapeScalarBarFigure(orderedMetrics, { colorMap, labelMap: activeLabelMap, hiddenGroupValues, sortOrder })
+      if (vFigure.kind === 'grouped') {
+        const visibleGroupVals = vFigure.groupValues
+        const groupedSections = vFigure.sections
         const nInfo = computeGroupedScalarChartN(groupedSections)
         const autoFootnote = showChartN && nInfo.hasVaryingN ? varyingFootnote : undefined
         return (
@@ -631,7 +619,7 @@ export default function AnalysisChartRenderer(props: AnalysisChartRendererProps)
           </>
         )
       }
-      const barData = shapeScalarBars(orderedMetrics, colorMap, activeLabelMap)
+      const barData = vFigure.bars
       const vBarNInfo = computeBarChartN(barData)
       const vBarAutoFootnote = showChartN && vBarNInfo.hasVaryingN ? varyingFootnote : undefined
       return (

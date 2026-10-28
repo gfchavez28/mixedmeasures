@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import type { DumbbellData, ChartFormatting, VariableNMode } from '@/lib/chart-data'
 import { DISPLAY_PRECISION, mergeFormatting, resolveGroupColors, resolveGroupTextColors, computeLogDomain, computeDumbbellAxis } from '@/lib/chart-data'
 import { ciLabel } from '@/lib/ci-label'
+import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
 import { placeDotLabels, visibleLabels } from '@/lib/dumbbell-labels'
 import { useChartColors } from '@/lib/theme-context'
 import { ChartFigure } from './ChartFigure'
@@ -122,7 +123,7 @@ export default function DumbbellChart({
     const values: number[] = []
     for (const row of rows) {
       for (const dot of row.dots) {
-        if (dot.value > 0) values.push(dot.value)
+        if (dot.value != null && dot.value > 0) values.push(dot.value)
       }
     }
     return computeLogDomain(values)
@@ -133,7 +134,7 @@ export default function DumbbellChart({
     let count = 0
     for (const row of rows) {
       for (const dot of row.dots) {
-        if (dot.value <= 0) count++
+        if (dot.value != null && dot.value <= 0) count++ // #1363: undefined is not "≤ 0"
       }
     }
     return count
@@ -142,7 +143,7 @@ export default function DumbbellChart({
   // Filter rows where ALL dots are non-positive in log mode
   const filteredRows = useMemo(() => {
     if (!isLog) return rows
-    return rows.filter(r => r.dots.some(d => d.value > 0))
+    return rows.filter(r => r.dots.some(d => d.value == null || d.value > 0))
   }, [isLog, rows])
 
   // #431: fit the axis to the means + typical CIs (forest-plot convention);
@@ -346,12 +347,17 @@ export default function DumbbellChart({
         {/* Rows */}
         {filteredRows.map((row, ri) => {
           const y = plotTop + ri * rowHeight + rowHeight / 2
-          const dotValues = row.dots.map(d => d.value)
+          // #1363: a group whose statistic is undefined draws NO dot (a dot at 0
+          // was a measured zero to every reader) and is named, with the reason,
+          // in the row's own text instead.
+          const drawn = row.dots.filter((d): d is typeof d & { value: number } => d.value != null)
+          const missing = row.dots.filter(d => d.value == null)
+          const dotValues = drawn.map(d => d.value)
           const minVal = Math.min(...dotValues)
           const maxVal = Math.max(...dotValues)
 
           // Compute jitter offsets for overlapping dots
-          const pixelXs = row.dots.map(d => xScale(d.value))
+          const pixelXs = drawn.map(d => xScale(d.value))
           const jitterStep = DOT_RADIUS + 4
           const jitterOffsets = computeJitterOffsets(pixelXs, DOT_RADIUS * 2, jitterStep)
           // Still used for the per-question `n`, which is a DOT-density question —
@@ -362,7 +368,7 @@ export default function DumbbellChart({
           // The renderer below reads these same placements, so the geometry it is
           // judged on and the geometry it draws cannot drift apart.
           const labelPlacements = placeDotLabels({
-            texts: row.dots.map(d => `${d.value.toFixed(DISPLAY_PRECISION)}${suffix}`),
+            texts: drawn.map(d => `${d.value.toFixed(DISPLAY_PRECISION)}${suffix}`),
             pixelXs,
             jitterOffsets,
             baseY: y,
@@ -386,7 +392,7 @@ export default function DumbbellChart({
               </text>
 
               {/* Connecting line — stays on row centerline */}
-              {row.dots.length > 1 && minVal !== maxVal && (
+              {drawn.length > 1 && minVal !== maxVal && (
                 <line
                   x1={xScale(minVal)}
                   y1={y}
@@ -397,8 +403,21 @@ export default function DumbbellChart({
                 />
               )}
 
+              {missing.length > 0 && (
+                <text
+                  data-undefined-statistic=""
+                  x={LEFT_MARGIN + 4}
+                  y={y - DOT_RADIUS - 6}
+                  fill={colors.textMuted}
+                  style={{ fontSize: fmt.dataLabelFontSize - 1 }}
+                >
+                  <title>{missing.map(d => `${d.groupValue}: ${undefinedTooltip(d.undefinedReason)}, n = ${d.n}`).join('; ')}</title>
+                  {missing.map(d => `${d.groupValue} ${NO_VALUE}`).join(' · ')}
+                </text>
+              )}
+
               {/* Dots */}
-              {row.dots.map((dot, di) => {
+              {drawn.map((dot, di) => {
                 const gi = groupValues.indexOf(dot.groupValue)
                 const color = groupColors[dot.groupValue]
                 const cx = xScale(dot.value)

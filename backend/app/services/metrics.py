@@ -8,13 +8,15 @@ import json
 import logging
 import math
 import statistics
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, field_validator
+from sqlalchemy import exists, func
 from sqlalchemy.orm import Session
 
 from ..models.dataset import Dataset, DatasetColumn, DatasetValue
@@ -1482,6 +1484,26 @@ def compute_domain_aggregate(
 
 MISSING_ITEM_THRESHOLD = 0.5  # record must have ≥50% valid items
 
+# ── Which items a record is scored against (#1313) ───────────────────────────
+# A record answers its OWN dataset's questionnaire, so it is scored when it
+# answered at least half of the group's items ITS OWN DATASET CARRIES — counted
+# from the group's member columns (metadata), never from the columns that happen
+# to hold a stored cell. Until #1313 the denominator was every column of the
+# group that held a cell, across every dataset: in a group over three datasets a
+# complete record answered a third of it and was never scored, and a column
+# nobody answered dropped out of the count.
+#
+# Written into every `dataset_domain` metric's `result_data` by `compute_metric`.
+# It is a REPAIR marker, not a stated basis: the client does not read it.
+# `repair_record_score_rule` below keys on its absence, so a result written by an
+# older build is found and its scores and saved tests are marked out of date.
+# ⚠️ A different rule takes a NEW value, and the repair gate then looks for it.
+RECORD_SCORE_RULE_KEY = "record_score_rule"
+RECORD_SCORE_RULE_OWN_DATASET_ITEMS = "own_dataset_items"
+
+# The metric types whose records `_compute_row_scores` scores over a group.
+ROW_SCORED_DOMAIN_TYPES = frozenset({"domain_aggregate", "mean", "proportion"})
+
 
 def _score_single_row(
     metric_type: str, row: ResolvedRow, config: dict,
@@ -1517,14 +1539,16 @@ def _score_domain_row(
     child_metric_type: str,
     child_config: dict,
     items: list[ResolvedRow],
-    total_columns: int,
+    own_item_count: int,
     missing_threshold: float = MISSING_ITEM_THRESHOLD,
 ) -> float | None:
-    """Compute a domain-level score for one record.
+    """One record's score over a group: the mean of its valid item scores, UNROUNDED.
 
-    items: list of ResolvedRow for this record across domain columns.
-    total_columns: total columns in domain (for threshold check).
-    Returns None if too many items are missing.
+    items: the record's cells in the group's columns.
+    own_item_count: how many of the group's items the record's OWN dataset
+    carries (#1313) — never the group's whole width, and never the number of
+    columns that hold a stored cell. Returns None when the record answered fewer
+    than half of them.
     """
     valid_scores: list[float] = []
     for row in items:
@@ -1532,10 +1556,104 @@ def _score_domain_row(
         if s is not None:
             valid_scores.append(s)
 
-    if total_columns == 0 or len(valid_scores) / total_columns < missing_threshold:
+    if own_item_count == 0 or len(valid_scores) / own_item_count < missing_threshold:
         return None
 
-    return round(statistics.mean(valid_scores), STATS_PRECISION)
+    return statistics.mean(valid_scores)
+
+
+def _metric_item_datasets(db: Session, metric_def) -> dict[int, int]:
+    """A variable-group metric's items → the dataset each belongs to.
+
+    The items are the group's member columns, narrowed by the metric's own
+    decompose list (`_apply_decompose_filter`, the filter `resolve_dataset_domain`
+    applies), read from METADATA — a member column nobody answered is still an
+    item its dataset asked (#1313, decision D2).
+    """
+    column_ids = _apply_decompose_filter(
+        metric_def, _domain_member_column_ids(db, metric_def.input_source_id),
+    )
+    if not column_ids:
+        return {}
+    return dict(
+        db.query(DatasetColumn.id, DatasetColumn.dataset_id)
+        .filter(DatasetColumn.id.in_(column_ids))
+        .all()
+    )
+
+
+def _record_scoring_rule(metric_def) -> tuple[str, dict]:
+    """How one cell of this metric is scored: `(child metric type, its config)`.
+
+    A Group Aggregate scores by its child; a pooled mean or proportion by itself.
+    A type with no per-record rule of its own (a frequency distribution, which a
+    saved t-test or ANOVA can still target) is scored as the mean of its items —
+    what the test resolver always did for every type.
+    """
+    config = _parse_json(metric_def.config) or {}
+    if metric_def.metric_type == "domain_aggregate":
+        return config.get("child_metric_type", "mean"), config.get("child_config", {})
+    if metric_def.metric_type in ("mean", "proportion"):
+        return metric_def.metric_type, config
+    return "mean", {}
+
+
+def domain_record_scores(
+    db: Session,
+    metric_def,
+    column_groups: dict[int, dict[str | None, list[ResolvedRow]]],
+) -> dict[int, float | None]:
+    """THE per-record score over a variable group (#1313): `{row_id: score}`, unrounded.
+
+    🔴 **A record is scored against the items ITS OWN DATASET carries.** It is
+    scored when it answered at least `MISSING_ITEM_THRESHOLD` of them, as the
+    mean of its valid item scores (`_record_scoring_rule`). Every reader of "who is
+    scored" calls this — both `_compute_row_scores` branches (which round on
+    write) and the saved t-test / ANOVA (`statistical_tests._resolve_grouped_values`)
+    — so the stored scores and the tests cannot disagree about the sample.
+
+    ``column_groups`` is `resolve_dataset_domain`'s answer for this same metric
+    (or a bucket-filtered copy of it). A record appears once per column however
+    many group buckets hold it.
+
+    ⚠️ Not "collapse equivalence groups first": on a partial crosswalk a dataset
+    carrying fewer than half of the group's items could never be scored, which is
+    #1313 again (measured, the 2026-10-22 pre-implementation review, D1). Neither
+    rule matches α's sample, which deletes listwise.
+    """
+    item_dataset = _metric_item_datasets(db, metric_def)
+    own_item_count = Counter(item_dataset.values())
+    child_metric_type, child_config = _record_scoring_rule(metric_def)
+
+    record_items: dict[int, list[ResolvedRow]] = {}
+    record_dataset: dict[int, int] = {}
+    for col_id, group_map in column_groups.items():
+        dataset_id = item_dataset.get(col_id)
+        if dataset_id is None:
+            # The resolver and this count read the same member list through the
+            # same decompose filter; a column outside it means one of them was
+            # handed a different metric. Refuse rather than score against a
+            # count that does not include the column being scored.
+            raise ValueError(
+                f"Column {col_id} is not one of metric {metric_def.id}'s items, "
+                "so its records cannot be scored against their dataset's items."
+            )
+        seen: set[int] = set()
+        for rows in group_map.values():
+            for row in rows:
+                if row.row_id in seen:
+                    continue
+                seen.add(row.row_id)
+                record_items.setdefault(row.row_id, []).append(row)
+                record_dataset[row.row_id] = dataset_id
+
+    return {
+        row_id: _score_domain_row(
+            child_metric_type, child_config, items,
+            own_item_count=own_item_count[record_dataset[row_id]],
+        )
+        for row_id, items in record_items.items()
+    }
 
 
 def _compute_row_scores(
@@ -1580,58 +1698,39 @@ def _compute_row_scores(
                 })
 
     elif metric_def.metric_type == "domain_aggregate" and column_groups is not None:
-        da_config = config
-        child_metric_type = da_config.get("child_metric_type", "mean")
-        child_config = da_config.get("child_config", {})
-        total_columns = len(column_groups)
-
-        # Pivot: row_id -> list of ResolvedRow across columns
-        # Use ungrouped data (None key) matching compute_domain_aggregate behavior
-        record_items: dict[int, list[ResolvedRow]] = {}
-        for col_id, group_map in column_groups.items():
-            rows = group_map.get(None, [])
-            for row in rows:
-                record_items.setdefault(row.row_id, []).append(row)
-
-        for row_id, items in record_items.items():
-            s = _score_domain_row(
-                child_metric_type, child_config, items, total_columns,
-            )
-            score_dicts.append({
-                "metric_definition_id": metric_def.id,
-                "dataset_row_id": row_id,
-                "score": s,
-                "computed_at": now,
-            })
+        # The ungrouped data (None key), matching compute_domain_aggregate.
+        ungrouped = {
+            col_id: {None: group_map.get(None, [])}
+            for col_id, group_map in column_groups.items()
+        }
+        score_dicts.extend(_row_score_dicts(
+            metric_def, domain_record_scores(db, metric_def, ungrouped), now,
+        ))
 
     elif metric_def.metric_type in ("mean", "proportion") and column_groups is not None:
-        # Non-aggregate domain metrics (pooled): average each record's
-        # scores across all columns in the domain.
-        total_columns = len(column_groups)
-        record_items: dict[int, list[ResolvedRow]] = {}
-        for col_id, group_map in column_groups.items():
-            # Collect one row per record per column (deduplicate within
-            # column since a record may appear in multiple group buckets)
-            seen_in_col: set[int] = set()
-            for rows in group_map.values():
-                for row in rows:
-                    if row.row_id not in seen_in_col:
-                        seen_in_col.add(row.row_id)
-                        record_items.setdefault(row.row_id, []).append(row)
-
-        for row_id, items in record_items.items():
-            s = _score_domain_row(
-                metric_def.metric_type, config, items, total_columns,
-            )
-            score_dicts.append({
-                "metric_definition_id": metric_def.id,
-                "dataset_row_id": row_id,
-                "score": s,
-                "computed_at": now,
-            })
+        # Non-aggregate domain metrics (pooled): each record's scores across the
+        # group's columns, from every group bucket it sits in.
+        score_dicts.extend(_row_score_dicts(
+            metric_def, domain_record_scores(db, metric_def, column_groups), now,
+        ))
 
     if score_dicts:
         db.execute(RowScore.__table__.insert(), score_dicts)
+
+
+def _row_score_dicts(
+    metric_def: MetricDefinition, scores: dict[int, float | None], now: datetime,
+) -> list[dict]:
+    """`RowScore` insert rows for a group's record scores, rounded on write."""
+    return [
+        {
+            "metric_definition_id": metric_def.id,
+            "dataset_row_id": row_id,
+            "score": None if s is None else round(s, STATS_PRECISION),
+            "computed_at": now,
+        }
+        for row_id, s in scores.items()
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1697,6 +1796,7 @@ def compute_metric(
 
         if metric_def.metric_type == "domain_aggregate":
             result_data, valid_n, total_n = compute_domain_aggregate(column_groups, config)
+            result_data[RECORD_SCORE_RULE_KEY] = RECORD_SCORE_RULE_OWN_DATASET_ITEMS
             result = ComputedResult(
                 metric_definition_id=metric_def.id,
                 group_value=None,
@@ -1744,6 +1844,9 @@ def compute_metric(
                 else:
                     continue
 
+                # #1313: every variable-group metric, frequency included — a
+                # saved t-test or ANOVA scores its records by the same rule.
+                result_data[RECORD_SCORE_RULE_KEY] = RECORD_SCORE_RULE_OWN_DATASET_ITEMS
                 result = ComputedResult(
                     metric_definition_id=metric_def.id,
                     group_value=group_value,
@@ -1833,6 +1936,161 @@ def compute_all_for_project(
 
     db.commit()
     return {"computed": computed, "errors": errors}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Repair — results written before the own-dataset rule (#1313)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# The marker exactly as `compute_metric` serialises it into `result_data`.
+_RECORD_SCORE_RULE_STAMP = json.dumps(
+    {RECORD_SCORE_RULE_KEY: RECORD_SCORE_RULE_OWN_DATASET_ITEMS},
+)[1:-1]
+
+
+def metrics_lacking_record_score_rule(db: Session) -> list[int]:
+    """THE gate of the #1313 repair — ONE query.
+
+    Every current (not stale) variable-group metric with a stored result that
+    carries no `record_score_rule` marker: a result an older build wrote. A
+    settled install pays this query and nothing else, because every result this
+    build writes carries the marker, and the repair either marks a metric stale
+    (it drops out until it is recomputed, which writes the marker) or stamps it.
+    A stale metric is left alone: recomputing it writes the marker, and
+    `compute_metric` marks its tests then (#1039 a).
+    """
+    rows = (
+        db.query(MetricDefinition.id)
+        .join(ComputedResult, ComputedResult.metric_definition_id == MetricDefinition.id)
+        .filter(
+            MetricDefinition.input_source_type == "dataset_domain",
+            MetricDefinition.stale == False,  # noqa: E712
+            func.instr(ComputedResult.result_data, _RECORD_SCORE_RULE_STAMP) == 0,
+        )
+        .distinct()
+        .all()
+    )
+    return sorted(metric_id for (metric_id,) in rows)
+
+
+@dataclass
+class RecordScoreRuleRepair:
+    """What `repair_record_score_rule` did, by metric id."""
+    # Their per-record scores move: marked stale, with their saved tests.
+    marked_stale: list[int] = field(default_factory=list)
+    # Their scores cannot move but a saved test's sample can: tests marked, stamped.
+    tests_marked_for: list[int] = field(default_factory=list)
+    # Nothing they produce can move: stamped, so the gate goes quiet.
+    stamped: list[int] = field(default_factory=list)
+    tests_marked: int = 0
+
+
+def repair_record_score_rule(db: Session, metric_ids) -> RecordScoreRuleRepair:
+    """Mark out of date what the own-dataset rule moves, for results an older build wrote.
+
+    🔴 **Quick compute serves a metric's stored result whenever it is not stale**,
+    and nothing marked these: a record score from before #1313 sits in the Data
+    view, the correlations, the matrix and the R export (whose #958 note fires
+    only when a column has NO scores), and a saved t-test or ANOVA keeps its
+    sample. Per metric, from its group's metadata:
+
+    - **Its record scores move** (a `ROW_SCORED_DOMAIN_TYPES` metric) when its
+      items span two or more datasets (the old count was the group's whole
+      width), or one item column holds no stored cell (the old count skipped it;
+      decision D2). Marked stale, with its tests.
+    - **Only a saved test's sample moves** when the old test resolver saw a
+      different item set or rule: the whole group although the metric is
+      decomposed (it never read `decompose_column_ids`), or a plain mean although
+      the metric scores proportions — or the count changed, for a frequency
+      metric (no record scores of its own). Its tests are marked; the metric is
+      stamped, because its own numbers are what this build would write.
+    - **Nothing moves** otherwise (one dataset, every item answered by someone, a
+      mean). Stamped.
+
+    A result whose JSON cannot be read is marked stale: recomputing rewrites it.
+    Marks only; recomputes nothing (startup must stay a few queries).
+    """
+    from .staleness import mark_metric_tests_stale
+
+    report = RecordScoreRuleRepair()
+    ids = sorted({int(i) for i in metric_ids})
+    if not ids:
+        return report
+
+    metrics = db.query(MetricDefinition).filter(MetricDefinition.id.in_(ids)).all()
+    domain_ids = sorted({m.input_source_id for m in metrics})
+    members: dict[int, list[int]] = defaultdict(list)
+    for domain_id, member_id in (
+        db.query(AnalysisDomainMember.domain_id, AnalysisDomainMember.member_id)
+        .filter(
+            AnalysisDomainMember.domain_id.in_(domain_ids),
+            AnalysisDomainMember.member_type == "column",
+        )
+        .all()
+    ):
+        members[domain_id].append(member_id)
+    member_ids = sorted({c for cols in members.values() for c in cols})
+    column_dataset = dict(
+        db.query(DatasetColumn.id, DatasetColumn.dataset_id)
+        .filter(DatasetColumn.id.in_(member_ids))
+        .all()
+    ) if member_ids else {}
+    # Member columns holding no stored cell — an index seek per column, not a scan.
+    unanswered = {
+        cid for (cid,) in
+        db.query(DatasetColumn.id)
+        .filter(
+            DatasetColumn.id.in_(member_ids),
+            ~exists().where(DatasetValue.column_id == DatasetColumn.id),
+        )
+        .all()
+    } if member_ids else set()
+
+    results_by_metric: dict[int, list[ComputedResult]] = defaultdict(list)
+    for result in (
+        db.query(ComputedResult)
+        .filter(ComputedResult.metric_definition_id.in_(ids))
+        .all()
+    ):
+        results_by_metric[result.metric_definition_id].append(result)
+
+    for metric in metrics:
+        group_columns = sorted(
+            c for c in set(members.get(metric.input_source_id, [])) if c in column_dataset
+        )
+        items = _apply_decompose_filter(metric, group_columns)
+        count_moves = (
+            len({column_dataset[c] for c in items}) >= 2
+            or any(c in unanswered for c in items)
+        )
+        child_metric_type, _ = _record_scoring_rule(metric)
+        test_sample_moves = (
+            count_moves
+            or len(items) != len(group_columns)
+            or child_metric_type != "mean"
+        )
+        parsed = [(r, _parse_json(r.result_data)) for r in results_by_metric[metric.id]]
+        unreadable = any(not isinstance(data, dict) for _r, data in parsed)
+
+        if unreadable or (count_moves and metric.metric_type in ROW_SCORED_DOMAIN_TYPES):
+            metric.stale = True
+            report.marked_stale.append(metric.id)
+            continue
+        if test_sample_moves:
+            report.tests_marked_for.append(metric.id)
+        else:
+            report.stamped.append(metric.id)
+        for result, data in parsed:
+            if data.get(RECORD_SCORE_RULE_KEY) != RECORD_SCORE_RULE_OWN_DATASET_ITEMS:
+                data[RECORD_SCORE_RULE_KEY] = RECORD_SCORE_RULE_OWN_DATASET_ITEMS
+                result.result_data = json.dumps(data)
+
+    db.flush()
+    report.tests_marked = mark_metric_tests_stale(
+        db, report.marked_stale + report.tests_marked_for,
+    )
+    db.flush()
+    return report
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

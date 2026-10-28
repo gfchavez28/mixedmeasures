@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, waitFor, cleanup, act } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 
 const listCoders = vi.fn()
@@ -16,7 +16,7 @@ vi.mock('@/lib/api', () => ({
   authApi: { listCoders: (...a: unknown[]) => listCoders(...a) },
 }))
 
-import { useCoders, resetCoderRoster, CODERS_QUERY_KEY } from './useCoders'
+import { useCoders, resetCoderRoster, CODERS_QUERY_KEY, ALL_CODERS_QUERY_KEY } from './useCoders'
 
 const ME = { id: 1, username: 'Me', display_color: null, archived: false }
 const PRIYA = { id: 2, username: 'Priya', display_color: null, archived: false }
@@ -65,6 +65,26 @@ describe('resetCoderRoster — after something may have added coders', () => {
 
     answer([ME, PRIYA])
     await waitFor(() => expect(result.current.multiCoder).toBe(true))
+  })
+
+  it('resets ONLY the active roster: the archive-inclusive list keeps its answer while it refetches (group C item 11)', async () => {
+    // Nothing private reads ['coders','all']; reset, it blanked Settings' roster
+    // manager — the list holding the Unarchive button that was just pressed.
+    const ALL = [ME, PRIYA, { ...PRIYA, id: 3, username: 'Ola', archived: true }]
+    listCoders.mockImplementation(async (includeArchived?: boolean) => (includeArchived ? ALL : [ME]))
+    const { result, qc } = setup()
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+    const all = renderHook(() => useQuery({ queryKey: ALL_CODERS_QUERY_KEY, queryFn: () => listCoders(true) }), {
+      wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>,
+    })
+    await waitFor(() => expect(all.result.current.data).toEqual(ALL))
+
+    listCoders.mockImplementation(() => new Promise(() => {}))
+    act(() => { void resetCoderRoster(qc) })
+    await waitFor(() => expect(result.current.status).toBe('loading'))
+    expect(qc.getQueryData(CODERS_QUERY_KEY)).toBeUndefined()
+    expect(qc.getQueryData(ALL_CODERS_QUERY_KEY)).toEqual(ALL)
+    expect(qc.getQueryState(ALL_CODERS_QUERY_KEY)?.isInvalidated).toBe(true)
   })
 
   it('counterfactual: an INVALIDATE keeps serving the one-coder roster as an answer while it refetches', async () => {

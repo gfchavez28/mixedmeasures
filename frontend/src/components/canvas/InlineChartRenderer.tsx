@@ -15,8 +15,9 @@ import { metricsApi, codeAnalysisApi, comparisonsApi } from '@/lib/api'
 import type { MetricDefinitionResponse, AnalysisCrossTabResponse } from '@/lib/api'
 import {
   detectChartType,
-  shapeScalarBars,
-  shapeFrequencyBars,
+  shapeScalarBarFigure,
+  shapeFrequencyBarFigure,
+  computeGroupedScalarChartN,
   shapeHeatmapRows,
   shapeStackedBars,
   shapeLineChart,
@@ -36,6 +37,7 @@ import {
   shapeSummaryStats,
 } from '@/lib/chart-data'
 import HorizontalBarChart from '@/components/charts/HorizontalBarChart'
+import GroupedScalarBarChart from '@/components/charts/GroupedScalarBarChart'
 import HeatmapTable from '@/components/charts/HeatmapTable'
 import FrequencyBarChart from '@/components/charts/FrequencyBarChart'
 import StackedHorizontalBarChart from '@/components/charts/StackedHorizontalBarChart'
@@ -54,10 +56,9 @@ import {
   qualChartKind,
   qualChartHasEnoughToFetch,
   extractComparisonParams,
-  isComparisonMaterialConfig,
-  isCorrelationMaterialConfig,
-  isCrossTabMaterialConfig,
+  quantChartKind,
   extractCrossTabParams,
+  extractGroupDisplayOptions,
 } from './inline-chart-params'
 import ComparisonChartRouter from './ComparisonChartRouter'
 import {
@@ -136,11 +137,17 @@ export default function InlineChartRenderer({
   // stable across a config change.
   const isQual = useMemo(() => isQualitativeMaterialConfig(content), [content])
 
-  // #817 — a QUANTITATIVE group comparison. Detected before the metric branch
-  // because its config carries `column_ids` too, so `hasSelection` would be
-  // true and it would compute a metric on the comparison's own variables — a
-  // plausible wrong figure under the right title, which is exactly what shipped.
-  const isComparisonMaterial = useMemo(() => !isQual && isComparisonMaterialConfig(content), [isQual, content])
+  // 🔴 #1315 — ONE dispatch, shared with the export (`fetchChartTables`). Two
+  // hand-ordered predicate chains disagreed: this file asked "comparison?"
+  // first and the export "correlation?" first, so a comparison carrying
+  // `show_scatter` drew here and exported as "Chart data not available".
+  const quantKind = useMemo(() => (isQual ? null : quantChartKind(content)), [isQual, content])
+
+  // #817 — a QUANTITATIVE group comparison. Its own branch because its config
+  // carries `column_ids` too, so `hasSelection` would be true and it would
+  // compute a metric on the comparison's own variables — a plausible wrong
+  // figure under the right title, which is exactly what shipped.
+  const isComparisonMaterial = quantKind === 'comparison'
 
   // #831 — a CORRELATION or SCATTER matrix. Detected for the same reason the
   // comparison is (its config carries `column_ids`, so the metric branch would
@@ -148,10 +155,7 @@ export default function InlineChartRenderer({
   // handled differently: there is no inline correlation renderer, so this
   // branch REFUSES rather than draws. A visible limit beats a silent wrong
   // figure — the whole lesson of #817.
-  const isCorrelationMaterial = useMemo(
-    () => !isQual && !isComparisonMaterial && isCorrelationMaterialConfig(content),
-    [isQual, isComparisonMaterial, content],
-  )
+  const isCorrelationMaterial = quantKind === 'correlation'
   const comparisonParams = useMemo(() => extractComparisonParams(content), [content])
 
   const params = useMemo(() => extractComputeParams(content), [content])
@@ -183,9 +187,7 @@ export default function InlineChartRenderer({
   } = useQuery({
     queryKey: ['canvas-cross-tab', projectId, materialId, crossTabParams.request],
     queryFn: () => metricsApi.crossTabulation(projectId, crossTabParams.request!),
-    enabled: !isQual && !isComparisonMaterial && !isCorrelationMaterial
-      && isCrossTabMaterialConfig(content)
-      && crossTabParams.request != null,
+    enabled: quantKind === 'cross_tab' && crossTabParams.request != null,
     staleTime: 5 * 60 * 1000,
   })
 
@@ -557,6 +559,8 @@ function ChartRouter({
     hiddenLabels: hiddenResponseOptions.length > 0 ? hiddenResponseOptions : undefined,
     reverseScale: reverseScale || undefined,
   }
+  // #1406 — the groups this embed shows; the export reads the same function.
+  const groupOpts = extractGroupDisplayOptions(content)
 
   switch (chartType) {
     case 'horizontal_bar': {
@@ -573,11 +577,26 @@ function ChartRouter({
           />
         )
       }
-      const barData = shapeScalarBars(metrics)
-      const nInfo = computeBarChartN(barData)
+      // 🔴 #1406 — the SAME decision the Analysis view asks. `shapeScalarBars`
+      // alone read `results[0]`, which on a grouped payload is the
+      // missing-group bucket, drawn under the variable's name.
+      const figure = shapeScalarBarFigure(metrics, groupOpts)
+      if (figure.kind === 'grouped') {
+        const nInfo = computeGroupedScalarChartN(figure.sections)
+        return (
+          <GroupedScalarBarChart
+            sections={figure.sections}
+            groupValues={figure.groupValues}
+            chartN={nInfo.chartN}
+            formatting={formatting}
+            metricType={metricType}
+          />
+        )
+      }
+      const nInfo = computeBarChartN(figure.bars)
       return (
         <HorizontalBarChart
-          data={barData}
+          data={figure.bars}
           formatting={formatting}
           metricType={metricType}
           chartN={nInfo.chartN}
@@ -602,21 +621,42 @@ function ChartRouter({
 
     case 'vertical_bar': {
       if (metricType === 'frequency_distribution' && metrics.length > 0) {
-        const freqBars = shapeFrequencyBars(metrics[0], shapeOpts)
+        const freq = shapeFrequencyBarFigure(metrics, { ...shapeOpts, ...groupOpts })
         const nInfo = computeFreqBarChartN(metrics)
+        if (freq.kind === 'grouped') {
+          return (
+            <VerticalBarChart
+              groupedFrequencyData={freq.section}
+              groupValues={freq.groupValues}
+              display={display}
+              formatting={formatting}
+              chartN={nInfo.chartN}
+            />
+          )
+        }
         return (
           <VerticalBarChart
-            frequencyData={freqBars}
+            frequencyData={freq.bars}
             display={display}
             formatting={formatting}
             chartN={nInfo.chartN}
           />
         )
       }
-      const barData = shapeScalarBars(metrics)
+      const figure = shapeScalarBarFigure(metrics, groupOpts)
+      if (figure.kind === 'grouped') {
+        return (
+          <VerticalBarChart
+            groupedScalarData={figure.sections}
+            groupValues={figure.groupValues}
+            formatting={formatting}
+            metricType={metricType}
+          />
+        )
+      }
       return (
         <VerticalBarChart
-          scalarData={barData}
+          scalarData={figure.bars}
           formatting={formatting}
           metricType={metricType}
         />
@@ -699,7 +739,7 @@ function ChartRouter({
     case 'table':
       return (
         <SummaryStatsTable
-          data={shapeSummaryStats(metrics, undefined, metricType)}
+          data={shapeSummaryStats(metrics, undefined, metricType, groupOpts)}
           showCI={content.showCI === true}
           formatting={formatting}
           metricType={metricType}

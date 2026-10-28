@@ -13,6 +13,7 @@ from ..auth import get_current_user
 from .auth import limiter
 from .helpers import (
     parse_int_list, _get_observation_or_404, _get_project_or_404, sanitize_csv_filename,
+    _fmt_stat,
 )
 from .export_helpers import csv_safe
 from ..services.coding_layers import LAYER_SCOPE_PATTERN
@@ -869,7 +870,9 @@ async def demographic_comparison_csv(
         for g in groups:
             stats = entry["by_group"].get(g, {})
             row.append(stats.get("count", 0))
-            row.append(f"{stats.get('proportion', 0):.4f}")
+            # #1421: a group with no segments has no proportion — BLANK, the
+            # export convention (`_fmt_stat`); a bare `:.4f` on None is a 500.
+            row.append(_fmt_stat(stats.get("proportion"), 4))
         if len(groups) == 2:
             row.append(f"{entry.get('delta_proportion', 0):.4f}" if entry.get("delta_proportion") is not None else "")
         test = entry.get("test")

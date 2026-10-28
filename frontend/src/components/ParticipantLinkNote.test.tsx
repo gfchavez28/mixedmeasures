@@ -42,4 +42,16 @@ describe('ParticipantLinkNote — the Dataset Import’s note, now Append’s to
     show(report(), undefined)   // the count never answered: the unsafe direction is silence (#963)
     expect(screen.getByText(/None of these IDs matched/)).toBeInTheDocument()
   })
+
+  it('#1190: a withdrawn person’s ID gets its own sentence — never "link them by hand"', () => {
+    show(report({ linked: 1, created: 1, skipped_withdrawn: 2 }), false)
+    expect(screen.getByText(/withdrew from this project/)).toHaveTextContent(
+      '2 records carry the ID of a participant who withdrew from this project, so they were '
+      + 'not linked and no participant was created.')
+    // Not folded into the "link them by hand" list.
+    expect(screen.queryByText(/^Not linked:/)).toBeNull()
+    cleanup()
+    show(report({ skipped_withdrawn: 0 }), false)   // POSITIVE CONTROL: none, no sentence
+    expect(screen.queryByText(/withdrew/)).toBeNull()
+  })
 })

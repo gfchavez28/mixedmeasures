@@ -31,7 +31,7 @@ Coverage (every statistical output the export can emit):
   - Spearman correlation (r)          exact
   - Chi-square (X^2, df)              exact
   - Cramer's V                        exact
-  - Kruskal-Wallis (H, df)            exact (epsilon^2 effect size diverges — unit-anchored, not here)
+  - Kruskal-Wallis (H, df)            exact (the script emits no epsilon^2 — #1187; unit-anchored)
   - Mann-Whitney U (W, p)             exact (2-group non-param; wilcox.test defaults == scipy.stats.mannwhitneyu)
   - Cronbach's alpha                  exact on COMPLETE data (listwise == pairwise == psych::alpha)
   - Split-half r + Spearman-Brown     exact (both use odd-even split)
@@ -42,8 +42,9 @@ Coverage (every statistical output the export can emit):
 The export branches the non-parametric path by effective group count (N/A-aware,
 matching the tool): 2 groups -> `wilcox.test` (Mann-Whitney), 3+ -> `kruskal.test`.
 Both branches are exercised here (mpg by am = 2 groups, mpg by cyl = 3 groups).
-KW epsilon-squared effect size and the MCAR test diverge from R by design and are
-unit-anchored, not asserted equal here.
+The script computes no KW epsilon-squared yet (#1187 — it is Tomczak & Tomczak's
+H/(n-1) since #1327, unit-anchored in test_comparisons.py against the rank eta^2),
+and the MCAR test diverges from R by design; neither is asserted equal here.
 
 Gated on Rscript like the runnable test; skips cleanly when R is absent.
 """

@@ -37,7 +37,7 @@ import ByRecordPanel from '@/components/ByRecordPanel'
 import { useCoders, useMachineCoderIds } from '@/hooks/useCoders'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { isSegmentCodedVisible, isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
-import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { invalidateAfterRating, invalidateDerivedCounts } from '@/lib/coding-cache'
 import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
 import {
   captureApply, planApplyUndo, replacedFromBulk, replacedFromSingle, runApplyUndo,
@@ -583,6 +583,7 @@ export default function TextCodingView() {
       try {
         await textCodingApi.setMagnitude(projectId, { dataset_value_id: valueId, code_id: codeId, magnitude: value })
         queryClient.invalidateQueries({ queryKey: ['text-data', projectId] })
+        invalidateAfterRating(queryClient, projectId)   // #1425: α, the grid, the queue — elsewhere
       } catch (e) {
         for (const [key, data] of snapshots) queryClient.setQueryData(key, data)
         throw e  // `useHistory` toasts the server's own reason (a refused rating names why)

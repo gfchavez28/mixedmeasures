@@ -183,3 +183,31 @@ def excerpt_source_pair(excerpt) -> tuple[str, str]:
         return "text", name
     # ck_excerpt_exactly_one_target forbids reaching here.
     return "", ""  # pragma: no cover - defensive
+
+
+# ── Text resolution (#1316) ──────────────────────────────────────────────────
+
+def excerpt_text_from(
+    segment_text: str | None,
+    start_offset: int | None,
+    end_offset: int | None,
+    value_text: str | None,
+) -> str:
+    """The text an excerpt quotes, from its parts — THE place that is decided.
+
+    A char-range quote is the code-point slice of its segment's text (#687: Python
+    `str` slicing is by code point). A whole-segment quote and a clip quote are the
+    segment's text — for a clip that is its LABEL, since a time excerpt's identity
+    is its range. A comment quote is the dataset value's text.
+
+    It takes the parts, not the row, so a reader holding the ORM object
+    (`routers/excerpts.py::_excerpt_to_response`) and a reader that selects columns
+    (the canvas inbox's one grouped query, `routers/canvas.py`) agree by
+    construction. #1316: the inbox had queried a column that does not exist,
+    `Excerpt.excerpt_text`, and every canvas holding a quote in its inbox 500'd.
+    """
+    if segment_text is not None:
+        if start_offset is not None and end_offset is not None:
+            return segment_text[start_offset:end_offset]
+        return segment_text
+    return value_text or ""

@@ -9,12 +9,16 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts'
-import type { TooltipContentProps } from 'recharts'
+import type { TooltipContentProps, BarRectangleItem } from 'recharts'
 import { useChartColors } from '@/lib/theme-context'
 import { resolveGroupColors } from '@/lib/chart-data'
+import { NO_VALUE } from '@/lib/stat-format'
+import { comparisonBarRows, undefinedComparisonGroups } from '@/lib/qual-comparison'
+import { QualComparisonUndefinedNote } from './QualComparisonUndefinedNote'
 import type { DemographicComparisonResponse } from '@/lib/api'
 import type { ChartDataRow } from '@/lib/chart-types'
 import { ChartFigure } from '@/components/charts/ChartFigure'
+import { barClickRow } from '@/components/charts/bar-row-label'
 
 interface QualComparisonBarProps {
   data: DemographicComparisonResponse
@@ -22,13 +26,15 @@ interface QualComparisonBarProps {
   onCodeClick?: (codeId: number) => void
 }
 
-function ComparisonTooltip({ active, payload, label }: Partial<TooltipContentProps<number, string>>) {
+export function ComparisonTooltip({ active, payload, label }: Partial<TooltipContentProps<number, string>>) {
   if (!active || !payload?.length) return null
   return (
     <div className="bg-mm-surface border rounded shadow-xs px-3 py-2 text-xs max-w-xs">
       <div className="font-medium mb-1 text-mm-text">{label}</div>
       {payload.map((entry) => {
-        const propVal = entry?.payload?.[`_prop_${entry.name}`] as number | undefined
+        // #1421: null when the group has no share — `(—)`, never "(0.0%)"; the
+        // note under the chart names the group and the reason.
+        const propVal = entry?.payload?.[`_prop_${entry.name}`] as number | null | undefined
         return (
           <div key={entry.name} className="flex items-center gap-1.5">
             <span
@@ -38,11 +44,9 @@ function ComparisonTooltip({ active, payload, label }: Partial<TooltipContentPro
             <span className="text-mm-text-secondary">{entry.name}:</span>
             <span className="font-medium">
               {entry.value}
-              {propVal != null && (
-                <span className="text-mm-text-faint ml-1">
-                  ({(propVal * 100).toFixed(1)}%)
-                </span>
-              )}
+              <span className="text-mm-text-faint ml-1">
+                ({propVal != null ? `${(propVal * 100).toFixed(1)}%` : NO_VALUE})
+              </span>
             </span>
           </div>
         )
@@ -61,23 +65,8 @@ export default function QualComparisonBar({
 
   const groupColors = useMemo(() => resolveGroupColors(groups, colorPalette), [groups, colorPalette])
 
-  const chartData = useMemo(() => {
-    return entries.map(entry => {
-      const row: ChartDataRow = {
-        label: entry.code_name.length > 28
-          ? entry.code_name.slice(0, 25) + '\u2026'
-          : entry.code_name,
-        _fullLabel: entry.code_name,
-        _codeId: entry.code_id,
-      }
-      for (const g of groups) {
-        const stats = entry.by_group[g]
-        row[g] = stats?.count ?? 0
-        row[`_prop_${g}`] = stats?.proportion ?? 0
-      }
-      return row
-    })
-  }, [entries, groups])
+  const chartData = useMemo(() => comparisonBarRows(entries, groups), [entries, groups])
+  const undefinedGroups = useMemo(() => undefinedComparisonGroups(data), [data])
 
   const yAxisWidth = useMemo(() => {
     if (chartData.length === 0) return 120
@@ -149,15 +138,17 @@ export default function QualComparisonBar({
               fill={groupColors[g]}
               barSize={16}
               cursor={onCodeClick ? 'pointer' : undefined}
-              onClick={(_data: unknown, index: number) => {
-                if (onCodeClick && chartData[index]) {
-                  onCodeClick(chartData[index]._codeId as number)
-                }
+              onClick={(clicked: BarRectangleItem) => {
+                // #1314: the clicked bar's own row — never `chartData[index]`, which recharts
+                // numbers past a group's unused code (bar-row-label.ts).
+                const codeId = barClickRow<ChartDataRow>(clicked)?._codeId as number | undefined
+                if (onCodeClick && codeId != null) onCodeClick(codeId)
               }}
             />
           ))}
         </BarChart>
       </ResponsiveContainer>
+      <QualComparisonUndefinedNote groups={undefinedGroups} />
     </ChartFigure>
   )
 }

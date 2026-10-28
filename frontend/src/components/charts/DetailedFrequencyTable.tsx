@@ -9,6 +9,12 @@ import {
 } from '@/lib/chart-data'
 import type { MetricDefinitionResponse } from '@/lib/api'
 import type { ChartFormatting, SortOrder } from '@/lib/chart-data'
+import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
+
+/** #1412 — a percentage of nothing is `—`, never `0.0%`; a real 0 prints `0.0%`. */
+function pct(v: number | null): string {
+  return v == null ? NO_VALUE : `${v.toFixed(1)}%`
+}
 
 interface DetailedFrequencyTableProps {
   metrics: MetricDefinitionResponse[]
@@ -29,6 +35,8 @@ function MetricTable({
   formatting: ReturnType<typeof mergeFormatting>
   showCumulative: boolean
 }) {
+  // #1412: no valid answer remains — every "Valid %" is 0/0.
+  const noValid = metric.totalValid <= 0
   return (
     <table
       className="w-full border-collapse text-sm"
@@ -36,6 +44,14 @@ function MetricTable({
     >
       <caption className="text-left font-medium text-mm-text pb-1.5" style={{ fontSize: formatting.labelFontSize }}>
         {metric.fullLabel || metric.label}
+        {noValid && (
+          <>
+            {' '}
+            <span data-undefined-statistic="" className="block text-xs font-normal text-mm-text-muted">
+              {`Valid %: ${NO_VALUE} ${undefinedTooltip(metric.undefinedReason)}`}
+            </span>
+          </>
+        )}
       </caption>
       <thead>
         <tr className="border-b-2 border-mm-border-medium">
@@ -56,12 +72,12 @@ function MetricTable({
           <tr key={i} className="border-b border-mm-border-subtle hover:bg-mm-surface-hover">
             <th scope="row" className="text-left py-1 px-2 font-normal text-mm-text">{row.label}</th>
             <td className="text-right py-1 px-2 tabular-nums">{row.count}</td>
-            <td className="text-right py-1 px-2 tabular-nums">{row.percent.toFixed(1)}%</td>
-            <td className="text-right py-1 px-2 tabular-nums">{row.validPercent.toFixed(1)}%</td>
+            <td className="text-right py-1 px-2 tabular-nums">{pct(row.percent)}</td>
+            <td className="text-right py-1 px-2 tabular-nums">{pct(row.validPercent)}</td>
             {showCumulative && (
               <>
                 <td className="text-right py-1 px-2 tabular-nums">{row.cumulativeCount}</td>
-                <td className="text-right py-1 px-2 tabular-nums">{row.cumulativeValidPercent.toFixed(1)}%</td>
+                <td className="text-right py-1 px-2 tabular-nums">{pct(row.cumulativeValidPercent)}</td>
               </>
             )}
           </tr>
@@ -72,13 +88,13 @@ function MetricTable({
           <th scope="row" className="text-left py-1 px-2 text-mm-text-secondary">Total (valid)</th>
           <td className="text-right py-1 px-2 tabular-nums">{metric.totalValid}</td>
           <td className="text-right py-1 px-2 tabular-nums">
-            {metric.totalAll > 0 ? ((metric.totalValid / metric.totalAll) * 100).toFixed(1) : '100.0'}%
+            {metric.totalAll > 0 ? pct((metric.totalValid / metric.totalAll) * 100) : NO_VALUE}
           </td>
-          <td className="text-right py-1 px-2 tabular-nums">100.0%</td>
+          <td className="text-right py-1 px-2 tabular-nums">{noValid ? NO_VALUE : '100.0%'}</td>
           {showCumulative && (
             <>
               <td className="text-right py-1 px-2 tabular-nums">{metric.totalValid}</td>
-              <td className="text-right py-1 px-2 tabular-nums">100.0%</td>
+              <td className="text-right py-1 px-2 tabular-nums">{noValid ? NO_VALUE : '100.0%'}</td>
             </>
           )}
         </tr>

@@ -12,12 +12,13 @@ import {
   ErrorBar,
   ReferenceLine,
 } from 'recharts'
-import type { LabelProps } from 'recharts'
-import { DISPLAY_PRECISION, mergeFormatting, computeYAxisWidth, wrapLabel, resolveColorPalette, computeLogDomain } from '@/lib/chart-data'
+import { DISPLAY_PRECISION, mergeFormatting, computeYAxisWidth, wrapLabel, resolveColorPalette, computeLogDomain, formatScalar } from '@/lib/chart-data'
 import { ciLabel, ciCaveat } from '@/lib/ci-label'
+import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
 import { useChartColors } from '@/lib/theme-context'
 import type { BarDatum, ChartFormatting, VariableNMode, SortOrder } from '@/lib/chart-data'
 import { ChartFigure } from './ChartFigure'
+import { barRowLabel } from './bar-row-label'
 
 interface HorizontalBarChartProps {
   data: BarDatum[]
@@ -40,9 +41,11 @@ function CustomTooltip({ active, payload, isLog }: { active?: boolean; payload?:
   return (
     <div className="bg-mm-surface border rounded shadow-xs px-3 py-2 text-xs">
       <div className="font-medium mb-1 text-mm-text">{d.label}</div>
+      {/* #1363: an undefined statistic says so, in the server's words when it sent them. */}
+      {d.value == null && <div className="text-mm-text-muted">{NO_VALUE} {undefinedTooltip(d.undefinedReason)}</div>}
       {d.percentage != null && <div>Percentage: {d.percentage.toFixed(DISPLAY_PRECISION)}%</div>}
       {d.count != null && <div>Count: {d.count}</div>}
-      {isLog && d.value > 0 && (
+      {isLog && d.value != null && d.value > 0 && (
         <div className="text-mm-text-muted">log₁₀ = {Math.log10(d.value).toFixed(2)}</div>
       )}
       {d._ciLower != null && d._ciUpper != null && (
@@ -75,26 +78,28 @@ export default function HorizontalBarChart({
   const sorted = useMemo(() => {
     // Variable ordering is handled upstream by orderedMetrics; just add CI error range
     return data.map(d => {
-      const hasCI = showCI && d.ciLower != null && d.ciUpper != null
+      const hasCI = showCI && d.value != null && d.ciLower != null && d.ciUpper != null
       return {
         ...d,
         _ciLower: d.ciLower,
         _ciUpper: d.ciUpper,
-        errorRange: hasCI ? [d.value - d.ciLower!, d.ciUpper! - d.value] : undefined,
+        errorRange: hasCI ? [d.value! - d.ciLower!, d.ciUpper! - d.value!] : undefined,
       }
     })
   }, [data, showCI])
 
-  // Log scale: filter non-positive values and compute domain
+  // Log scale: filter non-positive values and compute domain. #1363: an
+  // UNDEFINED row stays (it draws nothing either way) and is not counted as a
+  // value "≤ 0" — it has no value.
   const isLog = axisTransform === 'log'
   const logFiltered = useMemo(() => {
     if (!isLog) return sorted
-    return sorted.filter(d => d.value > 0)
+    return sorted.filter(d => d.value == null || d.value > 0)
   }, [sorted, isLog])
   const logExcludedCount = isLog ? sorted.length - logFiltered.length : 0
   const logDomain = useMemo(() => {
     if (!isLog) return null
-    return computeLogDomain(logFiltered.map(d => d.value))
+    return computeLogDomain(logFiltered.flatMap(d => (d.value == null ? [] : [d.value])))
   }, [isLog, logFiltered])
 
   const chartData = isLog ? logFiltered : sorted
@@ -143,7 +148,7 @@ export default function HorizontalBarChart({
     if (!showCI) return undefined  // let recharts auto-compute
     let max = 0
     for (const d of chartData) {
-      if (d.value > max) max = d.value
+      if (d.value != null && d.value > max) max = d.value
       if (d._ciUpper != null && d._ciUpper > max) max = d._ciUpper
     }
     return max > 0 ? Math.ceil(max * 1.05) : undefined  // 5% padding
@@ -179,13 +184,31 @@ export default function HorizontalBarChart({
         tick={(props: Record<string, unknown>) => {
           const { x, y, payload } = props as { x: number; y: number; payload: { value: string } }
           const label = payload.value
-          const fullLabel = chartData.find(d => d.label === label)?.fullLabel || label
+          const row = chartData.find(d => d.label === label)
+          const fullLabel = row?.fullLabel || label
           const lines = wrapLabel(label, maxCharsPerLine)
           const lineHeight = fmt.labelFontSize + 2
           const startY = y - ((lines.length - 1) * lineHeight) / 2
+          // #1363: an undefined statistic draws no bar, and recharts draws no
+          // label for a bar it did not draw (bar-row-label.ts) — so the row
+          // marks itself here, where a zero-length bar would begin.
+          const isUndefined = row != null && row.value == null
           return (
             <g>
-              <title>{fullLabel}</title>
+              <title>{isUndefined ? `${fullLabel}: ${undefinedTooltip(row.undefinedReason)}` : fullLabel}</title>
+              {isUndefined && (
+                <text
+                  data-undefined-statistic=""
+                  x={x + 12}
+                  y={y}
+                  textAnchor="start"
+                  fill={colors.textMuted}
+                  style={{ fontSize: fmt.dataLabelFontSize }}
+                  dominantBaseline="central"
+                >
+                  {NO_VALUE}
+                </text>
+              )}
               {lines.map((line, i) => (
                 <text
                   key={i}
@@ -220,11 +243,9 @@ export default function HorizontalBarChart({
         radius={[0, 2, 2, 0]}
         barSize={fmt.barSize}
         isAnimationActive={isAnimationActive}
-        label={(props: LabelProps) => {
-          const { x, y, width, height, index } = props as unknown as { x: number; y: number; width: number; height: number; index: number }
-          const entry = chartData[index]
-          if (!entry) return null
-
+        // #1314: the label (and its `(n=…)`) reads its own row — never `chartData[index]`
+        // (bar-row-label.ts). Rendered even with data labels off, for the `(n=…)`.
+        label={barRowLabel<(typeof chartData)[number]>((entry, { x, y, width, height }) => {
           const showDataLabel = fmt.dataLabels !== 'none'
           const showN = showVariableN !== 'off' && entry.n != null && !(showVariableN === 'differing' && entry.n === chartN)
 
@@ -245,7 +266,7 @@ export default function HorizontalBarChart({
                     fill="#fff"
                     style={{ fontSize: fmt.dataLabelFontSize, fontWeight: 500 }}
                   >
-                    {entry.value.toFixed(DISPLAY_PRECISION)}{suffix}
+                    {formatScalar(entry.value)}{entry.value == null ? '' : suffix}
                   </text>
                 )}
                 {showN && (
@@ -263,7 +284,7 @@ export default function HorizontalBarChart({
           }
 
           // Outside (default) or none — data label right of bar, question N after
-          const dataLabelText = showDataLabel ? `${entry.value.toFixed(DISPLAY_PRECISION)}${suffix}` : ''
+          const dataLabelText = showDataLabel ? `${formatScalar(entry.value)}${entry.value == null ? '' : suffix}` : ''
           const dataLabelWidth = showDataLabel ? dataLabelText.length * fmt.dataLabelFontSize * 0.6 + 4 : 0
 
           return (
@@ -290,7 +311,7 @@ export default function HorizontalBarChart({
               )}
             </g>
           )
-        }}
+        })}
       >
         {chartData.map((entry, i) => (
           <Cell

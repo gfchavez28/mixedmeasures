@@ -117,8 +117,7 @@ const CODES = [
   makeCode(8, 2, 'Disruption'),
 ]
 
-function renderWorkbench() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+function renderWorkbench(qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   return render(
     <QueryClientProvider client={qc}>
       <TooltipProvider>
@@ -190,6 +189,29 @@ describe('the rating strip on the document workbench (#868 b)', () => {
     await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(51, 7, 7))
     expect(applyCode).toHaveBeenCalledTimes(1)
     expect(screen.queryByTestId('magnitude-strip')).not.toBeInTheDocument()
+  })
+
+  it('🔴 #1425 — a rating marks what it moves on OTHER screens: the rating α, the grid, the queue, the score marker', async () => {
+    // Before: the writer refetched only its own document — Reliability's rating α
+    // (a 5-minute staleTime) and the grid kept the old figures with no marker.
+    // A RE-rate through the `r` verb, so no apply (whose settle marks the counts)
+    // runs in the act: what is marked here, the rating marked.
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const moved = [['irr', 1, null, null], ['reconciliation', 1, null, false], ['consensus-status', 1],
+      ['rating-queue', 1, null], ['dataset-data', 1, 9, 0]]
+    const control = ['code-frequencies', 1, {}]   // a rating moves no coded count
+    for (const k of [...moved, control]) qc.setQueryData(k, {})
+    renderWorkbench(qc)
+    const rows = await screen.findAllByRole('option')
+    fireEvent.mouseDown(rows[1], { button: 0 })   // segment 52: Engagement rated 0
+    fireEvent.keyDown(window, { key: 'r' })
+    const group = await screen.findByRole('radiogroup')
+    fireEvent.keyDown(group, { key: '7' })
+    await waitFor(() => expect(setMagnitude).toHaveBeenCalledWith(52, 7, 7))
+    const stale = (k: unknown[]) => qc.getQueryState(k)?.isInvalidated
+    await waitFor(() => expect(moved.filter(k => !stale(k)).map(k => k[0])).toEqual([]))
+    expect(applyCode).not.toHaveBeenCalled()
+    expect(stale(control)).toBe(false)
   })
 
   it('removing a code does not open the strip, and applying to a multi-selection does not either', async () => {

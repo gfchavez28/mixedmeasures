@@ -6,6 +6,7 @@ import { GripVertical, Undo2, Redo2, MessageSquareText, RefreshCw, Plus, Table2 
 import { columnDisplayLabel, truncatedColumnLabel } from '@/lib/dataset-column-label'
 import { listStatus } from '@/lib/list-status'
 import AddVariableMenu from '@/components/AddVariableMenu'
+import DatasetPager from '@/components/DatasetPager'
 import PickRuleToDeriveDialog from '@/components/PickRuleToDeriveDialog'
 import DeriveVariableDialog from '@/components/DeriveVariableDialog'
 import { useCreateVariable } from '@/hooks/useCreateVariable'
@@ -13,7 +14,7 @@ import { useDeriveVariable } from '@/hooks/useDeriveVariable'
 import { variableViewPath } from '@/lib/dataset-routes'
 import { countLabel, plural } from '@/lib/format'
 import './dataset-view.css'
-import { findRecordCell, revealRecordCell, offsetForRecordNumber } from '@/lib/dataset-record-focus'
+import { findRecordCell, revealRecordCell } from '@/lib/dataset-record-focus'
 import { nextGridCoord, rovingStop } from '@/lib/dataset-grid-nav'
 import { invalidateRowSetChanged } from '@/lib/dataset-cache'
 import { useAddRecord } from '@/hooks/useAddRecord'
@@ -81,6 +82,7 @@ const DataGridBody = memo(function DataGridBody({
   linkedParticipantMap, handleLink, selectedCell, rovingCell, handleCellSelect,
   editingCell, handleStartEdit, handleCellSave, handleCellCancel,
   handleTabNav, handleEnterNav, handleDeleteRow, deleteRowRefusal, linkRefusal, domainScoreCols,
+  declareRowPositions,
 }: {
   rows: import('@/lib/api').DatasetDataRow[]
   /**
@@ -110,6 +112,8 @@ const DataGridBody = memo(function DataGridBody({
   deleteRowRefusal?: string | null
   linkRefusal?: string | null
   domainScoreCols: import('@/lib/api').DomainScoreColumn[]
+  /** See the table's `aria-rowcount`: true only when this is one page of more. */
+  declareRowPositions: boolean
 }) {
   return (
     <tbody>
@@ -137,6 +141,7 @@ const DataGridBody = memo(function DataGridBody({
           deleteRowRefusal={deleteRowRefusal}
           linkRefusal={linkRefusal}
           domainScoreCols={domainScoreCols}
+          declareRowPosition={declareRowPositions}
         />
       ))}
     </tbody>
@@ -335,7 +340,6 @@ export default function DatasetView() {
     aliveRef.current = true
     return () => { aliveRef.current = false }
   }, [])
-  const [jumpValue, setJumpValue] = useState('')
 
 
 
@@ -1585,6 +1589,12 @@ export default function DatasetView() {
               // `window`, so it never has to stand down for the search box, the
               // pager input or a popover. See `handleGridKeyDown`.
               onKeyDown={handleGridKeyDown}
+              // 10-19 row 19 — #800 made `rows` one PAGE, so the DOM no longer
+              // holds the whole set: declare its size (records + the header row)
+              // and each row's place in it, as `VariablePropertiesGrid` and
+              // `ReconciliationGrid` count it. Only when there IS more than one
+              // page — a reader counts a set the DOM holds by itself (#758/#772).
+              aria-rowcount={hasPaging ? totalRows + 1 : undefined}
             >
               {/* HTML requires `<caption>` to be the table's FIRST child — it
                   sat after `<colgroup>`, the only one of the app's caption
@@ -1604,7 +1614,7 @@ export default function DatasetView() {
                 ))}
               </colgroup>
               <thead>
-                <tr className="bg-mm-bg border-b">
+                <tr className="bg-mm-bg border-b" aria-rowindex={hasPaging ? 1 : undefined}>
                   {/* #772 — `scope="col"` on all four header sites: these two,
                     * the per-column header in `DatasetGridComponents.tsx`, and
                     * the domain-score headers below. Four sites, two files —
@@ -1715,84 +1725,23 @@ export default function DatasetView() {
                 deleteRowRefusal={deleteRowRefusal}
                 linkRefusal={managedDatasetRefusal(dataset, 'linkParticipants')}
                 domainScoreCols={domainScoreCols}
+                declareRowPositions={hasPaging}
               />
             </table>
           </div>
           {/* #800: the pager. Shown only when there is more than one page, so a
               120-row dataset looks exactly as it did before this change. */}
           {hasPaging && (
-            <nav
-              className="flex items-center justify-between gap-3 mt-2 flex-shrink-0"
-              aria-label="Record pages"
-            >
-              <p className="text-xs text-mm-text-muted" role="status" aria-live="polite">
-                Records <strong className="font-mono tabular-nums">{pageStart.toLocaleString()}</strong>
-                {'\u2013'}
-                <strong className="font-mono tabular-nums">{pageEnd.toLocaleString()}</strong>
-                {' of '}
-                <strong className="font-mono tabular-nums">{totalRows.toLocaleString()}</strong>
-              </p>
-              <div className="flex items-center gap-2">
-                {/* #835: reaching record 10,000 was 50 clicks of Next.
-                  *
-                  * A `<form>` so Enter submits natively \u2014 the control is
-                  * useless if it needs a mouse to reach a button. The label is
-                  * `sr-only` rather than `hidden`, because `hidden` removes it
-                  * from the accessibility tree and leaves the input nameless
-                  * (#717/#718); the placeholder is NOT a name.
-                  *
-                  * \u26a0\ufe0f No server round trip: a record NUMBER is an ordinal and
-                  * its page is division (`offsetForRecordNumber`). Only the
-                  * search deep link needs the resolver, because it knows a
-                  * primary key instead. */}
-                <form
-                  className="flex items-center gap-1.5"
-                  onSubmit={(e) => {
-                    e.preventDefault()
-                    const target = offsetForRecordNumber(Number(jumpValue), pageSize, totalRows)
-                    if (target == null) {
-                      toast.error(`Enter a record number between 1 and ${totalRows.toLocaleString()}.`)
-                      return
-                    }
-                    setPageOffset(target)
-                    setJumpValue('')
-                  }}
-                >
-                  <label htmlFor="dataset-jump-record" className="sr-only">
-                    Go to record number
-                  </label>
-                  <input
-                    id="dataset-jump-record"
-                    type="text"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    value={jumpValue}
-                    onChange={(e) => setJumpValue(e.target.value.replace(/[^0-9]/g, ''))}
-                    placeholder="Go to #"
-                    className="w-[88px] h-8 text-xs px-2 rounded-md border border-border bg-mm-surface focus:outline-none focus:ring-2 focus:ring-ring"
-                  />
-                  <Button type="submit" variant="outline" size="sm" disabled={jumpValue === '' || isFetching}>
-                    Go
-                  </Button>
-                </form>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setPageOffset(o => Math.max(0, o - pageSize))}
-                  disabled={pageOffset === 0 || isFetching}
-                >
-                  Previous
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setPageOffset(o => (o + pageSize < totalRows ? o + pageSize : o))}
-                  disabled={pageEnd >= totalRows || isFetching}
-                >
-                  Next
-                </Button>
-              </div>
-            </nav>
+            <DatasetPager
+              pageOffset={pageOffset}
+              shownOffset={shownOffset}
+              pageStart={pageStart}
+              pageEnd={pageEnd}
+              totalRows={totalRows}
+              pageSize={pageSize}
+              isFetching={isFetching}
+              onPageOffsetChange={setPageOffset}
+            />
           )}
           {/* Drag overlay for column reorder */}
           <DragOverlay>

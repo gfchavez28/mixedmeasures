@@ -1,8 +1,8 @@
 {
   "name": "mixedmeasures-frontend",
   "private": true,
-  "version": "1.5.7",
-  "releaseDate": "2026-10-17",
+  "version": "1.5.8",
+  "releaseDate": "2026-10-25",
   "type": "module",
   "engines": {
     "node": ">=24"
@@ -74,7 +74,7 @@
     "tailwindcss": "^4.2.4",
     "typescript": "^5.3.3",
     "typescript-eslint": "^8.57.1",
-    "vite": "^8.0.13",
-    "vitest": "^4.1.5"
+    "vite": "^8.1.6",
+    "vitest": "^4.1.12"
   }
 }

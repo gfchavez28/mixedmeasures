@@ -1,6 +1,7 @@
 """Pydantic schemas for canvas endpoints."""
 
 from datetime import datetime
+from typing import Any
 from .common import UTCTimestamp
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -10,12 +11,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class CanvasExportDocxRequest(BaseModel):
-    """Optional chart images for docx export, keyed by chart-embed materialId.
+    """Optional chart images and tables for docx export, keyed by chart-embed materialId.
 
-    Values are base64-encoded PNGs (data-URL prefix tolerated). Empty/omitted is
-    valid — the export then falls back to data tables for charts.
+    ``chart_images`` values are base64-encoded PNGs (data-URL prefix tolerated).
+    ``chart_tables`` values are ``{"headers": [str], "rows": [[str]]}`` — the
+    table the client's Markdown and HTML exports print (#1406 D5), used when a
+    chart has no image. Both are validated by the router, which DROPS a
+    malformed entry rather than refusing the request, so they are typed loosely
+    here. Empty/omitted is valid — such a chart reads "Chart data unavailable".
     """
     chart_images: dict[str, str] = Field(default_factory=dict)
+    chart_tables: dict[str, Any] = Field(default_factory=dict)
 
 
 class CanvasCreate(BaseModel):

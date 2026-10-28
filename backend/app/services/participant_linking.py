@@ -232,6 +232,10 @@ class LinkPlan:
     skipped_missing: int = 0
     skipped_duplicate: int = 0
     skipped_conflict: int = 0
+    #: #1190 — rows naming a withdrawn participant (`services/tombstones.py`), a
+    #: DUPLICATED withdrawn identifier's rows included: those are not in
+    #: `skipped_duplicate`, and the identifier is never in `duplicate_values`.
+    skipped_withdrawn: int = 0
     duplicate_values: list[str] = field(default_factory=list)
     #: (row_id, participant_id, raw cell, identifier, role fill or None)
     to_link: list[tuple] = field(default_factory=list)
@@ -332,7 +336,37 @@ def plan_identifier_links(
     # asks the same question of a different key space, and two implementations of
     # a refusal is how the two drift apart (#733).
     linkable, duplicate_values = group_unique_by_key(usable)
-    plan.skipped_duplicate = len(usable) - len(linkable)
+
+    # #1190 — a withdrawn person is never re-created, never re-linked to, and never
+    # NAMED: the participant row is gone, so without the tombstone "no match → create"
+    # would mint them again from data the withdrawal could not reach. Loaded before the
+    # duplicate report, whose examples (`duplicate_values`) the preview and the link
+    # note print verbatim.
+    from .tombstones import load as _load_tombstones
+    from ..models.project import Project as _Project
+    _project_uuid = conn.execute(
+        select(_Project.project_uuid).where(_Project.id == project_id)
+    ).scalar()
+    withdrawn = _load_tombstones(db, _project_uuid)
+    named = [k for k in duplicate_values if withdrawn.withdrawn_identifier(k)]
+    if named:
+        # A duplicated withdrawn identifier is counted as WITHDRAWN (its rows could
+        # never link either way) and left out of the examples — unless a living
+        # participant holds it (the researcher reinstated it, D12), when it names
+        # someone who did not withdraw and stays an ordinary duplicate.
+        held = {
+            i for (i,) in conn.execute(
+                text(
+                    "SELECT identifier FROM participants WHERE project_id = :p "
+                    "AND identifier IN (SELECT value FROM json_each(:keys))"
+                ),
+                {"p": project_id, "keys": json.dumps(named, ensure_ascii=False)},
+            )
+        }
+        hidden = set(named) - held
+        plan.skipped_withdrawn += sum(1 for value, _ in usable if value in hidden)
+        duplicate_values = [k for k in duplicate_values if k not in hidden]
+    plan.skipped_duplicate = len(usable) - len(linkable) - plan.skipped_withdrawn
     plan.duplicate_values = duplicate_values
     if not linkable:
         return plan
@@ -359,6 +393,9 @@ def plan_identifier_links(
 
     for value, (row_id, raw, role_cell, role_from) in linkable.items():
         hit = existing.get(value)
+        if hit is None and withdrawn.withdrawn_identifier(value):
+            plan.skipped_withdrawn += 1
+            continue
         if hit is None:
             plan.to_create.append((row_id, value, raw, role_cell, role_from))
             continue
@@ -484,6 +521,7 @@ def link_report(plan: LinkPlan, matched: int, created: int) -> dict:
         "skipped_duplicate": plan.skipped_duplicate,
         "skipped_conflict": plan.skipped_conflict,
         "already_linked": plan.already_linked,
+        "skipped_withdrawn": plan.skipped_withdrawn,
         "duplicate_values": plan.duplicate_values[:DUPLICATE_VALUES_REPORT_CAP],
     }
 

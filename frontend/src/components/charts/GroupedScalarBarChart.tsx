@@ -21,6 +21,7 @@ import {
 } from '@/lib/chart-data'
 import { ciCaveat, ciQualifier } from '@/lib/ci-label'
 import { useChartColors } from '@/lib/theme-context'
+import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
 import type { LabelProps } from 'recharts'
 import type { GroupedScalarSection, ChartFormatting, VariableNMode, SortOrder } from '@/lib/chart-data'
 import type { RechartsTooltipProps, RechartsPayloadEntry, ChartDataRow } from '@/lib/chart-types'
@@ -51,8 +52,10 @@ function GroupedTooltip({ active, payload, label }: RechartsTooltipProps) {
           />
           <span className="text-mm-text-secondary">{entry.name}:</span>
           <span className="font-medium">
-            {Number(entry.value).toFixed(DISPLAY_PRECISION)}
-            {(entry.payload[`_suffix`] as string) || ''}
+            {/* #1363: `Number(null)` is 0 — an undefined group printed "0.0" here. */}
+            {typeof entry.value === 'number'
+              ? <>{entry.value.toFixed(DISPLAY_PRECISION)}{(entry.payload[`_suffix`] as string) || ''}</>
+              : `${NO_VALUE} ${undefinedTooltip(entry.payload[`_undefinedReason_${entry.name}`] as string | null | undefined)}`}
           </span>
           {entry.payload[`_n_${entry.name}`] != null && (
             <span className="text-mm-text-faint ml-1">
@@ -111,12 +114,15 @@ function SingleGroupedScalarChart({
     const entry: ChartDataRow = { label: section.metricName, _suffix: suffix }
     for (const gv of groupValues) {
       const g = section.groups.find(gr => gr.groupValue === gv)
-      entry[gv] = g?.value ?? 0
+      // #1363: no value is `null` (no bar) — never `?? 0`, which drew a zero for
+      // both an undefined statistic and a group this metric has no result for.
+      entry[gv] = g?.value ?? null
+      entry[`_undefinedReason_${gv}`] = g?.undefinedReason ?? null
       entry[`_n_${gv}`] = g?.n ?? 0
       entry[`_ciLower_${gv}`] = g?.ciLower ?? undefined
       entry[`_ciUpper_${gv}`] = g?.ciUpper ?? undefined
       entry[`_ciMethod_${gv}`] = g?.ciMethod ?? undefined
-      if (showCI && g?.ciLower != null && g?.ciUpper != null) {
+      if (showCI && g?.value != null && g?.ciLower != null && g?.ciUpper != null) {
         entry[`_error_${gv}`] = [g.value - g.ciLower, g.ciUpper - g.value]
       }
     }
@@ -152,7 +158,7 @@ function SingleGroupedScalarChart({
   // Compute XAxis domain accounting for CI, explicit axis range, and log scale
   const logDomain = useMemo(() => {
     if (!isLog) return null
-    const values = section.groups.filter(g => g.value > 0).map(g => g.value)
+    const values = section.groups.flatMap(g => (g.value != null && g.value > 0 ? [g.value] : []))
     return computeLogDomain(values)
   }, [isLog, section])
 
@@ -162,7 +168,7 @@ function SingleGroupedScalarChart({
     if (fmt.xAxisMax != null) return fmt.xAxisMax
     let max = 0
     for (const g of section.groups) {
-      if (g.value > max) max = g.value
+      if (g.value != null && g.value > max) max = g.value
       if (showCI && g.ciUpper != null && g.ciUpper > max) max = g.ciUpper
     }
     return max > 0 ? Math.ceil(max * 1.05) : undefined
@@ -179,6 +185,9 @@ function SingleGroupedScalarChart({
   })
   const showN = showVariableN === 'all' ||
     (showVariableN === 'differing' && groupNs.some(n => n != null && n !== chartN))
+  // #1363: a group whose statistic is undefined draws no bar — exactly what a
+  // real 0 draws — so the section names it, with the reason, beside its title.
+  const undefinedGroups = section.groups.filter(g => g.value == null)
 
   if (chartData.length === 0) return null
 
@@ -196,6 +205,19 @@ function SingleGroupedScalarChart({
                 <span style={{ color: groupTextColors[gv] }}>{gv}</span>: n={groupNs[i] ?? 0}
               </span>
             ))})
+          </span>
+        )}
+        {undefinedGroups.length > 0 && (
+          <span
+            data-undefined-statistic=""
+            className="text-xs"
+            style={{ color: colors.textMuted }}
+            title={undefinedGroups.map(g => `${g.groupValue}: ${undefinedTooltip(g.undefinedReason)}`).join('\n')}
+          >
+            {undefinedGroups.map(g => `${g.groupValue} ${NO_VALUE}`).join(' · ')}
+            <span className="sr-only">
+              {undefinedGroups.map(g => ` ${g.groupValue}: ${undefinedTooltip(g.undefinedReason)}`).join(';')}
+            </span>
           </span>
         )}
       </div>

@@ -74,7 +74,7 @@ import { useCollapsibleColumn } from '@/hooks/useCollapsibleColumn'
 import { useCoders, useMachineCoderIds } from '@/hooks/useCoders'
 import { useBlindMode } from '@/hooks/useBlindMode'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
-import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { invalidateAfterRating, invalidateDerivedCounts } from '@/lib/coding-cache'
 import { optionPositionAria } from '@/lib/listbox-aria'
 import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
 import {
@@ -953,6 +953,7 @@ export default function ObservationWorkbench() {
       try {
         await codingApi.setMagnitude(clipId, codeId, value)
         queryClient.invalidateQueries({ queryKey: key })
+        invalidateAfterRating(queryClient, projectId)   // #1425: α, the grid, the queue — elsewhere
       } catch (e) {
         queryClient.setQueryData(key, snapshot)
         throw e  // `useHistory` toasts the server's own reason (a refused rating names why)

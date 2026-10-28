@@ -31,7 +31,7 @@ import math
 
 # ── The reason vocabulary ────────────────────────────────────────────────────
 #
-# Four values, each mapping to a distinct sentence a researcher can act on.
+# Seven values, each mapping to a distinct sentence a researcher can act on.
 # Keep it small: every new reason is a new sentence in `lib/stat-format.ts` and
 # a new row in the CSV legend, so a vague fifth entry costs more than it says.
 
@@ -77,9 +77,20 @@ NOT_NUMERIC = "not_numeric"
 #: what INSUFFICIENT_N is for; only the absence of the rows themselves earns this.
 SCORES_NOT_COMPUTED = "scores_not_computed"
 
+#: A demographic group in the QUALITATIVE comparison has no participant segment
+#: in the material compared, so a share of its segments is 0/0 (#1421). It was
+#: reported as ``0.0`` and a full-size difference, ranked first.
+#:
+#: ⚠️ **Not EMPTY_GROUP**, whose sentence blames missing-data exclusion: nothing
+#: was excluded here. Four doors reach it, measured: a participant surveyed but
+#: never a speaker, one who speaks only in an UNSELECTED conversation, one whose
+#: only speaker is a facilitator (excluded by default), and one linked through a
+#: DOCUMENT (the comparison counts conversations only, #1298).
+NO_SEGMENTS = "no_segments"
+
 UNDEFINED_REASONS = frozenset({
     INSUFFICIENT_N, EMPTY_GROUP, NO_VARIANCE, DEGENERATE, NOT_NUMERIC,
-    SCORES_NOT_COMPUTED,
+    SCORES_NOT_COMPUTED, NO_SEGMENTS,
 })
 
 

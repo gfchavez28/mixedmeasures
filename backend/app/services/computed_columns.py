@@ -3,7 +3,9 @@
 Provides a safe, restricted expression language that researchers use to derive
 new variables from existing columns.  The engine parses an expression string
 into an AST, validates column references, evaluates per-row, and translates
-to equivalent R code for reproducibility exports.
+to an R expression for the formula dialog's "R equivalent" line. (The R export
+does not run that translation: it writes the evaluated values and lists each
+formula as a comment — #1322.)
 """
 
 from __future__ import annotations
@@ -13,8 +15,8 @@ import enum
 import logging
 import math
 import re
-from dataclasses import dataclass, replace
-from typing import Union
+from dataclasses import dataclass, field, replace
+from typing import Callable, Union
 
 from ..models.dataset import VALUE_NUMERIC_TYPES, NUMERIC_COERCIBLE_TYPES
 from .missing_values import column_missing_rules, is_missing
@@ -78,6 +80,13 @@ class ColumnRef:
     #: and threading a type map through every caller would be a second source
     #: for one question. Default False keeps every existing node unchanged.
     coerce_numeric: bool = False
+    #: #1368 — the column's own "which answer does this text name?" rule, for
+    #: `[col] == "Agree"`. Decided at validate time for the same reason as
+    #: `coerce_numeric`. Returns ``(code, is_label)`` or None. Not compared, so
+    #: two resolved references to one column still compare equal.
+    answer_code: Callable[[str], tuple[float, bool] | None] | None = field(
+        default=None, compare=False, repr=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -389,6 +398,61 @@ class ColumnInfo:
     code: str | None
     text: str
     column_type: str
+    #: #1368 — the column's declared ``{label: code}`` dictionary (``{}`` when it
+    #: declares none) and its missing rules, so `==` with a quoted answer can be
+    #: judged the way the column's cells were numbered. Built by `column_info`.
+    label_to_code: dict[str, float] = field(default_factory=dict)
+    missing_rules: object = None
+
+
+def column_info(col) -> ColumnInfo:
+    """THE projection of a `DatasetColumn` the formula validator reads (#1368).
+
+    Four call sites built this by hand (the preview, create and update
+    endpoints, and `evaluate_computed_column`); a field added to one and not
+    the others is how a preview and a save disagree.
+    """
+    from .value_labels import column_label_to_code
+
+    return ColumnInfo(
+        id=col.id,
+        code=col.column_code,
+        text=col.column_text,
+        column_type=(
+            col.column_type.value if hasattr(col.column_type, "value")
+            else str(col.column_type)
+        ),
+        label_to_code=column_label_to_code(col),
+        missing_rules=column_missing_rules(col),
+    )
+
+
+def _answer_code_rule(info: ColumnInfo):
+    """How a TEXT names an answer on this column — the writers' own rule.
+
+    Labelled column: `value_labels.text_code_resolver` (exact label, then the
+    label without case — the import's rule, #1107 — then a bare number). A
+    binary column with no labels: the import's yes/no vocabulary
+    (`_compute_value_numeric`). Anything else: a bare number only.
+    Returns ``(code, is_label)`` — ``is_label`` is True when the text named a
+    LABEL (or a binary word), False when it was read as a bare number.
+    """
+    from .value_labels import text_code_resolver
+
+    if not info.label_to_code and info.column_type == "binary":
+        from .dataset_import import _compute_value_numeric
+
+        def binary(text: str):
+            code = _compute_value_numeric(text, "binary", None)
+            return None if code is None else (code, True)
+        return binary
+
+    resolve = text_code_resolver(info.label_to_code)
+
+    def rule(text: str):
+        hit = resolve(text)
+        return None if hit is None else (hit[0], hit[1] is not None)
+    return rule
 
 
 @dataclass
@@ -449,6 +513,7 @@ def validate(
                 node,
                 column_id=col.id,
                 coerce_numeric=col.column_type in NUMERIC_COERCIBLE_TYPES,
+                answer_code=_answer_code_rule(col),
             )
 
         if isinstance(node, Literal):
@@ -457,6 +522,41 @@ def validate(
         if isinstance(node, BinaryOp):
             left = _resolve(node.left)
             right = _resolve(node.right)
+            # #1368 — `[col] == "Agree"` compares the ANSWER. Say so when the
+            # quoted text can never be one: a missing value (missing is checked
+            # first and is never equal to anything), or, on a column with a
+            # dictionary, a word that is none of its labels.
+            quoted = _quoted_answer(BinaryOp(node.op, left, right))
+            if quoted is not None:
+                ref, text = quoted
+                col_info = next((c for c in columns if c.id == ref.column_id), None)
+                if col_info is not None:
+                    hit = ref.answer_code(text) if ref.answer_code else None
+                    if is_missing(text, col_info.missing_rules):
+                        warnings.append(
+                            f"\"{text}\" is a missing value in column "
+                            f"'{col_info.text}', and a missing answer equals "
+                            f"nothing, so this comparison never matches; to find "
+                            f"those answers use IS_MISSING([{ref.name}])."
+                        )
+                    elif (
+                        (col_info.label_to_code or col_info.column_type == "binary")
+                        and (hit is None or not hit[1])
+                        and _strip_numeric_text(text) is None
+                    ):
+                        shown = ", ".join(
+                            f"\"{label}\"" for label in list(col_info.label_to_code)[:6]
+                        )
+                        more = " …" if len(col_info.label_to_code) > 6 else ""
+                        answers = (
+                            f"its answers are {shown}{more}" if shown
+                            else "it holds yes/no answers"
+                        )
+                        warnings.append(
+                            f"\"{text}\" is not an answer in column "
+                            f"'{col_info.text}' ({answers}), so this comparison "
+                            f"never matches."
+                        )
             # #823d — an ORDERED comparison requires numbers and RAISES
             # without them, but nothing warned: `IF([sex] < 45, …)` reported
             # "Valid" with no warnings, previewed null for every row, and 400'd
@@ -555,6 +655,103 @@ def _format_number(v: float) -> str:
     return str(v)
 
 
+def _strip_numeric_text(text: str) -> float | None:
+    """THE cell-to-number rule (`dataset_import._strip_numeric`), lazily imported."""
+    from .dataset_import import _strip_numeric
+    return _strip_numeric(text)
+
+
+def _quoted_answer(node: "BinaryOp") -> tuple[ColumnRef, str] | None:
+    """`[col] == "text"` / `"text" != [col]` — the column side and the text.
+
+    #1368: only this SHAPE is judged as an answer. A quoted text met by any
+    other expression (`IF(…) == "x"`, `COALESCE([a], [b]) == "x"`) keeps the
+    plain comparison, because only a direct reference knows its cell's text.
+    """
+    if node.op not in ("==", "!="):
+        return None
+    for ref, other in ((node.left, node.right), (node.right, node.left)):
+        if (
+            isinstance(ref, ColumnRef)
+            and isinstance(other, Literal)
+            and isinstance(other.value, str)
+        ):
+            return ref, other.value
+    return None
+
+
+#: #1368 D4 — the first version of Mixed Measures whose STORED computed values
+#: read a quoted text as the cell's answer (`_quoted_answer`). A value an
+#: earlier version stored can differ (`[q1] == "Agree"` was FALSE on every row
+#: of a labelled column), so a `.mmproject` stating an earlier `app_version`
+#: has its matching columns marked out of date on import, as migration
+#: `b5d1f7a3c9e2` marks those already in a database. A fixed boundary, NOT the
+#: current version — it never moves with a release bump; it moves only if the
+#: rule ships in a different release than this one.
+QUOTED_ANSWER_RULE_VERSION = "1.5.8"
+
+
+def compares_a_quoted_answer(expression: str | None) -> bool:
+    """Does this formula hold the shape #1368 changed — `[col] == "text"` / `!=`?
+
+    Asked by the `.mmproject` import (#1368 D4) through the evaluator's own
+    `_quoted_answer`, so what it marks out of date is exactly what the
+    evaluator now reads differently, at any depth (`IF(...)`, `NOT`, an
+    argument). A formula that does not parse answers False: Recompute could
+    not run it, so "out of date" would offer a remedy that fails.
+    """
+    if not expression:
+        return False
+    try:
+        root = parse(expression)
+    except ExpressionError:
+        return False
+    stack: list[Expr] = [root]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, BinaryOp):
+            if _quoted_answer(node) is not None:
+                return True
+            stack.extend((node.left, node.right))
+        elif isinstance(node, UnaryOp):
+            stack.append(node.operand)
+        elif isinstance(node, IfExpr):
+            stack.extend((node.condition, node.then_expr, node.else_expr))
+        elif isinstance(node, FunctionCall):
+            stack.extend(node.args)
+    return False
+
+
+def _same_answer(ref: ColumnRef, text: str, cell_text: str | None, number: float) -> bool:
+    """Does a quoted ``text`` name the answer in a cell that holds a NUMBER?
+
+    #1368. The cell's number is a CODE whenever the column carries labels (the
+    label is in ``value_text``, the code in ``value_numeric``), so comparing the
+    quoted text with the number's spelling — the pre-fix rule — was false on
+    every row of every labelled column. Three readings, in order:
+
+      1. the quoted text is one of the column's LABELS (or a binary yes/no
+         word): equal when the cell's TEXT names the same code under the same
+         rule. Text against text, so a reverse or flipping primary (which moves
+         ``value_numeric`` and leaves the text) cannot change the answer;
+      2. otherwise the cell's text, without case or surrounding spaces (the
+         writers' `_match_key`) — `[flag] == "TRUE"`, `[inc] == "4.0"`;
+      3. otherwise the pre-fix reading, the number's spelling — so a quoted CODE
+         (`[q1] == "4"`) still matches what it matched before.
+    """
+    from .value_labels import _match_key
+
+    rule = ref.answer_code
+    if rule is not None and cell_text is not None:
+        named = rule(text)
+        if named is not None and named[1]:
+            cell = rule(cell_text)
+            return cell is not None and cell[0] == named[0]
+    if cell_text is not None and _match_key(text) == _match_key(cell_text):
+        return True
+    return text == _format_number(number)
+
+
 def _eval(
     node: Expr,
     row: dict[int, tuple[str | None, float | None]],
@@ -582,9 +779,9 @@ def _eval(
         # not evaluate. Pre-fix, missing text made arithmetic abort the WHOLE
         # recompute on one refusal cell, and IF([Q7] == 3, …) counted the
         # refusal as FALSE. Genuine text keeps the TXT fallback (load-bearing
-        # for `==` comparisons on text columns). This also converges with the
-        # R export, which blanks missing cells (#495b) so R already computes
-        # NA where this used to raise.
+        # for `==` comparisons on text columns). ⚠️ The R export does NOT re-run
+        # this: it writes the values computed here (#1322), because no R column
+        # can type its cells one at a time the way this branch does.
         if vt is not None and is_missing(
             vt, missing_rules.get(node.column_id) if missing_rules else None
         ):
@@ -654,6 +851,20 @@ def _eval(
 def _eval_binary(
     node: BinaryOp, row: dict, missing_rules: dict[int, list | None] | None = None,
 ) -> _Val:
+    quoted = _quoted_answer(node)
+    if quoted is not None:
+        # #1368 — a quoted text against a column is compared with the ANSWER.
+        ref, text = quoted
+        cell = _eval(ref, row, missing_rules)
+        if cell[0] == _NULL:
+            return (_NULL, None)
+        if cell[0] == _TXT:
+            same = cell[1] == text  # unchanged: a text cell compares exactly
+        else:
+            pair = row.get(ref.column_id)
+            same = _same_answer(ref, text, pair[0] if pair else None, cell[1])
+        return (_BOOL, same if node.op == "==" else not same)
+
     left = _eval(node.left, row, missing_rules)
     right = _eval(node.right, row, missing_rules)
 
@@ -773,9 +984,12 @@ def _eval_function(
             # resolved to a value that has value_text but no value_numeric — e.g.
             # an ordinal/Likert column with a single typo'd label ("Srongly
             # Disagree") that never got a numeric value. Raising on it 500'd the
-            # whole computed column for one bad cell. Skipping matches the R
-            # translation's rowMeans/rowSums(..., na.rm = TRUE) semantics
-            # (see _to_r_function), so Python compute and R export agree.
+            # whole computed column for one bad cell. ⚠️ This is the evaluator's
+            # own rule, and nothing in R reproduces it for a TEXT cell: the R
+            # export writes the values computed here and never re-runs the
+            # formula (#1322), and the formula dialog's R line (`_to_r_function`)
+            # agrees with this on NUMERIC columns only — including the empty
+            # case below, which it maps to NA rather than R's 0 / NaN.
             if v[0] == _NULL or v[0] == _TXT:
                 continue
             if v[0] != _NUM:
@@ -846,10 +1060,23 @@ def to_r_expression(
 ) -> str:
     """Convert a validated AST to an R expression string.
 
+    🔴 **Its one consumer is the formula dialog's "R equivalent" line**
+    (`routers/dataset.py`'s preview → `ColumnFormDialog`). The R EXPORT does not
+    call it and must not (#1322): an executed translation cannot reproduce the
+    evaluator, which types each CELL on its own (`_eval`) where an R column holds
+    one type, so the export writes the stored values and lists formulas as
+    comments. What this function promises is narrower: on a frame of NUMERIC
+    columns, the expression computes what `evaluate` computes, NA where it
+    returns NULL — `test_computed_columns_r_translation.py` runs it in R to say
+    so. Three rules exist for that promise and each is pinned by a mutant:
+    an all-missing SUM/MEAN is NA (R gives 0 / NaN), a zero divisor is NA (R
+    gives ±Inf / NaN), and a string literal is escaped (a backslash is otherwise
+    an R parse error).
+
     Args:
         ast: Validated AST (ColumnRef nodes must have column_id set).
         column_r_names: {column_id: "r_safe_name"} mapping.
-        df_name: R data frame variable name (default "df", use "data" for R export).
+        df_name: R data frame variable name (default "df").
 
     Returns:
         R expression string using {df_name}$ column references.
@@ -857,10 +1084,23 @@ def to_r_expression(
     return _to_r(ast, column_r_names, df_name)
 
 
+def _r_string_literal(value: str) -> str:
+    """A formula's string literal as an R string literal.
+
+    The tokenizer accepts any character but `"` between the quotes, so a
+    backslash reaches here verbatim — and `"C:\\d"` written bare into R is a parse
+    error (`'\\d' is an unrecognized escape`). A newline or carriage return is
+    escaped too, so the expression stays one line.
+    """
+    s = value.replace("\\", "\\\\").replace('"', '\\"')
+    s = s.replace("\n", "\\n").replace("\r", "\\r")
+    return f'"{s}"'
+
+
 def _to_r(node: Expr, names: dict[int, str], df_name: str) -> str:
     if isinstance(node, Literal):
         if isinstance(node.value, str):
-            return f'"{node.value}"'
+            return _r_string_literal(node.value)
         v = node.value
         if v == int(v) and not math.isinf(v):
             return str(int(v))
@@ -879,6 +1119,12 @@ def _to_r(node: Expr, names: dict[int, str], df_name: str) -> str:
     if isinstance(node, BinaryOp):
         left = _to_r(node.left, names, df_name)
         right = _to_r(node.right, names, df_name)
+        if node.op == "/":
+            # The evaluator returns NULL for a zero divisor (`_eval_binary`);
+            # R returns ±Inf, or NaN for 0/0. The guard sits on the DIVISOR, not
+            # around the division: `ifelse(b == 0, NA, a / b)` takes its LENGTH
+            # from `b == 0`, so `[a] / 2` would collapse to one value.
+            return f"({left} / ifelse({right} == 0, NA, {right}))"
         r_op = _R_BINARY_OPS.get(node.op, node.op)
         return f"({left} {r_op} {right})"
 
@@ -897,11 +1143,12 @@ def _to_r(node: Expr, names: dict[int, str], df_name: str) -> str:
 def _to_r_function(node: FunctionCall, names: dict[int, str], df_name: str) -> str:
     args_r = [_to_r(a, names, df_name) for a in node.args]
 
-    if node.name == "MEAN":
-        return f"rowMeans(cbind({', '.join(args_r)}), na.rm = TRUE)"
-
-    if node.name == "SUM":
-        return f"rowSums(cbind({', '.join(args_r)}), na.rm = TRUE)"
+    if node.name in ("MEAN", "SUM"):
+        # A row with no value is NULL in the evaluator (`if not values`); R's
+        # `na.rm = TRUE` gives 0 for rowSums and NaN for rowMeans there.
+        m = f"cbind({', '.join(args_r)})"
+        agg = "rowMeans" if node.name == "MEAN" else "rowSums"
+        return f"ifelse(rowSums(!is.na({m})) == 0, NA, {agg}({m}, na.rm = TRUE))"
 
     if node.name == "MIN":
         return f"pmin({', '.join(args_r)}, na.rm = TRUE)"
@@ -957,10 +1204,7 @@ def evaluate_computed_column(
         )
         .all()
     )
-    col_infos = [
-        ColumnInfo(id=c.id, code=c.column_code, text=c.column_text, column_type=c.column_type.value if hasattr(c.column_type, 'value') else str(c.column_type))
-        for c in siblings
-    ]
+    col_infos = [column_info(c) for c in siblings]
 
     result = validate(ast, col_infos, self_column_id=column.id)
     resolved_ast = result.resolved_ast

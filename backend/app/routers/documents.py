@@ -40,6 +40,8 @@ from ..schemas.document import (
     DocumentSegmentUpdateRequest,
 )
 from ..schemas.segment import SegmentNoteInfo
+from ..schemas.segment import TextEditPlanResponse
+from ..schemas.document import DocumentSegmentPreviewRequest, DocumentSegmentUpdateResponse
 from ..schemas.common import utc_wire
 from ..auth import get_current_user
 from ..services.audit import log_action
@@ -786,7 +788,60 @@ async def delete_document(
 # Segment text edit
 # ---------------------------------------------------------------------------
 
-@router.patch("/{document_id}/segments/{segment_id}")
+def _edit_target_segment(db: Session, document_id: int, segment_id: int) -> Segment:
+    """The paragraph an edit (or its preview) acts on, with its quotes loaded —
+    one lookup for both, so the preview plans on the row the apply writes.
+
+    ⚠️ No visibility filter, as before #1319: this door can still reach a
+    merged-away or split-away paragraph (the conversation door cannot). Left as
+    found; it is a separate finding from the #1319 review.
+    """
+    from ..models.excerpt import Excerpt
+
+    segment = db.query(Segment).filter(
+        Segment.id == segment_id,
+        Segment.document_id == document_id,
+    ).options(
+        selectinload(Segment.excerpts).joinedload(Excerpt.note),
+    ).first()
+    if not segment:
+        raise HTTPException(status_code=404, detail="Segment not found in this document")
+    return segment
+
+
+def _stored_paragraph_text(raw: str) -> str:
+    """The text this door STORES — stripped. The plan is made against it, so a
+    quote's offsets are in the string that is saved, not the one that was typed."""
+    text = raw.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Segment text cannot be empty or whitespace-only")
+    return text
+
+
+@router.post(
+    "/{document_id}/segments/{segment_id}/edit-preview",
+    response_model=TextEditPlanResponse,
+)
+async def preview_document_segment_edit(
+    project_id: int,
+    document_id: int,
+    segment_id: int,
+    data: DocumentSegmentPreviewRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """What saving this text would do to the paragraph's quotes (#1319). Writes nothing."""
+    from ..services.segment_operations import preview_text_edit
+
+    _get_document_or_404(db, project_id, document_id, user.id)
+    segment = _edit_target_segment(db, document_id, segment_id)
+    return preview_text_edit(segment, _stored_paragraph_text(data.text))
+
+
+@router.patch(
+    "/{document_id}/segments/{segment_id}",
+    response_model=DocumentSegmentUpdateResponse,
+)
 async def update_document_segment(
     project_id: int,
     document_id: int,
@@ -795,26 +850,45 @@ async def update_document_segment(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update a document segment's text."""
+    """Update a document segment's text.
+
+    A text edit is a segment operation (#1319): `apply_text_edit` carries every
+    char-range quote with its words and refuses (409) an edit whose flagged quotes
+    the request did not answer for. The audit row records lengths and the rebase,
+    never words (D6: the old text would outlive a withdrawal).
+    """
+    from ..services.segment_operations import apply_text_edit
+
     _get_document_or_404(db, project_id, document_id, user.id)
+    segment = _edit_target_segment(db, document_id, segment_id)
+    text = _stored_paragraph_text(data.text)
 
-    segment = db.query(Segment).filter(
-        Segment.id == segment_id,
-        Segment.document_id == document_id,
-    ).first()
-    if not segment:
-        raise HTTPException(status_code=404, detail="Segment not found in this document")
-
-    text = data.text.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Segment text cannot be empty or whitespace-only")
-    segment.text = text
-    segment.word_count = len(text.split())
+    quote_rebase, audit = apply_text_edit(
+        db, segment, text,
+        remove_excerpt_ids=data.remove_excerpt_ids,
+        excerpt_offsets=[
+            (o.excerpt_id, o.start_offset, o.end_offset) for o in data.excerpt_offsets
+        ],
+    )
+    log_action(
+        db,
+        action="segment_updated",
+        entity_type="segment",
+        entity_id=segment.id,
+        user_id=user.id,
+        project_id=project_id,
+        details=audit,
+    )
 
     db.commit()
     db.refresh(segment)
 
-    return {"id": segment.id, "text": segment.text, "word_count": segment.word_count}
+    return DocumentSegmentUpdateResponse(
+        id=segment.id,
+        text=segment.text,
+        word_count=segment.word_count,
+        quote_rebase=quote_rebase,
+    )
 
 
 # ---------------------------------------------------------------------------

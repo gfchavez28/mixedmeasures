@@ -45,7 +45,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { cn } from '@/lib/utils'
 import { excerptEmbedAttrs } from '@/lib/canvas-excerpt'
 import { formatRelativeTime } from '@/lib/format'
-import { exportCanvasMarkdown, exportCanvasHtml, exportCanvasPdf, captureCanvasChartPngs, downloadFile } from '@/lib/canvas-export'
+import { exportCanvasMarkdown, exportCanvasHtml, exportCanvasPdf, captureCanvasChartPngs, downloadFile, fetchChartTables, docxChartTables } from '@/lib/canvas-export'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import InlineEditableText from '@/components/InlineEditableText'
@@ -696,12 +696,15 @@ export default function CanvasView() {
     try {
       const pngs = await captureCanvasChartPngs()
       warnIfChartsUncaptured(pngs)
-      await canvasApi.exportDocx(projectId, canvasId, pngs, canvas.name)
+      // #1406 D5 — a chart with no image prints the table the Markdown and HTML
+      // exports print; the server derives none of its own.
+      const tables = docxChartTables(await fetchChartTables(themes, projectId, timelineLens))
+      await canvasApi.exportDocx(projectId, canvasId, pngs, tables, canvas.name)
       toast.success('Exported as Word', { id: toastId })
     } catch {
       toast.error('Word export failed', { id: toastId })
     }
-  }, [canvas, canvasId, projectId, warnIfChartsUncaptured])
+  }, [canvas, canvasId, themes, projectId, warnIfChartsUncaptured, timelineLens])
 
   const handleUpdateTheme = useCallback((themeId: number, data: { name?: string; section_type?: 'theme' | 'prose'; color?: string; viz_x?: number; viz_y?: number; parent_theme_id?: number | null }) => {
     updateThemeMut.mutate({ themeId, data })

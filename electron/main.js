@@ -3,7 +3,8 @@
 // Lifecycle: pick a free loopback port → spawn the frozen PyInstaller backend
 // with absolute per-user data paths injected → health-gate the window load →
 // show the SPA (served same-origin by the backend at http://127.0.0.1:<port>/).
-// On quit: SIGTERM the backend so its shutdown backup runs, then hard-kill.
+// On quit: SIGTERM the backend so its shutdown backup runs, then hard-kill — or kill at
+// once during an update of the database, which is then undone (#1362).
 //
 // The non-GUI logic lives in ./backend-process.js (unit-tested headlessly).
 
@@ -22,6 +23,9 @@ const {
   spawnEngine,
   waitForHealth,
   stopBackend,
+  createStartupDeadline,
+  splashHtmlFor,
+  MIGRATION_TIMEOUT_MS,
 } = require('./backend-process')
 const { resolveKey, saveRecoveryKeyToFile } = require('./key-manager')
 const { clampZoomFactor } = require('./zoom')
@@ -30,6 +34,7 @@ const {
   crashDialogText,
   showCrashDialog,
   backendSpawnFailureMessage,
+  migrationTimeoutMessage,
 } = require('./fatal-error')
 const { attachRendererRecovery } = require('./renderer-recovery')
 const { runAsPrimaryInstance } = require('./single-instance')
@@ -79,6 +84,12 @@ let crashDialogShowing = false
 let mainWindow = null
 let splashWindow = null
 let updater = null
+// #1362: which deadline the startup is under ('starting' or 'migrating'), fed by the
+// backend's MM-PHASE lines. Module scope for the same reason as `fatalCollector`: the
+// quit path reads it, to stop an update hard.
+let startupDeadline = null
+let splashHtml = null
+let splashPhase = 'starting'
 
 function applyAppMenu() {
   // The app is a single-purpose tool; the default Electron menu (Reload /
@@ -161,7 +172,12 @@ function startBackend(port, encryptionKeyHex, loopbackToken) {
   // #716: the backend marks a fatal STARTUP failure with MM-FATAL so its recovery
   // instructions can reach the crash dialog instead of dying in a pipe. Everything
   // still passes through to our own stderr unchanged — this only observes.
-  const fatal = createFatalLineCollector()
+  const fatal = createFatalLineCollector({
+    onPhase: (phase) => {
+      if (startupDeadline) startupDeadline.onPhase(phase)
+      showSplashPhase(phase)
+    },
+  })
   fatalCollector = fatal
   // ⚠️ The prefix and the payload are written SEPARATELY, and the payload is written
   // as the raw Buffer. `${d}` would decode each chunk on its own — the #723 defect —
@@ -256,16 +272,29 @@ function createSplash() {
   // of a page INSIDE app.asar with ERR_FILE_NOT_FOUND — every 1.5.6 draft showed a blank
   // white box here. The main process still reads the page out of the integrity-checked
   // asar. A splash that cannot be read stays blank; it must never stop the app starting.
-  let html
   try {
-    html = fs.readFileSync(path.join(__dirname, 'splash.html'), 'utf8')
+    splashHtml = fs.readFileSync(path.join(__dirname, 'splash.html'), 'utf8')
   } catch (err) {
     console.error(`splash: ${err.message}`)
     return
   }
+  loadSplash()
+}
+
+function loadSplash() {
+  if (!splashWindow || splashWindow.isDestroyed() || !splashHtml) return
+  const html = splashHtmlFor(splashHtml, splashPhase)
   splashWindow
     .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
     .catch((err) => console.error(`splash: ${err.message}`))
+}
+
+/** #1362: say on the splash that the data is being updated, so a long wait reads as work. */
+function showSplashPhase(phase) {
+  const next = phase === 'migrating' ? 'migrating' : 'starting'
+  if (next === splashPhase) return
+  splashPhase = next
+  loadSplash()
 }
 
 function closeSplash() {
@@ -467,9 +496,10 @@ async function startup() {
       item.setSaveDialogOptions({ title: `Save “${item.getFilename()}”` })
     })
     const encryptionKeyHex = resolveEncryptionKey()
+    startupDeadline = createStartupDeadline()
     backend = startBackend(port, encryptionKeyHex, loopbackToken)
     createSplash()
-    await waitForHealth(port, { isExited: () => backendExited })
+    await waitForHealth(port, { isExited: () => backendExited, deadline: startupDeadline })
     await createMainWindow(port)
     updater = setupUpdater()
   } catch (err) {
@@ -477,6 +507,13 @@ async function startup() {
     // usually already told us why (MM-FATAL), and `waitForHealth` only ever reports the
     // symptom — "Backend process exited before it became healthy". Ranking lives in
     // crashDialogText, so the cause wins over the symptom no matter which arrives first.
+    if (err && err.phase === 'migrating') {
+      // #1362: an update that outlasted its own deadline. Stop it BEFORE the dialog, so
+      // what the dialog says (it was undone) is already true while it is on screen.
+      stopBackend(backend, { platform: process.platform, spawnSync, hard: true, log: (msg) => console.log(msg) })
+      reportCrash({ error: new Error(migrationTimeoutMessage(MIGRATION_TIMEOUT_MS / 60_000)) })
+      return
+    }
     reportCrash({ error: err })
   }
 }
@@ -514,6 +551,9 @@ function registerPrimaryInstance() {
       platform: process.platform,
       spawnSync,
       log: (msg) => console.log(msg),
+      // #1362: a quit during an update stops it hard everywhere — it is undone, not
+      // left running unseen (POSIX ignores SIGTERM until the migration ends).
+      hard: Boolean(startupDeadline && startupDeadline.phase() === 'migrating'),
     })
   })
 

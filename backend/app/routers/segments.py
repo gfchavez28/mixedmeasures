@@ -15,6 +15,9 @@ from ..schemas.segment import (
     SegmentNoteInfo,
     SpeakerUpdateRequest,
     SegmentUpdateRequest,
+    SegmentUpdateResponse,
+    SegmentTextPreviewRequest,
+    TextEditPlanResponse,
     SegmentGroupRequest,
     SegmentGroupResponse,
     SegmentMergeRequest,
@@ -30,6 +33,7 @@ from ..auth import get_current_user
 from ..services.audit import log_action
 from ..services.coding_layers import CONSENSUS_ORIGIN
 from ..services.coding_counts import coded_segment_count
+from ..services.segment_operations import apply_text_edit, preview_text_edit
 from .helpers import visible_segment_filter as _visible_segment_filter, _verify_conversation_ownership
 
 router = APIRouter(prefix="/api/conversations/{conversation_id}/segments", tags=["segments"])
@@ -198,16 +202,12 @@ async def get_segment(
     return segment_to_response(segment)
 
 
-@router.patch("/{segment_id}", response_model=SegmentResponse)
-async def update_segment(
-    conversation_id: int,
-    segment_id: int,
-    data: SegmentUpdateRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update a segment's text and/or speaker."""
-    conversation = _verify_conversation_ownership(db, conversation_id, user.id)
+def _editable_segment_or_404(db: Session, conversation_id: int, segment_id: int) -> Segment:
+    """The visible segment an edit (or its preview) acts on, with its quotes loaded.
+
+    One lookup for the PATCH door and its preview, so the preview's plan is made
+    on the same row the apply will write.
+    """
     segment = db.query(Segment).filter(
         Segment.id == segment_id,
         Segment.conversation_id == conversation_id,
@@ -218,19 +218,51 @@ async def update_segment(
         selectinload(Segment.attached_notes),
         selectinload(Segment.excerpts).joinedload(Excerpt.note)
     ).first()
-
     if not segment:
         raise HTTPException(status_code=404, detail="Segment not found")
+    return segment
+
+
+@router.post("/{segment_id}/edit-preview", response_model=TextEditPlanResponse)
+async def preview_segment_text_edit(
+    conversation_id: int,
+    segment_id: int,
+    data: SegmentTextPreviewRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """What saving this text would do to the turn's quotes (#1319). Writes nothing.
+
+    The client asks before it saves, shows the quotes an edit touches, straddles
+    or deletes (D5), and only then sends the PATCH with its answer.
+    """
+    _verify_conversation_ownership(db, conversation_id, user.id)
+    segment = _editable_segment_or_404(db, conversation_id, segment_id)
+    return preview_text_edit(segment, data.text)
+
+
+@router.patch("/{segment_id}", response_model=SegmentUpdateResponse)
+async def update_segment(
+    conversation_id: int,
+    segment_id: int,
+    data: SegmentUpdateRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update a segment's text and/or speaker.
+
+    A text edit is a segment operation (#1319): `apply_text_edit` carries every
+    char-range quote with the words it marked, and refuses (409) an edit whose
+    flagged quotes the request did not answer for.
+    """
+    conversation = _verify_conversation_ownership(db, conversation_id, user.id)
+    segment = _editable_segment_or_404(db, conversation_id, segment_id)
     details = {}
+    quote_rebase = None
 
-    if data.text is not None:
-        details["old_text"] = segment.text
-        details["new_text"] = data.text
-        segment.text = data.text
-        segment.word_count = len(data.text.split()) if data.text.strip() else 0
-
+    speaker = None
     if data.speaker_id is not None:
-        # Validate speaker belongs to the same project
+        # Validate speaker belongs to the same project — before any write.
         speaker = db.query(Speaker).filter(
             Speaker.id == data.speaker_id,
             Speaker.project_id == conversation.project_id
@@ -238,6 +270,19 @@ async def update_segment(
         if not speaker:
             raise HTTPException(status_code=400, detail="Speaker not found in this project")
 
+    if data.text is not None:
+        details["old_text"] = segment.text
+        details["new_text"] = data.text
+        quote_rebase, rebase_audit = apply_text_edit(
+            db, segment, data.text,
+            remove_excerpt_ids=data.remove_excerpt_ids,
+            excerpt_offsets=[
+                (o.excerpt_id, o.start_offset, o.end_offset) for o in data.excerpt_offsets
+            ],
+        )
+        details["quote_rebase"] = rebase_audit["quote_rebase"]
+
+    if speaker is not None:
         details["old_speaker_id"] = segment.speaker_id
         details["new_speaker_id"] = data.speaker_id
         segment.speaker_id = data.speaker_id
@@ -264,7 +309,10 @@ async def update_segment(
         selectinload(Segment.excerpts).joinedload(Excerpt.note)
     ).first()
 
-    return segment_to_response(segment)
+    return SegmentUpdateResponse(
+        **segment_to_response(segment).model_dump(),
+        quote_rebase=quote_rebase,
+    )
 
 
 @router.patch("/{segment_id}/speaker", response_model=SegmentResponse)

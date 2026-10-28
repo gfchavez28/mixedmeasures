@@ -318,3 +318,79 @@ it('#963 POSITIVE CONTROL: an answered EMPTY list says so and still creates', as
   fireEvent.click(createBtn)
   await waitFor(() => expect(create).toHaveBeenCalledWith(1, { identifier: 'P-07' }))
 })
+
+describe('#1190 (D12) — an ID that belongs to someone who withdrew', () => {
+  const SENTENCE = 'This ID belongs to a participant who withdrew from this project.'
+  const refusal = () => Object.assign(new Error('409'), {
+    status: 409,
+    response: { status: 409, data: { detail: { error: 'withdrawn_identifier', message: SENTENCE } } },
+  })
+
+  it('asks first; "Create anyway" creates with the override and links the record', async () => {
+    list.mockResolvedValue({ participants: [], total: 0 })
+    create
+      .mockRejectedValueOnce(refusal())
+      .mockResolvedValueOnce({ id: 77, identifier: 'P-07', display_name: null, role: null, linked_speakers: [] })
+    const { onLink } = renderCell()
+    await openPopover()
+    fireEvent.click(await screen.findByRole('button', { name: /new participant .P-07./i }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Add a participant who withdrew?' })
+    expect(dialog).toHaveAccessibleDescription(SENTENCE)
+    // Nothing is created or linked until the researcher answers.
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(onLink).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Create anyway' }))
+    await waitFor(() => expect(onLink).toHaveBeenCalledWith(5, 77, 'P-07'))
+    expect(create.mock.calls).toEqual([
+      [1, { identifier: 'P-07' }],
+      [1, { identifier: 'P-07', confirm_withdrawn: true }],
+    ])
+    // Not the duplicate arm's "already existed" toast.
+    expect(toastSuccess).toHaveBeenCalledWith('Created participant "P-07"')
+  })
+
+  it('Cancel creates nothing, links nothing, and leaves the picker open', async () => {
+    list.mockResolvedValue({ participants: [], total: 0 })
+    create.mockRejectedValueOnce(refusal())
+    const { onLink } = renderCell()
+    await openPopover()
+    fireEvent.click(await screen.findByRole('button', { name: /new participant .P-07./i }))
+    await screen.findByRole('alertdialog')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(onLink).not.toHaveBeenCalled()
+    expect(toastError).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: /new participant .P-07./i })).toBeInTheDocument()
+  })
+
+  it('CONTROL: a duplicate 409 still links to the existing participant, asking nothing', async () => {
+    const existing = { id: 9, identifier: 'P-07', display_name: 'Maria', role: null, linked_speakers: [] }
+    list.mockResolvedValue({ participants: [existing], total: 1 })
+    create.mockRejectedValue(Object.assign(new Error('dup'), {
+      status: 409, response: { status: 409, data: { detail: "Participant with identifier 'P-07' already exists" } },
+    }))
+    const { onLink } = renderCell()
+    await openPopover()
+    await screen.findByText('Maria')
+    fireEvent.click(screen.getByRole('button', { name: /new participant .P-07./i }))
+    await waitFor(() => expect(onLink).toHaveBeenCalledWith(5, 9, 'Maria'))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+  })
+
+  it('the create button stays FOCUSABLE while its request runs (aria-disabled, never disabled)', async () => {
+    list.mockResolvedValue({ participants: [], total: 0 })
+    let release: (v: unknown) => void = () => {}
+    create.mockImplementation(() => new Promise(r => { release = r }))
+    renderCell()
+    await openPopover()
+    const btn = await screen.findByRole('button', { name: /new participant .P-07./i })
+    fireEvent.click(btn)
+    await waitFor(() => expect(btn).toHaveAttribute('aria-disabled', 'true'))
+    expect(btn).not.toBeDisabled()
+    // The handler's guard refuses a second press while busy.
+    fireEvent.click(btn)
+    expect(create).toHaveBeenCalledTimes(1)
+    release({ id: 1, identifier: 'P-07', display_name: null, role: null, linked_speakers: [] })
+  })
+})

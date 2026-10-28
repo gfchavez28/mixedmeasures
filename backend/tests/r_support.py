@@ -17,6 +17,13 @@ tool's statistics agree with an independent implementation:
                                  0 NA, `nlevels`, `.mm_num` (#765/#583)
     test_qq_plot.py              the Q–Q diagnostic vs base R's `ppoints`,
                                  `qnorm`, `cor` and `qqline` quartiles (#525b)
+    test_export_r_computed_columns.py  the exported script SOURCED in R: every
+                                 computed column equals the CSV and the stored
+                                 value, never re-derived (#1322)
+    test_computed_columns_r_translation.py  the formula dialog's R line run in R
+                                 against `evaluate` on a numeric frame (#1322)
+    test_record_score_rule_r_oracle.py  per-dataset scale scores rebuilt in R from
+                                 the exported item columns (#1313)
 
 ⚠️ That list is a map, not a count — it has been wrong before by counting
 `skipif` decorators rather than tests (#642 said "7 tests"; it was 21). Gate on

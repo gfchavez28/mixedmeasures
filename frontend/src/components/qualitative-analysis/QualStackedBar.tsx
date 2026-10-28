@@ -10,7 +10,7 @@ import {
   LabelList,
   ResponsiveContainer,
 } from 'recharts'
-import type { TooltipContentProps } from 'recharts'
+import type { TooltipContentProps, BarRectangleItem } from 'recharts'
 import { useChartColors } from '@/lib/theme-context'
 import type { SourceFrequenciesResponse } from '@/lib/api'
 import type { QualOrientation, QualSortOrder, QualValueMode, QualDenominatorMode } from '@/lib/qual-analysis-types'
@@ -18,6 +18,7 @@ import type { DataLabelPosition } from '@/lib/chart-data'
 import type { ChartDataRow } from '@/lib/chart-types'
 import { shapeQualStackedBarData } from './qual-chart-data'
 import { ChartFigure } from '@/components/charts/ChartFigure'
+import { barClickRow } from '@/components/charts/bar-row-label'
 
 interface QualStackedBarProps {
   data: SourceFrequenciesResponse
@@ -170,10 +171,11 @@ export default function QualStackedBar({
               barSize={20}
               isAnimationActive={false}
               cursor={onBarClick ? 'pointer' : undefined}
-              onClick={(_data: unknown, index: number) => {
-                if (onBarClick && chartData[index]) {
-                  onBarClick(chartData[index]._id as number)
-                }
+              onClick={(clicked: BarRectangleItem) => {
+                // #1314: the clicked segment's own row — never `chartData[index]`, which recharts
+                // numbers past a source's unused code (bar-row-label.ts).
+                const id = barClickRow<ChartDataRow>(clicked)?._id as number | undefined
+                if (onBarClick && id != null) onBarClick(id)
               }}
             >
               {dataLabels === 'inside' && (

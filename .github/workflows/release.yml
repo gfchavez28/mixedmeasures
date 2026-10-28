@@ -393,6 +393,23 @@ jobs:
           fi
           echo "✅ frozen backend booted + /health 200 + .sav preview parsed (pyreadstat frozen-proof, #535) on ${{ matrix.os }}"
 
+      # 2c) The ticket-service retry, proved on THIS runner before anything is published (#1293).
+      #     Every `xcrun stapler` call below goes through scripts/stapler.js: up to 3 tries, 20 s
+      #     apart, stapler's output printed for each failed one, nothing printed on a first-time
+      #     pass. On 2026-10-17 the v1.5.7 tag lost three of four mac attempts to single dropped
+      #     calls, each on a different one of them. Apple cannot be made to drop a call, so the
+      #     script drives its own CLI through a stand-in xcrun (one call that drops once, one that
+      #     always fails) — this step's log shows the retry line every run.
+      #     ⚠️ electron-builder's own staple of the .app, inside "Package & publish", is a fifth
+      #     call this does not reach: @electron/notarize 2.5.0's `retries: 3` never fires, so a drop
+      #     there fails that step. Its recovery stays `gh run rerun <id> --failed` (RELEASING
+      #     *Known gotchas*).
+      - name: Self-test — the ticket-service retry (macOS)
+        if: matrix.eb_target == 'mac'
+        timeout-minutes: 2
+        working-directory: electron
+        run: node scripts/stapler.js --self-test
+
       # 3) Package + (conditionally) sign + publish to the draft release.
       #    electron-builder signs macOS automatically when CSC_LINK is present and
       #    builds unsigned otherwise; the notarize/azure config overrides are only
@@ -536,9 +553,11 @@ jobs:
       #      manifest is re-patched here (update-manifest.js recomputes sha512/size) BEFORE
       #      the next step publishes it. Never re-upload a mac artifact without re-patching —
       #      a stale hash fails every mac update at validation.
+      #      The staple and the validate go through scripts/stapler.js (#1293, step 2c): each may
+      #      take 3 tries, so the cap is 25 minutes, not 15.
       - name: Notarize + staple the DMG (macOS)
         if: matrix.eb_target == 'mac'
-        timeout-minutes: 15
+        timeout-minutes: 25
         working-directory: electron
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -558,8 +577,8 @@ jobs:
           xcrun notarytool submit "$DMG" \
             --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
-          xcrun stapler staple "$DMG"
-          xcrun stapler validate "$DMG"
+          node scripts/stapler.js staple "$DMG"
+          node scripts/stapler.js validate "$DMG"
           echo "✅ dmg notarized + stapled"
           # The staple rewrote the dmg → recompute its manifest entry (sha512/size)
           # in the LOCAL latest-mac.yml before anything publishes it (#29 S1).
@@ -597,7 +616,8 @@ jobs:
       #       above reads the built .app, not the zip. electron-builder 26.15.4 changed the tool
       #       that makes it (Info-ZIP `zip -y` → 7-Zip 24.09 with `-snl`); upstream's regression
       #       test checks symlinks on an unsigned x64 app and nothing else. Squirrel.Mac (Electron
-      #       44.5.1 vendors it at 8d808803) runs `/usr/bin/ditto -xk` with only DITTOABORT=1 in
+      #       44.9.3 vendors it at fffea30e plus #54844's ShipIt patch; 44.5.1 had 8d808803, and
+      #       neither change touches the two files named here) runs `/usr/bin/ditto -xk` with only DITTOABORT=1 in
       #       its environment (SQRLZipArchiver.m), then accepts the bundle only if
       #       SecStaticCodeCheckValidityWithErrors(kSecCSCheckNestedCode | kSecCSStrictValidate |
       #       kSecCSCheckAllArchitectures, the RUNNING app's designated requirement) passes
@@ -694,8 +714,9 @@ jobs:
             fi
           fi
           if [ -n "$NEW" ]; then
-            if xcrun stapler validate "$NEW" >/dev/null 2>&1; then echo "✅ the stapled ticket survives the zip"; else soft "stapler validate failed on the unpacked update"; fi
-            if spctl --assess --type execute "$NEW" >/dev/null 2>&1; then echo "✅ Gatekeeper accepts the unpacked update"; else soft "spctl refuses the unpacked update"; fi
+            # #1293: the ticket check retries a dropped call and prints stapler's output when it fails.
+            if node scripts/stapler.js validate "$NEW"; then echo "✅ the stapled ticket survives the zip"; else soft "stapler validate failed on the unpacked update"; fi
+            if out="$(spctl --assess --type execute "$NEW" 2>&1)"; then echo "✅ Gatekeeper accepts the unpacked update"; else printf '%s\n' "$out"; soft "spctl refuses the unpacked update"; fi
           fi
 
           rm -rf "$W"
@@ -738,9 +759,12 @@ jobs:
       #     Gatekeeper must stop the release. On the credential-free unsigned path (no
       #     CSC_LINK) it reports informationally so the unsigned build stays green and the
       #     step flips to enforcing automatically once the secrets land.
+      #     #1293: a check's output is printed when it FAILS (it used to go to /dev/null, so a
+      #     failure said only which check), and the two ticket checks go through scripts/stapler.js,
+      #     which retries a dropped call — hence 15 minutes, not 5.
       - name: Verify — codesign + notarization + Gatekeeper (macOS)
         if: matrix.eb_target == 'mac'
-        timeout-minutes: 5
+        timeout-minutes: 15
         working-directory: electron
         env:
           SIGNED: ${{ secrets.CSC_LINK != '' }}
@@ -752,22 +776,31 @@ jobs:
           if [ -z "${APP:-}" ]; then echo "❌ no .app found under release/ — nothing to verify"; exit 1; fi
 
           fail=0
-          check() {  # check "<label>" <cmd...>; hard-fails only on the signed path
-            local label="$1"; shift
-            if "$@" >/dev/null 2>&1; then
-              echo "✅ $label"
+          verdict() {  # verdict "<label>" <exit code>; hard-fails only on the signed path
+            if [ "$2" = "0" ]; then
+              echo "✅ $1"
             elif [ "$SIGNED" = "true" ]; then
-              echo "❌ $label  (signed build MUST pass)"; fail=1
+              echo "❌ $1  (signed build MUST pass)"; fail=1
             else
-              echo "⚠️  $label  — expected on the unsigned path (no signing creds)"
+              echo "⚠️  $1  — expected on the unsigned path (no signing creds)"
             fi
+          }
+          check() {  # check "<label>" <cmd...>; quiet on a pass, prints the command's output on a failure
+            local label="$1" out rc; shift
+            out="$("$@" 2>&1)"; rc=$?
+            [ "$rc" = "0" ] || printf '%s\n' "$out"
+            verdict "$label" "$rc"
+          }
+          ticket() {  # ticket "<label>" <file>; the retrying helper prints its own lines (#1293)
+            node scripts/stapler.js validate "$2"
+            verdict "$1" "$?"
           }
 
           check "codesign --verify --deep --strict"        codesign --verify --deep --strict --verbose=2 "$APP"
           check "signature is Developer ID Application"     bash -c "codesign --display --verbose=4 '$APP' 2>&1 | grep -q 'Authority=Developer ID Application'"
           check "spctl Gatekeeper assess (execute)"         spctl --assess --type execute --verbose "$APP"
-          check "stapler validate (.app notarization)"      xcrun stapler validate "$APP"
-          [ -n "${DMG:-}" ] && check "stapler validate (.dmg)" xcrun stapler validate "$DMG"
+          ticket "stapler validate (.app notarization)"     "$APP"
+          [ -n "${DMG:-}" ] && ticket "stapler validate (.dmg)" "$DMG"
 
           if [ "$fail" = "1" ]; then echo "GATEKEEPER GATE: ❌ FAIL"; exit 1; fi
           echo "GATEKEEPER GATE: ✅ PASS ($([ "$SIGNED" = "true" ] && echo 'signed — enforced' || echo 'unsigned — informational'))"

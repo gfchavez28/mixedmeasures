@@ -17,7 +17,7 @@ from ..models.note import Note
 from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
 from ..models.code_application import CodeApplication
 from ..models.code import Code
-from ..models.excerpt import whole_segment_excerpt_filter, excerpt_source_pair
+from ..models.excerpt import whole_segment_excerpt_filter, excerpt_source_pair, excerpt_text_from
 from ..models.participant import Participant
 from ..schemas.excerpt import (
     ExcerptCreate,
@@ -52,13 +52,12 @@ def _excerpt_to_response(excerpt: Excerpt) -> ExcerptResponse:
 
     if excerpt.segment:
         seg = excerpt.segment
-        if excerpt.start_offset is not None and excerpt.end_offset is not None:
-            excerpt_text = seg.text[excerpt.start_offset:excerpt.end_offset]
-        else:
-            # Whole-segment AND time-range shapes: the segment's text. For a
-            # clip that is the LABEL — a time excerpt's identity is its RANGE
-            # (start_time/end_time on the response), never a text slice.
-            excerpt_text = seg.text
+        # Whole-segment AND time-range shapes read the segment's text. For a clip
+        # that is the LABEL — a time excerpt's identity is its RANGE
+        # (start_time/end_time on the response), never a text slice.
+        excerpt_text = excerpt_text_from(
+            seg.text, excerpt.start_offset, excerpt.end_offset, None
+        )
 
         conversation_id = seg.conversation_id
         if seg.conversation:
@@ -71,7 +70,7 @@ def _excerpt_to_response(excerpt: Excerpt) -> ExcerptResponse:
         segment_timestamp = seg.start_time
     elif excerpt.dataset_value:
         dv = excerpt.dataset_value
-        excerpt_text = dv.value_text or ""
+        excerpt_text = excerpt_text_from(None, None, None, dv.value_text)
 
     note_info = None
     if excerpt.note and not excerpt.note.is_archived:
@@ -699,7 +698,9 @@ async def list_quoted_excerpts(
                 continue
 
             is_sub = exc.start_offset is not None and exc.end_offset is not None
-            text = seg.text[exc.start_offset:exc.end_offset] if is_sub else seg.text
+            # #1319: through the one place an excerpt's text is decided, so the Quote
+            # Board can never disagree with the excerpt API or the CSV about a quote.
+            text = excerpt_text_from(seg.text, exc.start_offset, exc.end_offset, None)
             full_text = seg.text
 
             speaker = seg.speaker

@@ -4,6 +4,7 @@
  */
 import { getHslTextColor } from './utils'
 import { metricDisplayLabel } from './metric-label'
+import { NO_VALUE, undefinedTooltip } from './stat-format'
 
 import type {
   MetricDefinitionResponse,
@@ -654,7 +655,15 @@ export interface DumbbellNInfo extends ChartNInfo {
 export interface BarDatum {
   label: string
   fullLabel?: string
-  value: number
+  /**
+   * #1363 — `null` when the statistic is UNDEFINED (no values after missing data
+   * was excluded): no bar is drawn, and the label and the tooltip say why. A real
+   * measured 0 stays `0`. Never `?? 0` this — that is the claim `statistics.md` §1
+   * forbids, drawn.
+   */
+  value: number | null
+  /** #1363 — the server's `undefined_reason` for a `null` value, when it sent one. */
+  undefinedReason?: string | null
   count?: number
   percentage?: number
   n?: number
@@ -668,7 +677,13 @@ export interface BarDatum {
 
 export interface HeatmapCell {
   count: number
-  percentage: number
+  /**
+   * #1412 — `null` when the row's result has no valid answers (`valid_n` 0), so
+   * the share is 0/0: the cell reads `—`, never `0.0%`. The COUNT stays a real 0.
+   */
+  percentage: number | null
+  /** #1412 — the server's reason for a `null` percentage, when it sent one (#1413). */
+  undefinedReason?: string | null
 }
 
 export interface HeatmapRow {
@@ -681,6 +696,8 @@ export interface HeatmapRow {
   totalN: number
   groupLabel?: string
   isGroupEnd?: boolean
+  /** #1412 — the row's result had no valid answers; every cell is `percentage: null`. */
+  undefinedStatistic?: boolean
 }
 
 export interface HeatmapData {
@@ -690,7 +707,9 @@ export interface HeatmapData {
 
 export interface DumbbellDot {
   groupValue: string
-  value: number
+  /** #1363 — `null` when undefined for this group: no dot, the reason in its text. */
+  value: number | null
+  undefinedReason?: string | null
   n: number
   ciLower?: number
   ciUpper?: number
@@ -746,6 +765,8 @@ export function computeDumbbellAxis(
   const halfWidths: number[] = []
   for (const row of rows) {
     for (const d of row.dots) {
+      // #1363: an undefined dot is not drawn, so it must not move the axis.
+      if (d.value == null) continue
       dots.push(d.value)
       if (opts.showCI && d.ciLower != null && d.ciUpper != null) {
         lowers.push(d.ciLower)
@@ -790,14 +811,21 @@ export interface GroupedFrequencySection {
   metricId: number
   metricName: string
   metricFullLabel?: string
-  groups: { groupValue: string; bars: BarDatum[] }[]
+  /**
+   * #1412 — `undefinedStatistic` when the group's result has no valid answers:
+   * its bars carry `value: null` (no bar in percentage display) and a real
+   * `count` of 0. A group with NO result for this variable has `bars: []` and is
+   * absent, not undefined (#1432's case).
+   */
+  groups: { groupValue: string; bars: BarDatum[]; undefinedStatistic?: boolean; undefinedReason?: string | null }[]
 }
 
 export interface GroupedScalarSection {
   metricId: number
   metricName: string
   metricFullLabel?: string
-  groups: { groupValue: string; value: number; n: number; ciLower?: number; ciUpper?: number; ciMethod?: string }[]
+  /** #1363 — `value` is `null` when undefined for that group. */
+  groups: { groupValue: string; value: number | null; undefinedReason?: string | null; n: number; ciLower?: number; ciUpper?: number; ciMethod?: string }[]
 }
 
 /** Extract sorted unique group values from metrics (numeric-aware, #406). */
@@ -866,11 +894,16 @@ export function shapeFrequencyBars(
   if (hidden) scaleOrder = scaleOrder.filter(l => !hidden.has(l))
   if (options?.reverseScale) scaleOrder = [...scaleOrder].reverse()
 
+  // #1412: nobody answered → every share is 0/0, so `value` is null and the
+  // count stays a real 0. Otherwise a label absent from `percentages` is a real 0.
+  const undef = frequencyUndefined(result)
+  const undefinedReason = frequencyUndefinedReason(result)
   return scaleOrder.map(label => ({
     label,
-    value: percentages[label] ?? 0,
+    value: undef ? null : (percentages[label] ?? 0),
+    ...(undef ? { undefinedReason } : {}),
     count: counts[label] ?? 0,
-    percentage: percentages[label] ?? 0,
+    percentage: undef ? undefined : (percentages[label] ?? 0),
     n: result.valid_n,
     // `?? undefined` rather than `?? 0`: an interval that could not be computed
     // (n < 2) must be ABSENT, not a zero-width bar sitting on the estimate —
@@ -879,6 +912,73 @@ export function shapeFrequencyBars(
     ciUpper: ciUpper[label] ?? undefined,
     ciMethod,
   }))
+}
+
+/**
+ * #1363 — THE number a proportion / mean / variable-group result draws, or
+ * `null` when the server could not compute it (`compute_proportion` /
+ * `compute_mean` / `compute_domain_aggregate` send `None` when no value
+ * survives missing-data exclusion). Every scalar CHART shaper reads it, so a chart,
+ * its label, its accessible text and its exported table cannot disagree about it.
+ * ⚠️ `shapeSummaryStats` (the summary table) still reads the same fields itself;
+ * it agrees today (`null` when undefined) but is a seventh reader, not this one.
+ *
+ * 🔴 Never `?? 0`: that drew an undefined statistic as a zero (`statistics.md`
+ * §1). ⚠️ And never `if (!value)` downstream — a real measured 0 is `0` here.
+ */
+export function scalarValue(rd: JsonRecord): number | null {
+  const v = rd.percentage ?? rd.mean ?? rd.aggregate_value
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+/**
+ * #1363 — a scalar chart value at `DISPLAY_PRECISION`, or `NO_VALUE` when it is
+ * undefined. A real 0 prints `0.0` (never `value ? … : NO_VALUE`).
+ */
+export function formatScalar(v: number | null | undefined): string {
+  return v == null || !Number.isFinite(v) ? NO_VALUE : v.toFixed(DISPLAY_PRECISION)
+}
+
+/** #1363 — the server's reason for a `null` `scalarValue`, when it sent one. */
+export function scalarUndefinedReason(rd: JsonRecord): string | null {
+  return scalarValue(rd) == null && typeof rd.undefined_reason === 'string' ? rd.undefined_reason : null
+}
+
+/**
+ * #1412 — the frequency family's `scalarValue`: a frequency RESULT with no
+ * valid answers, whose every share is 0/0. Every frequency shaper asks it, so a
+ * group nobody answered is `—` in the bars, the heatmap, the stacked bars, the
+ * table and the exported table alike — never `0.0%`.
+ *
+ * 🔴 Keyed on `valid_n`, NEVER on `percentages[k] === null`: the server sends
+ * `None` per option only for a DECLARED scale; an undeclared variable's empty
+ * group arrives as `percentages: {}`, `scale_order: []` (EXECUTED, r1 review),
+ * and #1455's zero-fill then gave it a `?? 0` bar under every category.
+ * ⚠️ A group WITH answers that chose none of this option is a real 0 — this
+ * asks about the GROUP, never about one option's value (never `if (!pct)`).
+ * ⚠️ It says nothing about WHY: `valid_n` 0 has two causes the wire cannot
+ * tell apart (nobody answered · every answer was in the metric's exclusion
+ * list), so the client shows the server's reason or the neutral sentence.
+ */
+export function frequencyUndefined(result: { valid_n: number }): boolean {
+  return result.valid_n === 0
+}
+
+/** #1412 — the server's reason for an undefined frequency result, when it sent one (none does yet: #1413). */
+export function frequencyUndefinedReason(result: { valid_n: number; result_data: unknown }): string | null {
+  const rd = result.result_data as JsonRecord | null
+  return frequencyUndefined(result) && typeof rd?.undefined_reason === 'string' ? rd.undefined_reason : null
+}
+
+/**
+ * #1412 — the ONE sentence a frequency figure prints for its groups that have
+ * no value, e.g. `C — Not computable for this data.`; `null` when there are
+ * none. The bars, the heatmap and the stacked bars all print it, so a figure
+ * and its export cannot word one fact two ways.
+ */
+export function undefinedGroupsNote(groups: { group: string; reason: string | null | undefined }[]): string | null {
+  if (groups.length === 0) return null
+  return groups.map(g => `${g.group} ${NO_VALUE} ${undefinedTooltip(g.reason)}`).join(' ')
 }
 
 /**
@@ -893,13 +993,14 @@ export function shapeScalarBars(
     .filter(m => m.results.length > 0)
     .map(m => {
       const rd = m.results[0].result_data as JsonRecord
-      const value = rd.percentage ?? rd.mean ?? rd.aggregate_value ?? 0
+      const value = scalarValue(rd)
       const fullLabel = metricDisplayLabel(m)
       const displayLabel = labelMap?.get(m.id) ?? fullLabel
       return {
         label: displayLabel,
         fullLabel,
         value,
+        undefinedReason: scalarUndefinedReason(rd),
         count: rd.count ?? undefined,
         percentage: rd.percentage ?? undefined,
         n: m.results[0].valid_n,
@@ -933,7 +1034,8 @@ export function shapeGroupedScalarBars(
         const rd = result.result_data as JsonRecord
         groups.push({
           groupValue: gv,
-          value: rd.percentage ?? rd.mean ?? rd.aggregate_value ?? 0,
+          value: scalarValue(rd),
+          undefinedReason: scalarUndefinedReason(rd),
           n: result.valid_n,
           ciLower: rd.ci_lower ?? undefined,
           ciUpper: rd.ci_upper ?? undefined,
@@ -942,6 +1044,99 @@ export function shapeGroupedScalarBars(
       }
       return { metricId: m.id, metricName: dl, metricFullLabel: fl, groups }
     })
+}
+
+/**
+ * #1406 — the groups a grouped figure draws, in the order it draws them: every
+ * group value on the wire (the `null` missing-group bucket is never a group),
+ * minus the hidden ones, in the chosen order. The Analysis view computed this
+ * inline three times; the Canvas and its export never did.
+ */
+export function visibleGroupValues(
+  metrics: MetricDefinitionResponse[],
+  options?: { hiddenGroupValues?: string[]; sortOrder?: SortOrder },
+): string[] {
+  const all = getGroupValues(metrics)
+  const hidden = options?.hiddenGroupValues
+  const shown = hidden?.length ? all.filter(gv => !hidden.includes(gv)) : all
+  return options?.sortOrder ? sortGroupValues(shown, options.sortOrder, metrics) : shown
+}
+
+/**
+ * #1406 — THE decision for a scalar (proportion / mean / variable-group) BAR
+ * figure: grouped sections when the payload is grouped, one bar per variable
+ * when it is not. Every scalar bar surface asks this — the Analysis view's two
+ * bar arms, the Canvas embed's two, and the Canvas export's table — so none can
+ * draw a grouped payload as the ungrouped figure.
+ *
+ * 🔴 Why it exists: `shapeScalarBars` reads `results[0]`, and a grouped
+ * payload is ordered by `group_value` with SQLite's NULLs FIRST — so with any
+ * record lacking a group, the Canvas drew the MISSING-GROUP bucket's number
+ * under the variable's name (EXECUTED: `score = 100.0, n = 1` for groups whose
+ * means are 3, 6, —, 0). Never call `shapeScalarBars` on a payload this has not
+ * classified.
+ */
+export type ScalarBarFigure =
+  | { kind: 'grouped'; sections: GroupedScalarSection[]; groupValues: string[] }
+  | { kind: 'ungrouped'; bars: BarDatum[] }
+
+export function shapeScalarBarFigure(
+  metrics: MetricDefinitionResponse[],
+  options?: {
+    colorMap?: Map<number, string>
+    labelMap?: Map<number, string>
+    hiddenGroupValues?: string[]
+    sortOrder?: SortOrder
+  },
+): ScalarBarFigure {
+  if (isGroupedMetrics(metrics)) {
+    const groupValues = visibleGroupValues(metrics, options)
+    return { kind: 'grouped', sections: shapeGroupedScalarBars(metrics, groupValues, options?.labelMap), groupValues }
+  }
+  return { kind: 'ungrouped', bars: shapeScalarBars(metrics, options?.colorMap, options?.labelMap) }
+}
+
+/**
+ * #1406 — the same decision for ONE frequency distribution drawn as vertical
+ * bars (the only frequency arm that read `metrics[0].results[0]`; the
+ * horizontal arm's `FrequencyBarChart` asks `isGroupedMetrics` itself).
+ */
+export type FrequencyBarFigure =
+  | { kind: 'grouped'; section: GroupedFrequencySection; groupValues: string[] }
+  | { kind: 'ungrouped'; bars: BarDatum[] }
+
+export function shapeFrequencyBarFigure(
+  metrics: MetricDefinitionResponse[],
+  options?: { hiddenLabels?: string[]; reverseScale?: boolean; hiddenGroupValues?: string[]; sortOrder?: SortOrder },
+): FrequencyBarFigure {
+  if (isGroupedMetrics(metrics)) {
+    const groupValues = visibleGroupValues(metrics, options)
+    return { kind: 'grouped', section: shapeGroupedFrequencyBars(metrics[0], groupValues, options), groupValues }
+  }
+  return { kind: 'ungrouped', bars: metrics.length > 0 ? shapeFrequencyBars(metrics[0], options) : [] }
+}
+
+/**
+ * #1412 — one heatmap row's cells. A result with no valid answers gives EVERY
+ * column an undefined cell (`percentage: null`, a real count of 0) — including
+ * the columns its own `scale_order` lacks, which an undeclared empty group
+ * lacks entirely; a defined result keeps `null` for a label it never saw (#1443).
+ */
+function heatmapCells(
+  result: { valid_n: number; result_data: unknown },
+  columnLabels: string[],
+  metricLabels: Set<string>,
+  counts: Record<string, number>,
+  percentages: Record<string, number>,
+): (HeatmapCell | null)[] {
+  if (frequencyUndefined(result)) {
+    const undefinedReason = frequencyUndefinedReason(result)
+    return columnLabels.map(colLabel => ({ count: counts[colLabel] ?? 0, percentage: null, undefinedReason }))
+  }
+  return columnLabels.map(colLabel => {
+    if (!metricLabels.has(colLabel)) return null
+    return { count: counts[colLabel] ?? 0, percentage: percentages[colLabel] ?? 0 }
+  })
 }
 
 /**
@@ -980,14 +1175,9 @@ export function shapeHeatmapRows(
         label: dl,
         fullLabel: fl,
         metricId: m.id,
-        cells: columnLabels.map(colLabel => {
-          if (!metricLabels.has(colLabel)) return null
-          return {
-            count: counts[colLabel] ?? 0,
-            percentage: percentages[colLabel] ?? 0,
-          }
-        }),
+        cells: heatmapCells(m.results[0], columnLabels, metricLabels, counts, percentages),
         totalN: m.results[0].valid_n,
+        ...(frequencyUndefined(m.results[0]) ? { undefinedStatistic: true } : {}),
       }
     })
 
@@ -1026,13 +1216,11 @@ export function shapeHeatmapRows(
       metricLabel: dl,
       groupColor: gtc?.[r.group_value!],
       metricId: m.id,
-      cells: columnLabels.map(colLabel => {
-        if (!metricLabels.has(colLabel)) return null
-        return { count: counts[colLabel] ?? 0, percentage: percentages[colLabel] ?? 0 }
-      }),
+      cells: heatmapCells(r, columnLabels, metricLabels, counts, percentages),
       totalN: r.valid_n,
       groupLabel: r.group_value!,
       isGroupEnd: isLast,
+      ...(frequencyUndefined(r) ? { undefinedStatistic: true } : {}),
     }
   }
 
@@ -1076,7 +1264,64 @@ export function shapeHeatmapRows(
 }
 
 /**
+ * #1455 — ONE category order from several groups' own orders: each order is
+ * kept, and labels no order places relative to each other fall back to
+ * `compareValueLabels` (#406). That is the server's rule
+ * (`services/metrics.py::compute_frequency_distribution`'s `scale_order`): a
+ * declared scale in full, then the values this group saw that the declaration
+ * never named, in value order — so a declared scale keeps its order with any
+ * stray value after it, and an undeclared variable comes out in value order
+ * (A {3, 6} + B {4, 6} → 3, 4, 6). Identical orders merge to that order.
+ *
+ * Orders that disagree are impossible from the server's rule but possible
+ * from an old or hand-edited result; the merge cannot loop on them — it takes
+ * the label that sorts first and carries on.
+ */
+function mergeCategoryOrders(orders: string[][]): string[] {
+  const next = new Map<string, Set<string>>()
+  const due = new Map<string, number>()
+  for (const order of orders) {
+    order.forEach((label, i) => {
+      if (!next.has(label)) { next.set(label, new Set()); due.set(label, 0) }
+      const prev = order[i - 1]
+      if (i > 0 && prev !== label && !next.get(prev)!.has(label)) {
+        next.get(prev)!.add(label)
+        due.set(label, due.get(label)! + 1)
+      }
+    })
+  }
+  // `sort` is stable, so labels that compare equal keep first-seen order.
+  const rank = new Map([...next.keys()].sort(compareValueLabels).map((l, i) => [l, i]))
+  const byRank = (a: string, b: string) => rank.get(a)! - rank.get(b)!
+  const remaining = new Set(next.keys())
+  const ready = [...remaining].filter(l => due.get(l) === 0)
+  const merged: string[] = []
+  while (remaining.size > 0) {
+    const pick = ready.length > 0
+      ? ready.splice(ready.indexOf(ready.reduce((a, b) => byRank(a, b) <= 0 ? a : b)), 1)[0]
+      : [...remaining].sort(byRank)[0]
+    remaining.delete(pick)
+    merged.push(pick)
+    for (const label of next.get(pick)!) {
+      if (!remaining.has(label)) continue
+      due.set(label, due.get(label)! - 1)
+      if (due.get(label) === 0) ready.push(label)
+    }
+  }
+  return merged
+}
+
+/**
  * Shape a single frequency_distribution metric with grouped results into clustered bar sections.
+ *
+ * 🔴 #1455: every visible group gets the SAME categories — the union of the
+ * visible groups' own `scale_order`s (`mergeCategoryOrders`), each group's bars
+ * zero-filled over it. Each group's result carries only the values THAT group
+ * saw when the variable declares no labels, and `VerticalBarChart` draws its
+ * x-axis from the first group's bars, so a value only a later group gave was
+ * never drawn (B {4, 6} beside A {3, 6}: B's 50% at "4" vanished). Hiding and
+ * reversal apply to the union, as they applied to one list. The missing-group
+ * bucket is not a visible group and contributes nothing.
  */
 export function shapeGroupedFrequencyBars(
   metric: MetricDefinitionResponse,
@@ -1084,17 +1329,24 @@ export function shapeGroupedFrequencyBars(
   options?: { hiddenLabels?: string[]; reverseScale?: boolean },
   labelMap?: Map<number, string>,
 ): GroupedFrequencySection {
-  const hidden = options?.hiddenLabels ? new Set(options.hiddenLabels) : null
+  const shown = groupValues.map(gv => ({ gv, result: metric.results.find(r => r.group_value === gv) }))
+  let categories = mergeCategoryOrders(
+    shown.flatMap(({ result }) => result ? [((result.result_data as JsonRecord).scale_order as string[] | undefined) || []] : []),
+  )
+  if (options?.hiddenLabels) {
+    const hidden = new Set(options.hiddenLabels)
+    categories = categories.filter(l => !hidden.has(l))
+  }
+  if (options?.reverseScale) categories = [...categories].reverse()
+
   const groups: GroupedFrequencySection['groups'] = []
 
-  for (const gv of groupValues) {
-    const result = metric.results.find(r => r.group_value === gv)
+  for (const { gv, result } of shown) {
     if (!result) {
       groups.push({ groupValue: gv, bars: [] })
       continue
     }
     const rd = result.result_data as JsonRecord
-    let scaleOrder: string[] = rd.scale_order || []
     const counts: Record<string, number> = rd.counts || {}
     const percentages: Record<string, number> = rd.percentages || {}
     // queue #42 — the grouped path needs this too, and the reason is not
@@ -1106,17 +1358,19 @@ export function shapeGroupedFrequencyBars(
     const ciLower: Record<string, number | null> = rd.ci_lower_by_label || {}
     const ciUpper: Record<string, number | null> = rd.ci_upper_by_label || {}
     const ciMethod: string | undefined = rd.ci_method
-
-    if (hidden) scaleOrder = scaleOrder.filter(l => !hidden.has(l))
-    if (options?.reverseScale) scaleOrder = [...scaleOrder].reverse()
+    // #1412: a group nobody answered is `—`, not a 0% under every category.
+    const undef = frequencyUndefined(result)
+    const undefinedReason = frequencyUndefinedReason(result)
 
     groups.push({
       groupValue: gv,
-      bars: scaleOrder.map(label => ({
+      ...(undef ? { undefinedStatistic: true, undefinedReason } : {}),
+      bars: categories.map(label => ({
         label,
-        value: percentages[label] ?? 0,
+        value: undef ? null : (percentages[label] ?? 0),
+        ...(undef ? { undefinedReason } : {}),
         count: counts[label] ?? 0,
-        percentage: percentages[label] ?? 0,
+        percentage: undef ? undefined : (percentages[label] ?? 0),
         n: result.valid_n,
         ciLower: ciLower[label] ?? undefined,
         ciUpper: ciUpper[label] ?? undefined,
@@ -1166,7 +1420,8 @@ export function shapeDumbbellRows(
           const d = r.result_data as JsonRecord
           return {
             groupValue: r.group_value!,
-            value: d.percentage ?? d.mean ?? 0,
+            value: scalarValue(d),
+            undefinedReason: scalarUndefinedReason(d),
             n: r.valid_n,
             ciLower: d.ci_lower ?? undefined,
             ciUpper: d.ci_upper ?? undefined,
@@ -1412,16 +1667,42 @@ export interface StackedBarRow {
   metricLabel?: string
   groupColor?: string
   metricId: number
-  segments: { label: string; count: number; percentage: number }[]
+  /** #1412 — `percentage: null` on every segment of an `undefinedStatistic` row. */
+  segments: { label: string; count: number; percentage: number | null }[]
   totalN: number
   groupLabel?: string
   isGroupEnd?: boolean
+  /** #1412 — the row's result had no valid answers (0/0): marked `—`, never a 0% stack. */
+  undefinedStatistic?: boolean
+  undefinedReason?: string | null
 }
 
 export interface StackedBarData {
   rows: StackedBarRow[]
   responseLabels: string[]
   colors: Record<string, string>
+}
+
+/**
+ * #1412 — one stacked row's segments: a result with no valid answers has no
+ * share to stack (`percentage: null` everywhere, the row `undefinedStatistic`);
+ * its counts stay real 0s.
+ */
+function stackedSegments(
+  result: { valid_n: number; result_data: unknown },
+  responseLabels: string[],
+  counts: Record<string, number>,
+  percentages: Record<string, number>,
+): Pick<StackedBarRow, 'segments' | 'undefinedStatistic' | 'undefinedReason'> {
+  const undef = frequencyUndefined(result)
+  return {
+    segments: responseLabels.map(l => ({
+      label: l,
+      count: counts[l] ?? 0,
+      percentage: undef ? null : (percentages[l] ?? 0),
+    })),
+    ...(undef ? { undefinedStatistic: true, undefinedReason: frequencyUndefinedReason(result) } : {}),
+  }
 }
 
 /**
@@ -1466,11 +1747,7 @@ export function shapeStackedBars(
         label: dl,
         fullLabel: fl,
         metricId: m.id,
-        segments: responseLabels.map(l => ({
-          label: l,
-          count: counts[l] ?? 0,
-          percentage: percentages[l] ?? 0,
-        })),
+        ...stackedSegments(m.results[0], responseLabels, counts, percentages),
         totalN: m.results[0].valid_n,
       }
     })
@@ -1508,11 +1785,7 @@ export function shapeStackedBars(
       metricLabel: dl,
       groupColor: sgtc?.[r.group_value!],
       metricId: m.id,
-      segments: responseLabels.map(l => ({
-        label: l,
-        count: counts[l] ?? 0,
-        percentage: percentages[l] ?? 0,
-      })),
+      ...stackedSegments(r, responseLabels, counts, percentages),
       totalN: r.valid_n,
       groupLabel: r.group_value!,
       isGroupEnd: isLast,
@@ -1604,6 +1877,8 @@ export interface SummaryStatsRow {
    * of the statistic, invisible in a bare five-digit number beside a mean.
    */
   pooledAcrossDomain?: boolean
+  /** #1406 — the group this row describes; `null` on an ungrouped payload. */
+  groupValue?: string | null
 }
 
 /**
@@ -1613,14 +1888,30 @@ export function shapeSummaryStats(
   metrics: MetricDefinitionResponse[],
   labelMap?: Map<number, string>,
   metricType?: string,
+  options?: { hiddenGroupValues?: string[]; sortOrder?: SortOrder },
 ): SummaryStatsRow[] {
-  return metrics
-    .filter(m => m.results.length > 0)
-    .map(m => {
-      const rd = m.results[0].result_data as JsonRecord
-      const fl = metricDisplayLabel(m)
-      const dl = labelMap?.get(m.id) ?? fl
-      const n = m.results[0].valid_n
+  // #1406 — a GROUPED payload is one row per (variable, group), labelled the
+  // heatmap's variable-first way. It read `results[0]`, which on a grouped
+  // payload is the missing-group bucket (NULLs sort first): DRIVEN, the Analysis
+  // view's Summary Table printed `score n 1 mean 100.00` under group-by.
+  const grouped = isGroupedMetrics(metrics)
+  const groupValues = grouped ? visibleGroupValues(metrics, options) : []
+  const entries: { m: MetricDefinitionResponse; r: MetricDefinitionResponse['results'][number] }[] = []
+  for (const m of metrics) {
+    if (m.results.length === 0) continue
+    if (!grouped) { entries.push({ m, r: m.results[0] }); continue }
+    for (const gv of groupValues) {
+      const r = m.results.find(res => res.group_value === gv)
+      if (r) entries.push({ m, r })
+    }
+  }
+  return entries
+    .map(({ m, r }) => {
+      const rd = r.result_data as JsonRecord
+      const ml = metricDisplayLabel(m)
+      const fl = grouped ? `${ml} (${r.group_value})` : ml
+      const dl = grouped ? `${labelMap?.get(m.id) ?? ml} (${r.group_value})` : (labelMap?.get(m.id) ?? ml)
+      const n = r.valid_n
       const mean = rd.mean ?? rd.aggregate_value ?? rd.percentage ?? null
 
       // Standard Error computation
@@ -1654,6 +1945,7 @@ export function shapeSummaryStats(
         // has its own honest label (#693) and a `mean` over a single COLUMN
         // pools nothing. It is the pairing that makes the number ambiguous.
         pooledAcrossDomain: metricType === 'mean' && m.input_source_type === 'dataset_domain',
+        groupValue: grouped ? r.group_value : null,
       }
     })
 }
@@ -1699,7 +1991,10 @@ export interface DivergingBarRow {
   isGroupEnd?: boolean
   segments: Record<string, number>   // dataKey → signed value
   counts: Record<string, number>     // dataKey → unsigned count
-  percentages: Record<string, number> // dataKey → unsigned percentage
+  /** dataKey → unsigned percentage; #1412: `null` on an `undefinedStatistic` row. */
+  percentages: Record<string, number | null>
+  undefinedStatistic?: boolean
+  undefinedReason?: string | null
 }
 
 export interface DivergingStackedBarData {
@@ -1754,7 +2049,9 @@ export function shapeDivergingStackedBars(
   const divergingRows: DivergingBarRow[] = rows.map(row => {
     const segments: Record<string, number> = {}
     const counts: Record<string, number> = {}
-    const percentages: Record<string, number> = {}
+    // #1412: an undefined row's `?? 0` below is GEOMETRY only (no segment is
+    // drawn); the percentage it would print is `null`, set after the loops.
+    const percentages: Record<string, number | null> = {}
 
     // Left segments: negative values
     for (const label of leftLabelsReversed) {
@@ -1792,6 +2089,7 @@ export function shapeDivergingStackedBars(
     for (const label of rightLabels) rightSum += segments[label] ?? 0
     if (centerLabel && centerMode === 'center') rightSum += segments[`${centerLabel}_right`] ?? 0
     maxExtent = Math.max(maxExtent, leftSum, rightSum)
+    if (row.undefinedStatistic) for (const k of Object.keys(percentages)) percentages[k] = null
 
     return {
       label: row.label,
@@ -1805,6 +2103,7 @@ export function shapeDivergingStackedBars(
       segments,
       counts,
       percentages,
+      ...(row.undefinedStatistic ? { undefinedStatistic: true, undefinedReason: row.undefinedReason ?? null } : {}),
     }
   })
 
@@ -1833,7 +2132,9 @@ export interface LineChartPoint {
   label: string
   fullLabel?: string
   metricId: number
-  value: number
+  /** #1363 — `null` when undefined, or when the metric has no result for the group: a GAP. */
+  value: number | null
+  undefinedReason?: string | null
   n: number
   ciLower?: number
   ciUpper?: number
@@ -1871,7 +2172,7 @@ export function shapeLineChart(
       .map(m => {
         const r = m.results[0]
         const rd = r.result_data as JsonRecord
-        const value = rd.percentage ?? rd.mean ?? rd.aggregate_value ?? 0
+        const value = scalarValue(rd)
         const fl = metricDisplayLabel(m)
         const dl = labelMap?.get(m.id) ?? fl
         return {
@@ -1879,6 +2180,7 @@ export function shapeLineChart(
           fullLabel: fl,
           metricId: m.id,
           value,
+          undefinedReason: scalarUndefinedReason(rd),
           n: r.valid_n,
           ciLower: rd.ci_lower ?? undefined,
           ciUpper: rd.ci_upper ?? undefined,
@@ -1905,13 +2207,16 @@ export function shapeLineChart(
       const r = m.results.find(res => res.group_value === gv)
       const fl = metricDisplayLabel(m)
       const dl = labelMap?.get(m.id) ?? fl
-      if (!r) return { label: dl, fullLabel: fl, metricId: m.id, value: 0, n: 0 }
+      // #1363: a metric with no result for this group is a GAP in its line, not a
+      // point at zero (recharts' default `connectNulls={false}` breaks the line).
+      if (!r) return { label: dl, fullLabel: fl, metricId: m.id, value: null, n: 0 }
       const rd = r.result_data as JsonRecord
       return {
         label: dl,
         fullLabel: fl,
         metricId: m.id,
-        value: rd.percentage ?? rd.mean ?? rd.aggregate_value ?? 0,
+        value: scalarValue(rd),
+        undefinedReason: scalarUndefinedReason(rd),
         n: r.valid_n,
         ciLower: rd.ci_lower ?? undefined,
         ciUpper: rd.ci_upper ?? undefined,
@@ -1965,11 +2270,14 @@ export function computeLineChartN(data: LineChartData): DumbbellNInfo {
 
 export interface FrequencyTableRow {
   label: string
+  /** A real count — 0 when nobody chose this option. */
   count: number
-  percent: number
-  validPercent: number
+  /** #1412 — `null` when the table has no records at all (0/0); a real 0 otherwise. */
+  percent: number | null
+  /** #1412 — `null` when no valid answer remains (0/0): nobody answered, or every answer is hidden. */
+  validPercent: number | null
   cumulativeCount: number
-  cumulativeValidPercent: number
+  cumulativeValidPercent: number | null
 }
 
 export interface FrequencyTableMetric {
@@ -1981,6 +2289,8 @@ export interface FrequencyTableMetric {
   totalMissing: number
   totalAll: number
   rows: FrequencyTableRow[]
+  /** #1412 — the server's reason when the result has no valid answers (#1413; none sent yet). */
+  undefinedReason?: string | null
 }
 
 /**
@@ -2031,19 +2341,23 @@ export function shapeFrequencyTable(
     let cumCount = 0
     let cumValidPct = 0
 
+    // #1412: a share of NOTHING is 0/0 — `null`, printed `—`, never `0.0%`.
+    // `validN` reaches 0 two ways: the server's (nobody answered — or every
+    // answer excluded) and this table's own (every answered option hidden).
+    // ⚠️ `> 0`, never truthiness on the RESULT: a real 0% stays `0`.
     const rows: FrequencyTableRow[] = scaleOrder.map(label => {
       const count = counts[label] ?? 0
-      const pct = totalN > 0 ? (count / totalN) * 100 : 0
-      const validPct = validN > 0 ? (count / validN) * 100 : 0
+      const pct = totalN > 0 ? (count / totalN) * 100 : null
+      const validPct = validN > 0 ? (count / validN) * 100 : null
       cumCount += count
-      cumValidPct += validPct
+      cumValidPct += validPct ?? 0
       return {
         label,
         count,
         percent: pct,
         validPercent: validPct,
         cumulativeCount: cumCount,
-        cumulativeValidPercent: cumValidPct,
+        cumulativeValidPercent: validPct == null ? null : cumValidPct,
       }
     })
 
@@ -2056,6 +2370,7 @@ export function shapeFrequencyTable(
       totalMissing: missingN,
       totalAll: totalN,
       rows,
+      ...(validN > 0 ? {} : { undefinedReason: frequencyUndefinedReason(result) }),
     })
   }
   return results
@@ -2193,6 +2508,8 @@ export interface HistogramResult {
   rule: BinRule
   /** Labels that did not parse as numbers — never silently folded into a bin. */
   skippedLabels: string[]
+  /** #1406 — the payload was grouped and the bins pool every group (stated under the chart). */
+  pooledGroups?: boolean
 }
 
 /** Parse a frequency `counts` map into (value, count) pairs, numeric labels only. */
@@ -2362,17 +2679,29 @@ export function shapeHistogramBars(
 ): { bars: BarDatum[]; histogram: HistogramResult } {
   const empty: HistogramResult = { bins: [], binWidth: 0, rule: 'manual', skippedLabels: [] }
   if (metric.results.length === 0) return { bars: [], histogram: empty }
-  const result = metric.results[0]
-  const rd = result.result_data as JsonRecord
-  const counts: Record<string, number> = rd.counts || {}
-  const histogram = binFrequencyCounts(counts, options)
+  // #1406 — a histogram is ONE distribution. A grouped payload's results
+  // partition the records (the `null` bucket holds those with no group), so
+  // their counts SUM to the variable's own distribution; reading `results[0]`
+  // drew the missing-group bucket alone (DRIVEN: one bar, `99`, 100%).
+  const grouped = isGroupedMetrics([metric])
+  const counts: Record<string, number> = {}
+  let validN = 0
+  for (const r of grouped ? metric.results : [metric.results[0]]) {
+    const rc: Record<string, number> = (r.result_data as JsonRecord).counts || {}
+    for (const [label, c] of Object.entries(rc)) counts[label] = (counts[label] ?? 0) + c
+    validN += r.valid_n
+  }
+  const histogram: HistogramResult = {
+    ...binFrequencyCounts(counts, options),
+    ...(grouped ? { pooledGroups: true } : {}),
+  }
   const total = histogram.bins.reduce((s, b) => s + b.count, 0)
   const bars: BarDatum[] = histogram.bins.map(b => ({
     label: b.label,
     value: total > 0 ? (b.count / total) * 100 : 0,
     count: b.count,
     percentage: total > 0 ? (b.count / total) * 100 : 0,
-    n: result.valid_n,
+    n: validN,
   }))
   return { bars, histogram }
 }
@@ -2384,6 +2713,7 @@ export function describeHistogramBasis(h: HistogramResult): string {
   else if (h.rule === 'manual') parts.push(`Bin width ${trimNum(h.binWidth)} (set manually).`)
   else if (h.rule === 'freedman_diaconis') parts.push(`Bin width ${trimNum(h.binWidth)} (Freedman–Diaconis).`)
   else parts.push(`Bin width ${trimNum(h.binWidth)} (Sturges — the interquartile range is zero).`)
+  if (h.pooledGroups) parts.push('All groups combined — a histogram shows one distribution.')
   if (h.skippedLabels.length > 0) {
     parts.push(
       `${h.skippedLabels.length} non-numeric ${h.skippedLabels.length === 1 ? 'value' : 'values'} `

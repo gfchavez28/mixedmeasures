@@ -503,14 +503,14 @@ export interface CrossTabEmbedParams {
 /**
  * Is this material config a quantitative cross-tabulation?
  *
- * ⚠️ Keyed on `chart_type` ALONE, unlike `isComparisonMaterialConfig`'s two
- * markers — and that asymmetry is correct rather than an oversight.
- * `'cross_tab'` is not a default any writer omits (`buildCurrentChartConfig`
- * writes the chart type it drew), so its presence is already unambiguous; the
- * comparison case needs two markers precisely because `rc_view` can be stale on
- * a descriptives config. The MISSING-axis case is a separate question — see
- * `extractCrossTabParams`, which answers it with a null request rather than by
- * denying the material is a cross-tab.
+ * ⚠️ Keyed on `chart_type` ALONE. `'cross_tab'` is not a default any writer
+ * omits (`buildCurrentChartConfig` writes the chart type it drew), so its
+ * presence is unambiguous. It is asked AFTER the R&C marker in `quantChartKind`
+ * because `chart_type` is a Descriptives key the saver writes on EVERY tab (only
+ * the R&C keys were scoped to their sub-view, #1315), so a correlation saved
+ * after a cross-tab visit carries it. The MISSING-axis case is a separate
+ * question — see `extractCrossTabParams`, which answers it with a null request
+ * rather than by denying the material is a cross-tab.
  */
 export function isCrossTabMaterialConfig(
   content: Record<string, unknown> | null | undefined,
@@ -547,6 +547,19 @@ export function extractCrossTabParams(
     display: (content.cross_tab_display as string) ?? 'count',
     scaleOrder: (content.scaleOrder as string) ?? 'natural',
   }
+}
+
+/**
+ * #1406 — which groups a grouped embed shows, read ONCE for the renderer and
+ * the export, so the canvas figure and its exported table name the same
+ * groups. `hidden_group_values` is what `AnalysisView` saves; the dumbbell and
+ * frequency-table arms already honoured it, the bar arms and the export did not.
+ * ⚠️ The saved `sort` is NOT read here: no canvas arm honours it for bars
+ * either (pre-existing), and ordering groups alone would be half of it.
+ */
+export function extractGroupDisplayOptions(content: Record<string, unknown>): { hiddenGroupValues?: string[] } {
+  const hidden = content.hidden_group_values
+  return Array.isArray(hidden) && hidden.length > 0 ? { hiddenGroupValues: hidden as string[] } : {}
 }
 
 /** Build the quickCompute API request from extracted params. */
@@ -633,27 +646,37 @@ export function staleComputedInputs<
 // metrics and drew a plausible, wrong table.
 //
 // ⚠️ **CORRELATION and SCATTER materials had the same fall-through — closed by
-// #831, in two halves, and the residual is stated below.**
+// #831**, which made the saver write `rc_view` UNCONDITIONALLY. That fix was
+// half right: it wrote `rc_view` on EVERY tab, so a Descriptives chart carried
+// `rc_view: 'correlations'` and was refused on the canvas, or — saved after a
+// visit to Comparisons — `rc_view: 'comparisons'` plus `compare_by`, and was
+// drawn as a group comparison under the frequency chart's title (#1315).
 //
-// The saver now writes `rc_view` UNCONDITIONALLY, so every R&C material created
-// from this point identifies itself. For material saved BEFORE that, two of the
-// three shapes are still recoverable from config alone: a scatter matrix
-// carries `show_scatter`, and a non-Pearson correlation carries `corr_type`.
+// 🔴 **#1315 — `rc_view` IS THE R&C MARKER, AND IT CAN BE TRUSTED NOW, for three
+// reasons together:**
+//   1. the saver writes each R&C key only on its own sub-view, and `rc_view`
+//      only on the two R&C views (`AnalysisView::buildCurrentChartConfig`);
+//   2. the backend repair (`services/material_config.py::normalise_rc_keys`, at
+//      startup, after a restore and after a `.mmproject` import) strips every
+//      R&C key from a stored Descriptives material and from every canvas copy
+//      of it, and STAMPS `rc_view` on an R&C material saved before #831 —
+//      which closes #831's accepted legacy default-Pearson residual;
+//   3. ONE function, `quantChartKind`, decides the kind for BOTH the renderer
+//      and the export, so their order cannot diverge again. It had: the
+//      renderer asked "comparison?" first and the export "correlation?" first,
+//      so a comparison carrying `show_scatter` drew on the canvas and exported
+//      as "Chart data not available".
 //
-// ⚠️ **The residual, deliberately accepted (decided with the developer,
-// 2026-08-25): a LEGACY default-Pearson `correlation_matrix` remains
-// indistinguishable from a descriptives material.** Its config carries no
-// marker of any kind — `rc_view` omitted (default), `corr_type` omitted
-// (default), `show_scatter` omitted (false) — and the unconditional keys
-// (`sig_levels`, `nonparametric`, `post_hoc_expanded`, `show_reg_line`) ride
-// EVERY quantitative material, descriptives included, so none of them
-// discriminates. VERIFIED against the real corpus's ten materials.
+// ⚠️ **The residual: an ORPHAN embed** — one whose material row was deleted. The
+// repair joins an embed to its row (`source_tab` + `material_type` decide), so
+// it cannot reach an orphan, and an orphan saved by a pre-#1315 build keeps
+// whatever the old saver leaked. That is why `quantChartKind` keeps the two
+// LEGACY tells (`corr_type`, `show_scatter`) for a config with no `rc_view`: no
+// stored row needs them any more.
 //
-// The alternative was to read the material row's `material_type`, which
-// `material-kind.ts` refuses as an input to this seam for two reasons that
-// still hold (it can disappear; it arrives late). That was put and declined:
-// one discriminator, and a shrinking legacy set left no worse than it is today,
-// beats a second discriminator that makes every embed flash.
+// Reading the material row's `source_tab` at THIS seam was put and declined
+// (`material-kind.ts` — it can disappear; it arrives late); the repair reads it
+// on the server instead, where neither is true.
 
 export interface ComparisonEmbedParams {
   /** The POST body for `comparisonsApi.groupComparison`, or null when unusable. */
@@ -675,68 +698,57 @@ export interface ComparisonEmbedParams {
 }
 
 /**
- * Is this material config a quantitative group comparison?
+ * Which quantitative figure a saved config is — one kind per renderer branch
+ * AND per export branch.
  *
- * `rc_view` is written whenever the R&C view is NOT its default, so
- * `'comparisons'` is always present on a comparison material; `compare_by` is
- * what the comparison cannot run without. Both are required so a descriptives
- * config that happens to carry a stale `compare_by` is not mistaken for one.
+ * - `comparison` → `comparisonsApi.groupComparison`, drawn by `ComparisonChartRouter`
+ * - `correlation` → REFUSED on the canvas (there is no inline correlation or
+ *   scatter renderer) and exported as nothing — a visible limit instead of a
+ *   frequency chart of the correlation's own variables (#831)
+ * - `cross_tab` → `metricsApi.crossTabulation` (#823g / #832)
+ * - `metric` → `metricsApi.quickCompute`
  */
-export function isComparisonMaterialConfig(
-  content: Record<string, unknown> | null | undefined,
-): boolean {
-  if (!content || typeof content !== 'object') return false
-  return content.rc_view === 'comparisons' && content.compare_by != null
-}
+export type QuantChartKind = 'comparison' | 'correlation' | 'cross_tab' | 'metric'
 
 /**
- * Is this material a CORRELATION or SCATTER matrix? (#831)
+ * 🔴 **THE ONE DISPATCH for a quantitative embed (#1315), the `qualChartKind`
+ * shape.** `InlineChartRenderer` and `lib/canvas-export.ts::fetchChartTables`
+ * both ask it, so the order below is the order of both. Ask it only for a
+ * config `isQualitativeMaterialConfig` has already said is not qualitative —
+ * the two consumers do.
  *
- * Sibling of `isComparisonMaterialConfig`, and the two together are what stop
- * an R&C material being drawn as a descriptives metric. This one exists to
- * REFUSE rather than to render: there is no inline correlation renderer, so the
- * honest outcome is the "open it in Analysis" notice — a visible limit instead
- * of a silent wrong figure.
- *
- * Three tells, in the order they became available:
- *   - `rc_view === 'correlations'` — written unconditionally since #831, so it
- *     is present on everything saved from then on. **The primary tell.**
- *   - `corr_type` — present on any non-Pearson correlation, including legacy.
- *   - `show_scatter` — present on any scatter matrix, including legacy.
- *
- * ⚠️ **`show_scatter` is tested with `in`, not for truthiness.** The saver
- * writes it as `showScatter || undefined`, so the key is absent when false —
- * meaning its PRESENCE is the signal and a truthiness test would say the same
- * thing more fragilely. Do not "simplify" it to `content.show_scatter === true`
- * without re-reading the saver.
- *
- * ⚠️ It deliberately does NOT require a second corroborating key the way the
- * comparison predicate does. A comparison needs `compare_by` to run at all, so
- * requiring it costs nothing; a correlation needs only its selected columns,
- * and demanding more would re-open exactly the gap this closes.
+ * The order, and why:
+ *   1. **`rc_view` decides, first.** Present ⇒ an R&C material: `'comparisons'`
+ *      is a comparison, anything else a correlation (the saver's own split —
+ *      it names any R&C view but `comparisons` a correlation matrix). A
+ *      comparison WITHOUT `compare_by` is still a comparison: its request is
+ *      null and both consumers say so, rather than drawing a metric chart of
+ *      its variables under the comparison's title (the cross-tab precedent —
+ *      a missing setting is a null request, not a different kind). FIRST
+ *      because every other marker below can ride an R&C config: `show_scatter`
+ *      and `corr_type` on a comparison saved by a pre-#1315 build, `chart_type`
+ *      on any R&C save.
+ *   2. **The legacy tells, for an ORPHAN embed only.** `corr_type` (a
+ *      non-Pearson correlation) and `show_scatter` (a scatter matrix) are what
+ *      a correlation saved before #831 carried instead of `rc_view`. Every
+ *      STORED one has `rc_view` stamped by the repair now; an embed whose
+ *      material was deleted cannot be reached by it, and these keep such an
+ *      embed refused rather than drawn as a metric. ⚠️ Tested with `in`: the
+ *      saver writes `show_scatter: … || undefined`, so the key's PRESENCE is
+ *      the signal.
+ *   3. **`chart_type: 'cross_tab'`**, then
+ *   4. **a metric**.
  */
-export function isCorrelationMaterialConfig(
+export function quantChartKind(
   content: Record<string, unknown> | null | undefined,
-): boolean {
-  if (!content || typeof content !== 'object') return false
-  if (content.rc_view === 'correlations') return true
-  return 'corr_type' in content || 'show_scatter' in content
-}
-
-/**
- * Any Relationships & Comparisons material — the set the descriptives metric
- * path must not touch.
- *
- * Callers that only need "is this safe to draw as a metric?" should ask THIS
- * rather than either predicate, so a future third R&C kind is added in one
- * place. Both the renderer and the export pipeline consume it (#832: the
- * export was a second file with #817's defect, and a renderer-only fix left
- * Markdown carrying a different figure under the same title).
- */
-export function isRelationshipsMaterialConfig(
-  content: Record<string, unknown> | null | undefined,
-): boolean {
-  return isComparisonMaterialConfig(content) || isCorrelationMaterialConfig(content)
+): QuantChartKind {
+  if (!content || typeof content !== 'object') return 'metric'
+  if (content.rc_view != null) {
+    return content.rc_view === 'comparisons' ? 'comparison' : 'correlation'
+  }
+  if ('corr_type' in content || 'show_scatter' in content) return 'correlation'
+  if (isCrossTabMaterialConfig(content)) return 'cross_tab'
+  return 'metric'
 }
 
 /**

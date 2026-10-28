@@ -26,9 +26,7 @@ import {
   qualChartKind,
   qualChartHasEnoughToFetch,
   staleComputedInputs,
-  isComparisonMaterialConfig,
-  isCorrelationMaterialConfig,
-  isRelationshipsMaterialConfig,
+  quantChartKind,
   extractComparisonParams,
   extractCrossTabParams,
   isCrossTabMaterialConfig,
@@ -525,98 +523,134 @@ describe('staleComputedInputs', () => {
   })
 })
 
-// ── #817: which materials the comparison branch claims ───────────────────────
+// ── #817 / #831 / #1315: which quantitative figure a config is ───────────────
 
-describe('isComparisonMaterialConfig (#817)', () => {
+/**
+ * A Descriptives config exactly as `AnalysisView::buildCurrentChartConfig` +
+ * `handleAddToMaterials` write it since #1315, after the JSON round trip the
+ * server applies (`undefined` keys are gone — and `'k' in {k: undefined}` is
+ * TRUE, so a fixture that skipped the round trip would test a shape no stored
+ * config has). Every R&C key is absent. The saver itself is driven in
+ * `pages/AnalysisView.materials-save.test.tsx`; this is its static mirror.
+ */
+function saverShapedDescriptives(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return JSON.parse(JSON.stringify({
+    title: '', subtitle: '', footnote: '',
+    sort: 'none', display: 'percentage', scaling: 'relative',
+    metric_type: 'frequency_distribution',
+    column_ids: [5], domain_ids: [],
+    ...over,
+  }))
+}
+
+describe('quantChartKind (#817 / #831 / #1315)', () => {
+  it('a saver-shaped Descriptives chart is a METRIC', () => {
+    expect(quantChartKind(saverShapedDescriptives())).toBe('metric')
+    expect(quantChartKind(saverShapedDescriptives({ chart_type: 'cross_tab', cross_tab_column_id: 9 })))
+      .toBe('cross_tab')
+  })
+
   it('claims a saved group comparison', () => {
-    expect(isComparisonMaterialConfig({ rc_view: 'comparisons', compare_by: 60 })).toBe(true)
+    expect(quantChartKind({ rc_view: 'comparisons', compare_by: 60 })).toBe('comparison')
   })
 
-  it('needs BOTH markers', () => {
-    // A descriptives config can carry a stale `compare_by` from an earlier
-    // session; on its own it must not reroute the whole embed.
-    expect(isComparisonMaterialConfig({ compare_by: 60 })).toBe(false)
-    expect(isComparisonMaterialConfig({ rc_view: 'comparisons' })).toBe(false)
+  it('a comparison with no grouping variable is still a comparison — a null request, not a metric', () => {
+    // It used to need BOTH markers, so this fell through to the metric branch
+    // and drew a frequency chart of its own variables under the comparison's
+    // title. The cross-tab precedent: a missing setting is a null request.
+    expect(quantChartKind({ rc_view: 'comparisons', column_ids: [1] })).toBe('comparison')
+    expect(extractComparisonParams({ rc_view: 'comparisons', column_ids: [1] }).request).toBeNull()
   })
 
-  it('does not claim a descriptives material', () => {
-    expect(isComparisonMaterialConfig({ column_ids: [1], metric_type: 'mean' })).toBe(false)
+  it('a bare compare_by is NOT a comparison — rc_view is the marker', () => {
+    // A pre-#1315 Descriptives ORPHAN can carry a leaked `compare_by` and no
+    // `rc_view` (saved before #831 made it unconditional).
+    expect(quantChartKind({ column_ids: [1], compare_by: 60 })).toBe('metric')
+  })
+
+  it('claims a correlation by its marker', () => {
+    expect(quantChartKind({ rc_view: 'correlations', column_ids: [1, 2] })).toBe('correlation')
+  })
+
+  it('any R&C view but comparisons is a correlation — the saver’s own split', () => {
+    // `handleAddToMaterials` names every R&C view but `comparisons` a
+    // correlation matrix; the dispatch must not disagree with the row.
+    expect(quantChartKind({ rc_view: 'something_else', column_ids: [1, 2] })).toBe('correlation')
+  })
+
+  it('🔴 arm 3: a comparison carrying correlation keys is a COMPARISON — rc_view first', () => {
+    // A pre-#1315 saver wrote every R&C key on every view, so a comparison
+    // saved after a Spearman/scatter toggle carries both legacy tells. The
+    // export used to ask "correlation?" first and refuse it while the canvas
+    // drew it.
+    const arm3 = { rc_view: 'comparisons', compare_by: 60, show_scatter: true, corr_type: 'spearman', column_ids: [1] }
+    expect(quantChartKind(arm3)).toBe('comparison')
+  })
+
+  it('rc_view outranks a Descriptives chart_type riding an R&C config', () => {
+    // `chart_type` is written on EVERY tab, so a correlation saved after a
+    // cross-tab visit carries it.
+    expect(quantChartKind({ rc_view: 'correlations', chart_type: 'cross_tab', column_ids: [1, 2] }))
+      .toBe('correlation')
+  })
+
+  it('recovers a LEGACY scatter matrix with no rc_view (an orphan embed)', () => {
+    // `show_scatter: showScatter || undefined` — the key is absent when false,
+    // so its PRESENCE is the signal.
+    expect(quantChartKind({ column_ids: [1, 2], show_scatter: true })).toBe('correlation')
+  })
+
+  it('recovers a LEGACY non-Pearson correlation with no rc_view (an orphan embed)', () => {
+    expect(quantChartKind({ column_ids: [1, 2], corr_type: 'spearman' })).toBe('correlation')
   })
 
   /**
-   * 🔴 **A RECORDED NEGATIVE, not an endorsement.**
-   *
-   * `correlation_matrix` and `scatter_matrix` materials have the SAME
-   * fall-through #817 describes — they are not qualitative, so they land in the
-   * metric branch and render a frequency/mean chart of their own columns. They
-   * are NOT fixed here, and this test exists so the next reader meets that fact
-   * where they would otherwise assume the class was closed.
-   *
-   * ✅ **CLOSED by #831 (2026-08-25), in two halves — and the residual below is
-   * deliberate, not an oversight.** The saver now writes `rc_view`
-   * unconditionally, so every R&C material created from then on identifies
-   * itself; `isCorrelationMaterialConfig` also recovers the two legacy shapes
-   * that left a trace (`corr_type` on a non-Pearson, `show_scatter` on a
-   * scatter matrix).
-   *
-   * ⚠️ **A LEGACY default-Pearson correlation is still indistinguishable from a
-   * descriptives material, and that was decided rather than missed.** Reading
-   * the material row's `material_type` would catch it, and
-   * `lib/material-kind.ts` refuses row data as an input to this seam for two
-   * reasons that still hold (it can disappear; it arrives late). Put to the
-   * developer and declined: one discriminator, with a shrinking legacy set left
-   * no worse than it already was.
+   * ⚠️ **A legacy default-Pearson correlation carries NO marker of any kind, so
+   * the CONFIG alone still reads it as a metric.** #831 accepted that residual;
+   * #1315 closes it on the SERVER — `normalise_rc_keys` stamps `rc_view` from
+   * the row's `source_tab` on every stored copy — so what remains is an ORPHAN
+   * embed only. Pinned so the boundary stays visible here.
    */
-  it('still does NOT claim a legacy default-Pearson correlation — the accepted residual', () => {
-    // No marker of any kind: rc_view omitted (was the default), corr_type
-    // omitted (was the default), show_scatter omitted (false).
-    const legacyPearson = { column_ids: [1, 2], metric_type: 'frequency_distribution' }
-    expect(isComparisonMaterialConfig(legacyPearson)).toBe(false)
-    expect(isCorrelationMaterialConfig(legacyPearson)).toBe(false)
-  })
-})
-
-describe('isCorrelationMaterialConfig (#831)', () => {
-  it('claims anything the saver marked — the primary tell, present since #831', () => {
-    expect(isCorrelationMaterialConfig({ rc_view: 'correlations', column_ids: [1, 2] })).toBe(true)
+  it('an unmarked config is a metric — the repair, not this function, stamps a legacy Pearson', () => {
+    expect(quantChartKind({ column_ids: [1, 2], metric_type: 'frequency_distribution' })).toBe('metric')
   })
 
-  it('recovers a LEGACY scatter matrix, which left a trace even unmarked', () => {
-    // `show_scatter: showScatter || undefined` — the key is absent when false,
-    // so its PRESENCE is the signal.
-    expect(isCorrelationMaterialConfig({ column_ids: [1, 2], show_scatter: true })).toBe(true)
-  })
-
-  it('recovers a LEGACY non-Pearson correlation for the same reason', () => {
-    expect(isCorrelationMaterialConfig({ column_ids: [1, 2], corr_type: 'spearman' })).toBe(true)
-  })
-
-  it('does not claim a descriptives material', () => {
-    // The four keys the saver writes UNCONDITIONALLY ride every quantitative
-    // material, descriptives included — verified against the real corpus's ten
-    // materials — so none of them may be used as a tell.
-    expect(isCorrelationMaterialConfig({
+  it('the old unconditional R&C keys are not tells', () => {
+    expect(quantChartKind({
       column_ids: [1], metric_type: 'mean', chart_type: 'table',
       sig_levels: { show_05: true }, nonparametric: false,
       post_hoc_expanded: true, show_reg_line: true,
-    })).toBe(false)
-  })
-
-  it('does not claim a comparison, which has its own branch and renderer', () => {
-    expect(isCorrelationMaterialConfig({ rc_view: 'comparisons', compare_by: 60 })).toBe(false)
+    })).toBe('metric')
   })
 
   it('tolerates a null or non-object config', () => {
-    expect(isCorrelationMaterialConfig(null)).toBe(false)
-    expect(isCorrelationMaterialConfig(undefined)).toBe(false)
+    expect(quantChartKind(null)).toBe('metric')
+    expect(quantChartKind(undefined)).toBe('metric')
+    expect(quantChartKind({ rc_view: null, column_ids: [1] })).toBe('metric')
   })
-})
 
-describe('isRelationshipsMaterialConfig (#831)', () => {
-  it('is the union, so a third R&C kind is added in ONE place', () => {
-    expect(isRelationshipsMaterialConfig({ rc_view: 'comparisons', compare_by: 60 })).toBe(true)
-    expect(isRelationshipsMaterialConfig({ rc_view: 'correlations' })).toBe(true)
-    expect(isRelationshipsMaterialConfig({ column_ids: [1], metric_type: 'mean' })).toBe(false)
+  it('both consumers dispatch through it, and neither re-derives the order', () => {
+    // The #824 / #832 guard shape: a second derivation is the defect, so scan
+    // the population. Comments are stripped so prose naming a key cannot pass
+    // or fail it (#772).
+    const consumers = {
+      'InlineChartRenderer.tsx': join(__dirname, 'InlineChartRenderer.tsx'),
+      'canvas-export.ts': join(__dirname, '..', '..', 'lib', 'canvas-export.ts'),
+    }
+    for (const [name, path] of Object.entries(consumers)) {
+      const src = stripComments(readFileSync(path, 'utf8'))
+      expect(src, `${name} does not ask quantChartKind`).toMatch(/quantChartKind\(/)
+      // ⚠️ `show_scatter` is deliberately NOT in this list: the renderer reads it
+      // INSIDE the correlation branch to choose "Scatter matrices" over
+      // "Correlation matrices" — wording, after the kind is decided.
+      for (const key of ['rc_view', 'compare_by', 'corr_type']) {
+        expect(src, `${name} re-derives the R&C kind from ${key}`)
+          .not.toMatch(new RegExp(`\\.${key}\\b|'${key}'\\s+in\\b`))
+      }
+      expect(src, `${name} re-derives the cross-tab kind`).not.toMatch(/chart_type\s*===\s*'cross_tab'/)
+      // Falsifier: the pattern does match the shape it exists to catch.
+      expect("if (content.rc_view === 'comparisons')").toMatch(/\.rc_view\b/)
+    }
   })
 })
 

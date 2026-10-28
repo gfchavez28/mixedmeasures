@@ -31,6 +31,7 @@ from ..services.codebook_exchange import (
     import_codebook_native,
     import_codebook_qdc,
 )
+from ..services.merge_additions import build_merge_additions_preview
 from ..services.project_portability import (
     MAX_UPLOAD_SIZE,
     MergeDivergenceError,
@@ -169,6 +170,20 @@ def export_project_endpoint(
 
 # ── Project duplicate (#464) ────────────────────────────────────────────
 
+#: What a failed duplicate says (#1268). It ended "Check server logs for details." —
+#: a desktop user has no log to open (the backend writes to stderr only). "Nothing was
+#: changed" is true: the copy is an import whose files are staged until the one commit
+#: at the end, and every failure rolls back first (pinned by test).
+DUPLICATE_FAILED = (
+    "The project could not be duplicated, and nothing was changed. It is safe to try "
+    "again."
+)
+DUPLICATE_DISK_FULL = (
+    "There is not enough free disk space to duplicate this project. Nothing was "
+    "changed. Free some space and try again."
+)
+
+
 @router.post("/{project_id}/duplicate", response_model=ProjectImportResult)
 # `def`, not `async def` — see the note above `_PORTABILITY_SYNC_NOTE`. (#837)
 def duplicate_project_endpoint(
@@ -261,10 +276,18 @@ def duplicate_project_endpoint(
     except ValueError as e:
         db.rollback()
         raise HTTPException(400, str(e))
+    except OSError as e:
+        # #1268 — a duplicate stages a second copy of every document and recording, so
+        # a full disk is its likeliest fault; said as the import endpoint says it.
+        db.rollback()
+        logger.error("Project duplicate failed: %s", e, exc_info=True)
+        if e.errno == errno.ENOSPC:
+            raise HTTPException(507, DUPLICATE_DISK_FULL)
+        raise HTTPException(500, DUPLICATE_FAILED)
     except Exception as e:
         db.rollback()
         logger.error("Project duplicate failed: %s", e, exc_info=True)
-        raise HTTPException(500, "Project duplicate failed. Check server logs for details.")
+        raise HTTPException(500, DUPLICATE_FAILED)
     finally:
         if tmp_path.exists():
             os.unlink(tmp_path)
@@ -300,9 +323,17 @@ async def validate_import_endpoint(
         existing_project = None
         merge_coders = None
         merge_codes_preview = None
+        file_coders = None
+        merge_additions = None
         incoming_uuid = result["manifest"].get("project_uuid")
         if incoming_uuid:
             match = _find_existing_project_by_uuid(db, incoming_uuid, user)
+            if not match:
+                # #1321 — no local copy, so the dialog offers a CODING COPY. Its import
+                # lands nobody by name (#1352 — every install's first coder is
+                # "Researcher"), so the dialog reads this preview to ask which of the
+                # file's people is you (D2); a coder known by identity needs no answer.
+                file_coders = build_merge_coder_preview(db, tmp_path)
             if match:
                 existing_project = {"id": match.id, "name": match.name}
                 # Track J · J3-2: a merge is possible — surface the file's coders +
@@ -313,11 +344,20 @@ async def validate_import_endpoint(
                 # attempting the merge (no failed-merge round-trip). Empty when the
                 # codebook is shared-frozen.
                 merge_codes_preview = build_merge_code_preview(db, tmp_path, match.id)
+                # #1190 (D15): what the merge would also ADD (deleted things coming back).
+                # OFF the event loop: it reads the archive's `dataset_rows` member once and
+                # asks the database about every record — 1.3 s on BES (122,382 records,
+                # 2026-10-23), which on the loop holds every request, `/health` included
+                # (#1022). The session is used by that one thread while this awaits it.
+                merge_additions = await run_in_threadpool(
+                    build_merge_additions_preview, db, tmp_path, match.id)
         return {
             **result,
             "existing_project": existing_project,
             "merge_coders": merge_coders,
             "merge_codes_preview": merge_codes_preview,
+            "file_coders": file_coders,
+            "merge_additions": merge_additions,
         }
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -331,7 +371,8 @@ def _import_failure(import_mode: str, *, disk_full: bool) -> str:
     staged: a failure before the commit changes neither the database nor a file (the safety
     copy, if one was written, is a NEW file). A merge names itself, because the Merge page
     shows the server's sentence first (#1232) and a merge is not "an import" to the
-    researcher who pressed Merge."""
+    researcher who pressed Merge. #1268: it ended "Check server logs for details.", and a
+    desktop user has no log to open — so it says the one thing they can do."""
     merging = import_mode == "merge"
     if disk_full:
         what, verb = ("merge this file", "merge") if merging else ("import this project", "import")
@@ -341,7 +382,7 @@ def _import_failure(import_mode: str, *, disk_full: bool) -> str:
         )
     failed = ("The merge could not be completed" if merging
               else "Project import failed")
-    return f"{failed}, and nothing was changed. Check server logs for details."
+    return f"{failed}, and nothing was changed. It is safe to try again."
 
 
 @router.post("/import-project", response_model=ProjectImportResult)
@@ -633,9 +674,14 @@ async def import_codebook_endpoint(
         db.rollback()
         raise HTTPException(400, str(e))
     except Exception as e:
+        # #1268 — "nothing was changed" is true: the exchange service never commits, and
+        # this rollback runs before the audit row (pinned by test). It said "Check server
+        # logs", and a desktop user has no log to open.
         db.rollback()
         logger.error("Codebook import failed: %s", e, exc_info=True)
-        raise HTTPException(500, "Codebook import failed. Check server logs for details.")
+        raise HTTPException(
+            500, "Codebook import failed, and nothing was changed. It is safe to try again.",
+        )
 
     # Audit
     audit = AuditEntry(

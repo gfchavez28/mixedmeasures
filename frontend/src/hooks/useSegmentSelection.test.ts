@@ -9,9 +9,11 @@
  * against the CURRENT selection and re-derived when stale, so an external
  * selection change (Escape-clear, a programmatic "jump" select, a click handled
  * elsewhere) no longer makes the next shift-gesture range from a stale index.
- * The remaining `QUIRK:` cases document current behavior the future refactor
- * may still revisit — change those tests deliberately when the refactor changes
- * the behavior. See the internal design notes.
+ * The last block was characterised as a quirk to revisit (Q3 in
+ * the internal design notes) and was kept as deliberate behavior on
+ * 2026-10-20: an arrow from an empty selection lands on the first item, which
+ * matches the W3C listbox pattern ("If none of the options are selected before
+ * the listbox receives focus, the first option receives focus").
  *
  * `setupControlled` echoes the emitted selection back into the prop, mirroring
  * a controlled parent — required for multi-step shift sequences, because the
@@ -233,8 +235,8 @@ describe('useSegmentSelection — Q1 fix: anchor resyncs on external selection c
   })
 })
 
-describe('useSegmentSelection — characterized quirks (revisit in #388 refactor)', () => {
-  it('QUIRK: plain arrow from an EMPTY selection selects the first item — for BOTH directions', () => {
+describe('useSegmentSelection — arrow from an empty selection (deliberate, 2026-10-20)', () => {
+  it('plain arrow from an EMPTY selection selects the first item — for BOTH directions', () => {
     // currentId is null → curIdx = -1 → down: min(len-1, 0)=0; up: max(0, -1)=0.
     const down = setup([])
     act(() => down.result.current.handleArrowNav(1))

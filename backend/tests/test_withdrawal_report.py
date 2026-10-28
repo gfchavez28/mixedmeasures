@@ -76,6 +76,25 @@ def populated(db_session):
     db.add(Note(conversation_id=conv.id, segment_id=segs[1].id, content="n", sequence_number=1))
     db.flush()
 
+    # #1320 — a turn reached only by HISTORY: an unattributed turn merged with one
+    # of the subject's, so the merge result has NO speaker (the first turn had
+    # none — `_build_combined_speaker` returns its speaker). No speaker query finds
+    # it; it still holds the subject's words. A note on it is theirs to review.
+    unattributed = Segment(conversation_id=conv.id, speaker_id=None, sequence_order=3,
+                           text="an unattributed line")
+    merged_away = Segment(conversation_id=conv.id, speaker_id=sp.id, sequence_order=4,
+                          text="subject words, merged away")
+    db.add_all([unattributed, merged_away]); db.flush()
+    merge_result = Segment(conversation_id=conv.id, speaker_id=None, sequence_order=3,
+                           text="an unattributed line subject words, merged away",
+                           is_merge_result=1)
+    db.add(merge_result); db.flush()
+    unattributed.merged_into_id = merge_result.id
+    merged_away.merged_into_id = merge_result.id
+    db.add(Note(conversation_id=conv.id, segment_id=merge_result.id, content="n4",
+                sequence_number=2))
+    db.flush()
+
     ds = Dataset(project_id=1, name="Survey"); db.add(ds); db.flush()
     col = DatasetColumn(dataset_id=ds.id, column_text="Q1",
                         column_type=ColumnType.OPEN_TEXT, sequence_order=0, display_order=0)
@@ -140,7 +159,11 @@ class TestReachability:
             "speaker_names": ["Jane"],
             "conversations": [{
                 "conversation_id": 1, "name": "Interview A",
-                "segments": 2, "code_applications": 1, "excerpts": 1, "notes": 1,
+                # Their own three (the merged-away original included) and the one
+                # merge result their words reached by history (#1320); the note on
+                # that merge result counts with theirs.
+                "segments": 3, "combined_turns": 1,
+                "code_applications": 1, "excerpts": 1, "notes": 2,
             }],
             "datasets": [{
                 "dataset_id": 1, "name": "Survey",
@@ -157,8 +180,12 @@ class TestReachability:
                 "document_id": 1, "name": "Workplan 2026",
                 "segments": 1, "code_applications": 1, "excerpts": 1, "notes": 1,
             }],
-            # 1 participant + (2+1+1+1) + (1+1+1+1+1+1+1) + (1+1+1+1)
-            "total_items": 17,
+            # 1 participant + (3+1+1+1+2) + (1+1+1+1+1+1+1) + (1+1+1+1)
+            "total_items": 20,
+            # #1190 D14 — beside the report, never in `total_items`; this fixture's
+            # survey has no identifier-typed column (the count's own test is
+            # `test_withdrawal_tombstones.py::TestTheReportCountsUnlinkedRecords…`).
+            "unlinked_records_with_identifier": 0,
         }
 
     def test_the_decoys_document_is_excluded(self, populated):
@@ -306,13 +333,17 @@ class TestWhatItDeliberatelyOmits:
     def test_a_merged_segment_still_counts(self, populated):
         """Segments are NOT filtered by visibility: a merged turn still holds
         the participant's words, and under-reporting is the direction that
-        matters on a withdrawal report."""
+        matters on a withdrawal report.
+
+        #1320 — and BOTH sides of the merge count. This used to pin only the
+        hidden original, which is exactly how the merge RESULT, the turn a
+        reader actually sees, went uncounted."""
         db, subject, _ = populated
-        segs = db.query(Segment).filter(Segment.speaker_id.isnot(None)).all()
-        target = [s for s in segs if s.text.startswith("subject")][0]
-        target.merged_into_id = [s for s in segs if s.id != target.id][0].id
-        db.flush()
-        assert build_withdrawal_report(db, subject).conversations[0].segments == 2
+        hidden = db.query(Segment).filter(Segment.text == "subject words, merged away").one()
+        assert hidden.merged_into_id is not None, "the fixture's original must be hidden"
+        tp = build_withdrawal_report(db, subject).conversations[0]
+        assert tp.segments == 3, "the hidden original is one of their turns"
+        assert tp.combined_turns == 1, "the visible merge result holds their words too"
 
 
 class TestTheReportReachesTheWire:
@@ -370,7 +401,7 @@ class TestEndpoint:
         out = _run(get_withdrawal_report(
             project_id=1, participant_id=subject.id, user=user, db=db))
         assert out["identifier"] == "P001"
-        assert out["total_items"] == 17
+        assert out["total_items"] == 20
 
     def test_404s_for_a_participant_in_another_project(self, populated):
         from fastapi import HTTPException

@@ -55,6 +55,13 @@ export interface MergeCoderMatch {
   username: string
   archived: boolean
   local_app_count: number
+  /**
+   * #1352 — `identity`: the SAME coder (their `users.uuid` — they came from this
+   * install, or an earlier merge added them), pre-selected. `name`: a coder who only
+   * shares the name, which the confirm step never answers on the researcher's behalf
+   * (#1193's rule). REQUIRED, so a fixture must say which.
+   */
+  basis: 'identity' | 'name'
 }
 
 /**
@@ -90,6 +97,8 @@ export interface MergeCoderPreview {
   match_options: MergeCoderOption[]
   /** The file machine's configuration — the thing that makes it THIS coder. */
   machine_provenance: MachineProvenance | null
+  /** #1246 — the name *Add as new coder* writes unless renamed (a taken name is numbered). */
+  create_username: string
 }
 
 /** Track J · J3-2b: a local code a divergent file code could collapse onto / link with.
@@ -129,10 +138,57 @@ export interface ImportValidationResult {
   /** Track J · J3-2b: divergent codes (uuid not local) + ranked reconcile candidates.
    * `[]` when the codebook is shared-frozen; null when no merge is possible. */
   merge_codes_preview: MergeCodePreview[] | null
+  /**
+   * #1321: set only when NO local project shares the file's identity — the file's
+   * coders and the local coder each would land on if this file is imported keeping its
+   * identity (a coding copy names coders silently, by `coder_match_refusal`). Optional
+   * so a response from a server that predates it reads as "nothing known".
+   */
+  file_coders?: MergeCoderPreview[] | null
+  /**
+   * #1190 (D15) — what a merge would ADD that this project does not hold, set only when a
+   * merge is possible. Optional so a server that predates it reads as "nothing known"
+   * (the Review step then says nothing, rather than "nothing is added").
+   */
+  merge_additions?: MergeAdditions | null
 }
 
-/** Track J · J3-1/J3-2 import mode: new project, overwrite a copy, or merge codings in. */
-export type ProjectImportMode = 'new' | 'overwrite' | 'merge'
+/**
+ * #1190 (D15) — what the file holds that the target does not, by identity.
+ *
+ * A file-only item is either the colleague's new work or something deleted here since
+ * the copy was made, and nothing records a plain delete until 1.5.9, so the preview
+ * cannot tell which: it NAMES sources, participants and datasets (each list capped —
+ * the `*_count` beside it is the total) and COUNTS the rest, for the researcher to
+ * recognise. 🔴 A withdrawn person is never named here — `withdrawn_participants` and
+ * `withdrawn_items` are counts of what the merge will LEAVE OUT.
+ */
+export interface MergeAdditions {
+  sources: { kind: 'conversation' | 'document' | 'observation'; name: string }[]
+  source_count: number
+  /** Participant identifiers, as this project shows them. */
+  participants: string[]
+  participant_count: number
+  /** Datasets this project does not have, each with the records it brings. */
+  datasets: { name: string; records: number }[]
+  dataset_count: number
+  /** Records added to datasets this project ALREADY has, per dataset — NOT capped (one
+   *  entry per dataset), so the entries sum to `record_count`. */
+  records: { dataset: string; count: number }[]
+  record_count: number
+  quotes: number
+  notes: number
+  memos: number
+  withdrawn_participants: number
+  withdrawn_items: number
+}
+
+/**
+ * Track J · J3-1/J3-2 import mode. `new` RE-MINTS the identity (an independent project
+ * that can never merge with the original); `copy_for_coding` KEEPS it (#1321 — the only
+ * way a colleague's copy can come back); `overwrite`/`merge` act on the local copy.
+ */
+export type ProjectImportMode = 'new' | 'overwrite' | 'merge' | 'copy_for_coding'
 
 /** Track J · J3-2: one coder-mapping decision (keyed by the file coder's original_id). */
 export type CoderMappingDecision =
@@ -171,6 +227,19 @@ export interface MergeReport {
   /** #869 (c): NEW applications whose incoming rating fell outside the target
    * code's scale — imported unrated, the number kept as the row's merge conflict. */
   ratings_out_of_range?: number
+  /**
+   * #1190 — people in the file who withdrew from this project, NOT brought back. A
+   * count, never a name. Optional for the `magnitude_conflicts` reason.
+   */
+  withdrawn_participants_skipped?: number
+  /** #1190 — what the file held of theirs (records, speakers, quotes, notes), not brought back. */
+  withdrawn_items_skipped?: number
+  /**
+   * #1190 (D13) — records this project does not have whose participant is now linked to
+   * ANOTHER record of the same dataset (one record per participant per dataset), so each
+   * was added back WITHOUT a participant link — and the report says so.
+   */
+  records_reinserted_unlinked?: number
 }
 
 /** Track J · J3-2c: structured 409 body when a merge is refused for divergence. */
@@ -335,7 +404,10 @@ export const projectPortabilityApi = {
     if ((mode === 'overwrite' || mode === 'merge') && opts?.targetProjectId != null) {
       fd.append('target_project_id', String(opts.targetProjectId))
     }
-    if (mode === 'merge' && opts?.coderMapping) {
+    // #1321 D2 — a coding copy carries one too: the file person the researcher chose as
+    // themselves, matched onto the active coder (the service honours a mapping in every
+    // mode). Overwrite and new import send none — their dialog asks nothing (D6).
+    if ((mode === 'merge' || mode === 'copy_for_coding') && opts?.coderMapping) {
       fd.append('coder_mapping', JSON.stringify(opts.coderMapping))
     }
     if (mode === 'merge' && opts?.codeMapping) {

@@ -24,10 +24,11 @@
  *
  * ## Where the data comes from
  *
- * `GET …/data` returns EVERY column (only `rows` is paged, #800) with
- * `recode_definitions` joined-loaded — and it is the only payload that carries
- * them for all variables at once; `listColumns`, which the Variables view uses,
- * has never had the field. So this dialog needs no fetch of its own.
+ * `GET …/data` returns EVERY column (only `rows` is paged, #800), each with its
+ * `recode_definitions`. Since #830f every column response carries that field —
+ * `listColumns`, which the Variables view uses, included — so this is not the
+ * only payload that has them; it is the one the Data view has already loaded.
+ * So this dialog needs no fetch of its own.
  */
 import { useState, useMemo, useId } from 'react'
 import {

@@ -69,9 +69,9 @@ def set_sqlite_pragma_for_migrations(dbapi_conn, connection_record):
     must be set here (outside any transaction) because PRAGMA foreign_keys
     is a no-op inside a transaction.
 
-    Foreign keys are re-enabled after migrations complete (see below).
-    The application's own connection listener (database.py) enables
-    foreign_keys=ON for normal runtime connections.
+    This connection is discarded when the migrations end; the application's
+    own connection listener (database.py) enables foreign_keys=ON for normal
+    runtime connections.
 
     Under encryption, ``PRAGMA key`` MUST be the first statement on the
     connection — before foreign_keys/journal_mode or any read — or the file
@@ -135,28 +135,60 @@ def run_migrations_online() -> None:
     # Add SQLite pragma listener — PRAGMA key (if encrypted) then foreign_keys OFF
     event.listen(connectable, "connect", set_sqlite_pragma_for_migrations)
 
+    # 🔴 #1312: THE WHOLE CHAIN IS ONE TRANSACTION, DDL INCLUDED. Before this, a
+    # migration that failed partway kept the DDL it had run (pysqlite autocommits
+    # it), left the version at the old revision, and every later launch failed on
+    # "duplicate column" — while each failed launch took a fresh pre-migration copy
+    # of the HALF-MIGRATED database, so the sixth rotated away the last good one.
+    # Measured on plaintext SQLite and SQLCipher alike. Now a failure rolls back to
+    # exactly the database the previous version wrote.
+    #
+    # The driver begins a transaction of its own only before INSERT/UPDATE/DELETE, so
+    # without the explicit BEGIN below every CREATE/ALTER/DROP ran in autocommit.
+    # Inside an explicit BEGIN the DDL stays in the transaction: since Python 3.6 the
+    # driver no longer commits before DDL. SQLAlchemy's documented recipe also sets
+    # the driver's `isolation_level = None`; on Python 3.12 and sqlcipher3 that
+    # changed nothing (a mutant removing it passed every test in
+    # `test_migration_atomicity.py`, 2026-10-21), so it is not here.
+    #
+    # ⚠️ One transaction for the chain, NOT `transaction_per_migration`: a failure
+    # then leaves the revision the PREVIOUS version can open. A long upgrade does
+    # not need per-revision commits either: since #1362 the backend announces an
+    # update (`startup_errors.emit_startup_phase`) and the shell waits up to 30
+    # minutes for it, not 60 s. ⚠️ Nothing that cannot run inside a
+    # transaction (VACUUM, PRAGMA foreign_keys/journal_mode) may appear in a
+    # migration — `backend/alembic/the internal design notes.
+    @event.listens_for(connectable, "begin")
+    def _begin(conn):
+        conn.exec_driver_sql("BEGIN")
+
     with connectable.connect() as connection:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
             render_as_batch=True,  # Required for SQLite ALTER operations
+            transactional_ddl=True,
         )
 
         with context.begin_transaction():
             context.run_migrations()
 
-        # Re-enable foreign keys and verify integrity after migrations
-        connection.execute(sa.text("PRAGMA foreign_keys=ON"))
-        result = connection.execute(sa.text("PRAGMA foreign_key_check"))
-        violations = result.fetchall()
-        if violations:
-            print(f"WARNING: {len(violations)} foreign key violations detected after migration!")
-            for v in violations[:10]:
-                print(f"  table={v[0]}, rowid={v[1]}, referenced_table={v[2]}, fk_index={v[3]}")
-            raise RuntimeError(
-                f"Migration produced {len(violations)} foreign key violations. "
-                "Database may be inconsistent. Restore from backup."
-            )
+            # Verify integrity INSIDE the transaction, so a migration that leaves a
+            # dangling reference is rolled back with the rest (#1312). It used to run
+            # after the commit: the bad rows and the new version were already saved
+            # when this refused them. `foreign_key_check` works whatever
+            # `foreign_keys` is set to. It runs on every launch, at head too
+            # (0.51 s on a 480 MB database, measured 2026-10-21).
+            result = connection.execute(sa.text("PRAGMA foreign_key_check"))
+            violations = result.fetchall()
+            if violations:
+                print(f"WARNING: {len(violations)} foreign key violations detected after migration!")
+                for v in violations[:10]:
+                    print(f"  table={v[0]}, rowid={v[1]}, referenced_table={v[2]}, fk_index={v[3]}")
+                raise RuntimeError(
+                    f"Migration produced {len(violations)} foreign key violations. "
+                    "Database may be inconsistent. Restore from backup."
+                )
 
 
 if context.is_offline_mode():

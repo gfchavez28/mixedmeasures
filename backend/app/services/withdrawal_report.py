@@ -63,6 +63,15 @@ segment still holds the participant's words, so counting only visible rows would
 UNDER-report — and on a withdrawal report under-reporting is the direction that
 matters. The number may therefore exceed what the workbench shows.
 
+🔴 **A turn holds their words by HISTORY, not only by speaker (#1320).** A merge
+copies the originals' text into a NEW segment whose speaker is a combined
+"Maria & Sam" row with no participant link — or NO speaker at all, when the first
+turn merged had none — and a split copies a turn's text into children of which only
+the first is linked back. Selecting by `speaker_id` saw none of them, so the report
+counted the hidden originals and said nothing of the visible turn still holding the
+words. `reached_turns` is the ONE walk: the report counts it and
+`withdrawal_redaction.apply_withdrawal` blanks exactly it.
+
 ⚠️ **`Memo` carries no ForeignKey**, so its reachable arm is found by
 `entity_type`, and the type vocabulary is declared in exactly two places that
 must agree: `schemas/memo.py`'s regex and `project_portability.MEMO_ENTITY_REMAP`.
@@ -89,22 +98,30 @@ from ..models.speaker import Speaker
 from ..models.segment import Segment
 from ..models.conversation import Conversation
 from ..models.document import Document
-from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
+from ..models.dataset import ColumnType, Dataset, DatasetColumn, DatasetRow, DatasetValue
 from ..models.code_application import CodeApplication
 from ..models.excerpt import Excerpt
 from ..models.note import Note
 from ..models.memo import Memo
 from ..models.row_score import RowScore
+from .identifier_match import normalize_key
 from .participant_dataset import MANAGED_COLUMN_SOURCE
 
 
 @dataclass
 class ConversationTouchpoint:
-    """One conversation this participant speaks in."""
+    """One conversation this participant speaks in.
+
+    `segments` are their OWN turns (their speaker); `combined_turns` are the turns
+    their words reached through a merge or a split (#1320) — a combined or absent
+    speaker, so no speaker query finds them. The code, quote and note counts cover
+    BOTH, because the withdrawal acts on both.
+    """
 
     conversation_id: int
     name: str
     segments: int = 0
+    combined_turns: int = 0
     code_applications: int = 0
     excerpts: int = 0
     notes: int = 0
@@ -170,6 +187,10 @@ class WithdrawalReport:
     conversations: list[ConversationTouchpoint]
     datasets: list[DatasetTouchpoint]
     documents: list[DocumentTouchpoint] = field(default_factory=list)
+    # #1190 D14 — `unlinked_records_with_identifier`: possibly hers, never provably,
+    # so counted beside the report and NOT in `total_items` (the withdrawal does not
+    # touch them). See `_unlinked_records_with_identifier`.
+    unlinked_records_with_identifier: int = 0
 
     @property
     def total_items(self) -> int:
@@ -180,7 +201,7 @@ class WithdrawalReport:
         the reader is about to take.
         """
         return 1 + sum(
-            c.segments + c.code_applications + c.excerpts + c.notes
+            c.segments + c.combined_turns + c.code_applications + c.excerpts + c.notes
             for c in self.conversations
         ) + sum(
             d.rows + d.responses + d.code_applications + d.excerpts
@@ -197,10 +218,199 @@ class WithdrawalReport:
         return out
 
 
+def _unlinked_records_with_identifier(db: Session, participant: Participant) -> int:
+    """#1190 D14 — records linked to NOBODY that carry this participant's identifier.
+
+    🔴 **Nothing stores which column identified a person.** Linking takes the column
+    the researcher picks at that moment (`link-by-column`'s `column_id`; the append
+    offer and the import's `participant_link_column_index` likewise) and keeps no
+    record of it. So this counts what ANY identifier-typed column could link: a
+    record whose cell in a column of type `identifier` matches under linking's own
+    rule (`identifier_match.normalize_key`, trim-then-exact, case-sensitive). The
+    record number (`row_identifier`, "R0001") is not an identifier of a person and is
+    not read. A record with two such cells is counted once.
+
+    A count, never which records, and nothing is deleted: a matching cell is evidence,
+    not proof (a code can be reused across studies), which is why D14 reports it.
+    """
+    key = normalize_key(participant.identifier)
+    if not key:
+        return 0
+    # SQLite's trim() trims spaces only; `instr` narrows to candidate cells in SQL and
+    # Python applies the one normalisation, so the two can never disagree.
+    candidates = (
+        db.query(DatasetRow.id, DatasetValue.value_text)
+        .join(DatasetValue, DatasetValue.row_id == DatasetRow.id)
+        .join(DatasetColumn, DatasetColumn.id == DatasetValue.column_id)
+        .join(Dataset, Dataset.id == DatasetRow.dataset_id)
+        .filter(
+            Dataset.project_id == participant.project_id,
+            DatasetColumn.column_type == ColumnType.IDENTIFIER,
+            DatasetRow.participant_id.is_(None),
+            func.instr(DatasetValue.value_text, key) > 0,
+        )
+    )
+    return len({row_id for row_id, text in candidates if normalize_key(text) == key})
+
+
 def _count(db: Session, model, column, ids: list[int]) -> int:
     if not ids:
         return 0
     return db.query(model).filter(column.in_(ids)).count()
+
+
+@dataclass(frozen=True)
+class ReachedTurns:
+    """The conversation turns that hold one person's words, by conversation (#1320).
+
+    `own` — the turns their speaker holds, hidden ones included. `combined` — the
+    turns their words reached only through a merge or a split: a merge result (its
+    speaker is a combined "Maria & Sam" row, or none at all) and the children of a
+    split of any reached turn. Both lists are ascending ids.
+    """
+
+    own: dict[int, list[int]]
+    combined: dict[int, list[int]]
+
+    @property
+    def own_ids(self) -> list[int]:
+        return sorted(i for ids in self.own.values() for i in ids)
+
+    @property
+    def combined_ids(self) -> list[int]:
+        return sorted(i for ids in self.combined.values() for i in ids)
+
+    @property
+    def all_ids(self) -> list[int]:
+        return sorted(self.own_ids + self.combined_ids)
+
+    @property
+    def conversation_ids(self) -> list[int]:
+        return sorted(set(self.own) | set(self.combined))
+
+
+#: A text split makes at most three children — before · selected · after
+#: (`segment_operations._split_single` / `_split_multi`).
+MAX_SPLIT_CHILDREN = 3
+
+
+def _split_children(
+    db: Session, first_children: set[int], reached: set[int], conv_ids: set[int],
+) -> set[int]:
+    """The children of each split whose first child is in `first_children`.
+
+    A split points its original(s) at the FIRST child only (`split_into_id`), so
+    the siblings have to be found. ⚠️ Not with `segment_operations.
+    _find_split_siblings`, the rule Unsplit uses: it walks a contiguous run of
+    VISIBLE split results by `sequence_order`, so two adjacent splits read as one
+    family (it would blank another person's split turn) and a child that was later
+    merged or split again is invisible to it (it would leave their words behind).
+    One split inserts its children one after another and nothing else into
+    `segments` in between, so a split's children are consecutive ids from the first
+    one; the run ends at the next id that is not a split result of the same
+    conversation, or that is the FIRST child of another split.
+
+    A split across SEVERAL turns (`_split_multi`) whose originals are not all
+    reached makes a 'before' child from the first original's text and an 'after'
+    child from the last one's. A child whose text is found in an unreached
+    original and in no reached one is that other person's words alone, and is not
+    taken. Anything else is (an edited child, a 'selected' child joining several
+    turns): removing too little is the failure that matters here.
+    """
+    split_targets = {
+        t for (t,) in db.query(Segment.split_into_id).filter(
+            Segment.conversation_id.in_(conv_ids), Segment.split_into_id.isnot(None),
+        )
+    }
+    window = sorted({f + k for f in first_children for k in range(MAX_SPLIT_CHILDREN)})
+    cand = {
+        r.id: r for r in db.query(
+            Segment.id, Segment.conversation_id, Segment.is_split_result, Segment.text,
+        ).filter(Segment.id.in_(window))
+    }
+    out: set[int] = set()
+    for first in sorted(first_children):
+        head = cand.get(first)
+        if head is None:
+            continue
+        batch = [first]
+        for k in range(1, MAX_SPLIT_CHILDREN):
+            child = cand.get(first + k)
+            if (
+                child is None
+                or not child.is_split_result
+                or child.conversation_id != head.conversation_id
+                or child.id in split_targets
+            ):
+                break
+            batch.append(child.id)
+
+        originals = (
+            db.query(Segment.id, Segment.text).filter(Segment.split_into_id == first).all()
+        )
+        unreached = [o.text or "" for o in originals if o.id not in reached]
+        if not unreached:
+            out.update(batch)
+            continue
+        reached_texts = [o.text or "" for o in originals if o.id in reached]
+        for child_id in batch:
+            text = (cand[child_id].text or "").strip()
+            others_alone = (
+                bool(text)
+                and any(text in t for t in unreached)
+                and not any(text in t for t in reached_texts)
+            )
+            if not others_alone:
+                out.add(child_id)
+    return out
+
+
+def reached_turns(db: Session, speaker_ids: list[int]) -> ReachedTurns:
+    """Every conversation turn holding the words of the people behind `speaker_ids`.
+
+    The ONE walk (#1320): the report counts it, the withdrawal blanks it. Seeded by
+    speaker, then closed over the turns' HISTORY — a reached turn's merge result
+    (`merged_into_id`), and the children of its split (`split_into_id` plus the
+    siblings, `_split_children`) — to a fixpoint, so a merge of a split of a merge
+    is followed as far as it goes. Hidden turns are included on purpose: they hold
+    the words, and Unmerge or Unsplit brings them back.
+    """
+    if not speaker_ids:
+        return ReachedTurns({}, {})
+    own_ids = {
+        sid for (sid,) in db.query(Segment.id).filter(
+            Segment.speaker_id.in_(speaker_ids), Segment.conversation_id.isnot(None),
+        )
+    }
+    reached = set(own_ids)
+    rows: dict[int, tuple[int, int | None, int | None]] = {}
+    while True:
+        missing = sorted(reached - rows.keys())
+        if missing:
+            for sid, conv_id, merged_into, split_into in db.query(
+                Segment.id, Segment.conversation_id,
+                Segment.merged_into_id, Segment.split_into_id,
+            ).filter(Segment.id.in_(missing)):
+                rows[sid] = (conv_id, merged_into, split_into)
+        merge_results = {rows[i][1] for i in reached if rows[i][1] is not None}
+        first_children = {rows[i][2] for i in reached if rows[i][2] is not None}
+        children = (
+            _split_children(db, first_children, reached, {rows[i][0] for i in reached})
+            if first_children else set()
+        )
+        new = (merge_results | children) - reached
+        if not new:
+            break
+        reached |= new
+
+    own: dict[int, list[int]] = {}
+    combined: dict[int, list[int]] = {}
+    for sid in sorted(reached):
+        conv_id = rows[sid][0]
+        if conv_id is None:
+            continue
+        (own if sid in own_ids else combined).setdefault(conv_id, []).append(sid)
+    return ReachedTurns(own, combined)
 
 
 def build_withdrawal_report(
@@ -231,33 +441,27 @@ def build_withdrawal_report(
 
     conversations: dict[int, ConversationTouchpoint] = {}
     speaker_ids = [sp.id for sp in speakers]
-    if speaker_ids:
-        segments = (
-            db.query(Segment.id, Segment.conversation_id)
-            .filter(Segment.speaker_id.in_(speaker_ids))
-            .all()
+    # #1320 — by speaker AND by history: `reached_turns` is the same walk the
+    # withdrawal acts on, so the two cannot disagree about which turns are hers.
+    # (Only conversation segments carry a speaker; a parentless one is skipped
+    # inside the walk rather than crashing here.)
+    reached = reached_turns(db, speaker_ids)
+    for conv_id in reached.conversation_ids:
+        own = reached.own.get(conv_id, [])
+        shared = reached.combined.get(conv_id, [])
+        seg_ids = own + shared
+        conv = db.query(Conversation).filter(Conversation.id == conv_id).first()
+        tp = ConversationTouchpoint(
+            conversation_id=conv_id,
+            name=conv.name if conv else "(unknown)",
+            segments=len(own),
+            combined_turns=len(shared),
         )
-        by_conv: dict[int, list[int]] = {}
-        for seg_id, conv_id in segments:
-            # Only conversation segments carry a speaker (document and
-            # observation segments have none), but the report's job is to find
-            # data — so a parentless one is skipped rather than crashing here.
-            if conv_id is None:
-                continue
-            by_conv.setdefault(conv_id, []).append(seg_id)
-
-        for conv_id, seg_ids in by_conv.items():
-            conv = db.query(Conversation).filter(Conversation.id == conv_id).first()
-            tp = ConversationTouchpoint(
-                conversation_id=conv_id,
-                name=conv.name if conv else "(unknown)",
-                segments=len(seg_ids),
-            )
-            tp.code_applications = _count(
-                db, CodeApplication, CodeApplication.segment_id, seg_ids)
-            tp.excerpts = _count(db, Excerpt, Excerpt.segment_id, seg_ids)
-            tp.notes = _count(db, Note, Note.segment_id, seg_ids)
-            conversations[conv_id] = tp
+        tp.code_applications = _count(
+            db, CodeApplication, CodeApplication.segment_id, seg_ids)
+        tp.excerpts = _count(db, Excerpt, Excerpt.segment_id, seg_ids)
+        tp.notes = _count(db, Note, Note.segment_id, seg_ids)
+        conversations[conv_id] = tp
 
     # ── The dataset side, via DatasetRow ──────────────────────────────────
     rows = (
@@ -352,4 +556,5 @@ def build_withdrawal_report(
         conversations=sorted(conversations.values(), key=lambda c: c.conversation_id),
         datasets=sorted(datasets.values(), key=lambda d: d.dataset_id),
         documents=sorted(documents, key=lambda d: d.document_id),
+        unlinked_records_with_identifier=_unlinked_records_with_identifier(db, participant),
     )

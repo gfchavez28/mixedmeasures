@@ -10,7 +10,7 @@ import {
   CircleAlert, LoaderCircle, ArrowLeft, FileInput, Link2, ArrowRight,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { projectPortabilityApi, codesApi, ApiError, serverDetailMessage } from '@/lib/api'
+import { projectPortabilityApi, codesApi, codeAnalysisApi, ApiError, serverDetailMessage } from '@/lib/api'
 import { forgetCachedProjectPages } from '@/lib/project-cache'
 import { mergeFailure } from '@/lib/project-lifecycle-copy'
 import type {
@@ -34,8 +34,8 @@ import {
 import { estimatedMergeSeconds } from '@/lib/merge-estimate'
 import { describeScaleCrossing, scaleRange } from '@/lib/magnitude'
 import {
-  defaultDecisions, decisionToValue, parseDecisionValue, buildCoderMapping, resultingCoderCount,
-  newCoderCounts, nameInUseNote,
+  defaultDecisions, decisionToValue, parseDecisionValue, buildCoderMapping,
+  newCoderCounts, nameInUseNote, confirmBlocker, matchNote, agreementNote,
 } from '@/lib/merge-coder-mapping'
 import {
   defaultCodeDecisions, applyBulkCode, buildCodeMapping, codeDecisionSummary,
@@ -48,6 +48,9 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Card, CardContent } from '@/components/ui/card'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import { SAFETY_COPIES_QUERY_KEY } from '@/lib/safety-copies'
+import { mergeReportRows, mergeReportNotes } from '@/lib/merge-report-rows'
+import { mergeAdditionsLines, MERGE_ADDS_NOTHING } from '@/lib/merge-additions'
+import type { MergeAdditions } from '@/lib/api/project-portability'
 import {
   Select, SelectContent, SelectGroup, SelectItem, SelectLabel,
   SelectTrigger, SelectValue,
@@ -140,6 +143,8 @@ export default function MergeProject() {
   const [renames, setRenames] = useState<Record<number, string>>({})
   const [codesPreview, setCodesPreview] = useState<MergeCodePreview[]>([])
   const [codeDecisions, setCodeDecisions] = useState<Record<string, CodeMappingDecision>>({})
+  // #1190 (D15) — what the merge would also add, from validate; shown on Review.
+  const [additions, setAdditions] = useState<MergeAdditions | null>(null)
   const [report, setReport] = useState<MergeReport | null>(null)
   // The recovery snapshot's filename, so the sentence promising one can NAME it.
   const [safetyBackup, setSafetyBackup] = useState<string | null>(null)
@@ -202,6 +207,7 @@ export default function MergeProject() {
     setDecisions(defaultDecisions(cs))
     setCodesPreview(codes)
     setCodeDecisions(defaultCodeDecisions(codes))
+    setAdditions(v.merge_additions ?? null)
     setStep('confirm')
   }, [])
 
@@ -238,7 +244,14 @@ export default function MergeProject() {
         setUploadError(
           v.existing_project
             ? `This file matches "${v.existing_project.name}", not this project. Open that project to merge.`
-            : 'This file is a different project (no shared identity). Merge needs your own copy of the same project.',
+            // #1321 — the likeliest cause is a colleague's copy that was given a NEW identity
+            // when it was imported (as an independent project, or by any version before
+            // 1.5.8, which offered only that). No way back exists in this version (D15 plans
+            // one for 1.5.9; not yet filed), so the remedy is a fresh copy, said as such.
+            : 'This file does not share this project’s identity, so it cannot be merged here. A copy '
+              + 'imported as an independent project, or by a version of Mixed Measures before 1.5.8, was '
+              + 'given a new identity and cannot be merged back. To collect new coding, export this '
+              + 'project again and have it imported with Import, which keeps the identity.',
         )
         return
       }
@@ -268,18 +281,48 @@ export default function MergeProject() {
   // #1034 — split by kind: a new PERSON turns on consensus and agreement, a new
   // MODEL turns on neither, and one number for both said it did.
   const newCoders = useMemo(() => newCoderCounts(mergeCoders, decisions), [mergeCoders, decisions])
+  // #1273 — "enables agreement" is decided against the people ALREADY coding this project
+  // (its coder coverage: non-archived people — an archived coder does not vote). The key
+  // is `useProjectCoderKinds`', so the two share one request.
+  const coverageQuery = useQuery({
+    queryKey: ['coder-coverage', targetId, null, null, null, ''],
+    queryFn: () => codeAnalysisApi.coderCoverage(targetId),
+    enabled: !!targetId,
+    staleTime: 60_000,
+  })
+  const peopleHereIds = useMemo(
+    () => coverageQuery.data?.coders.filter(c => !isMachineCoder(c) && !c.archived).map(c => c.user_id),
+    [coverageQuery.data],
+  )
+  const agreement = useMemo(
+    () => agreementNote(mergeCoders, decisions, peopleHereIds),
+    [mergeCoders, decisions, peopleHereIds],
+  )
+  // #1352 — a coder who only shares a name is unanswered until the researcher answers.
+  const blocker = useMemo(() => confirmBlocker(mergeCoders, decisions), [mergeCoders, decisions])
 
   // Confirm coders → reconcile codes (if any are divergent) → review.
   const afterConfirm = useCallback(() => setStep(hasCodesToReconcile ? 'reconcile' : 'review'), [hasCodesToReconcile])
 
   const runMerge = useCallback(async () => {
     if (!file) return
+    // 🔴 #1352 — the payload is built BEFORE the step leaves Review. `buildCoderMapping`
+    // throws on a coder with no decision; thrown inside the request's `try` below, it read
+    // as a request that got no answer ("whether the merge finished is not known") when
+    // nothing had been sent. Back to the confirm step instead, whose blocker names the coder.
+    let coderMapping: ReturnType<typeof buildCoderMapping>
+    try {
+      coderMapping = buildCoderMapping(mergeCoders, decisions, renames)
+    } catch {
+      setStep('confirm')
+      return
+    }
     setStep('merging')
     try {
       const result = await projectPortabilityApi.importProject(file, {
         mode: 'merge',
         targetProjectId: targetId,
-        coderMapping: buildCoderMapping(mergeCoders, decisions, renames),
+        coderMapping,
         codeMapping: buildCodeMapping(codesPreview, codeDecisions),
       })
       // The merge changed codings, the roster, the codebook, and every analysis surface
@@ -465,6 +508,8 @@ export default function MergeProject() {
             decisions={decisions}
             renames={renames}
             newCoders={newCoders}
+            agreement={agreement}
+            blocker={blocker}
             continueLabel={hasCodesToReconcile ? 'Continue to codes' : 'Continue to review'}
             onDecision={setDecision}
             onRename={(id, v) => setRenames(prev => ({ ...prev, [id]: v }))}
@@ -495,6 +540,8 @@ export default function MergeProject() {
             plan={reviewPlan}
             incomingLabel={incomingLabel}
             newCoders={newCoders}
+            agreement={agreement}
+            additions={additions}
             onBack={() => setStep(hasCodesToReconcile ? 'reconcile' : 'confirm')}
             onMerge={runMerge}
           />
@@ -540,6 +587,10 @@ interface ConfirmStepProps {
   decisions: Record<number, CoderMappingDecision>
   renames: Record<number, string>
   newCoders: { people: number; models: number }
+  /** #1273 — `agreementNote`'s sentence, null until the project's coverage answers. */
+  agreement: string | null
+  /** #1352 — why Continue is held (an unanswered coder), or null. */
+  blocker: string | null
   continueLabel: string
   onDecision: (originalId: number, value: string) => void
   onRename: (originalId: number, value: string) => void
@@ -567,18 +618,14 @@ export function ConfirmStep(p: ConfirmStepProps) {
     )
   }
 
-  // Distinct coders the merged-in work will span (#444): a new coder, or ≥2 file coders
-  // mapped onto distinct existing coders, both preserve consensus/IRR. The prior check
-  // looked only at new coders, so the "N file coders → N distinct existing" default was
-  // wrongly flagged single-coder.
-  const resultingCoders = resultingCoderCount(p.mergeCoders, p.decisions)
-
+  // #444's count of the people the merged-in work spans now lives in `agreementNote`
+  // (#1273), which also counts the people already coding this project.
   return (
     <div className="space-y-4">
       <p className="text-sm text-mm-text">
         Match each coder in the file to a coder in {p.title}, or add them as a new coder.
-        We've suggested matches by name — only onto a coder of the same kind, and a model
-        only onto the same configuration. Review before continuing.
+        A coder who came from here is matched for you. A coder who only shares a name is
+        never matched on your behalf — choose for each one.
       </p>
 
       <ScrollableTable maxHeight="60vh" className="rounded-md border border-mm-surface-border bg-mm-surface">
@@ -602,6 +649,7 @@ export function ConfirmStep(p: ConfirmStepProps) {
               const options = c.match_options
               const machine = isMachineCoder(c)
               const takenNote = nameInUseNote(c)
+              const proposal = matchNote(c)
               return (
                 <tr key={c.original_id} className="border-b last:border-b-0 align-top">
                   <th scope="row" className="px-3 py-3 font-normal text-left">
@@ -619,11 +667,19 @@ export function ConfirmStep(p: ConfirmStepProps) {
                     {takenNote && (
                       <p className="mt-1 ml-7 text-xs text-amber-700 dark:text-amber-400 max-w-sm">{takenNote}</p>
                     )}
-                    {c.local_match && (
-                      <div className="mt-1 ml-7 inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400" title={`A coder named "${c.local_match.username}" already exists here (${codings(c.local_match.local_app_count)}).`}>
-                        <TriangleAlert className="w-3.5 h-3.5" aria-hidden="true" />
-                        Same name already here
-                      </div>
+                    {proposal && (
+                      // #1352 — the SAME coder is said plainly; a coder who only shares
+                      // the name is said with what a wrong answer would merge into.
+                      <p
+                        id={`merge-coder-note-${c.original_id}`}
+                        className={cn(
+                          'mt-1 ml-7 inline-flex items-start gap-1 text-xs max-w-sm',
+                          c.local_match?.basis === 'name' ? 'text-amber-700 dark:text-amber-400' : 'text-mm-text-muted',
+                        )}
+                      >
+                        {c.local_match?.basis === 'name' && <TriangleAlert className="w-3.5 h-3.5 mt-px flex-none" aria-hidden="true" />}
+                        <span>{proposal}</span>
+                      </p>
                     )}
                   </th>
                   <td className="px-3 py-3">
@@ -633,7 +689,9 @@ export function ConfirmStep(p: ConfirmStepProps) {
                           "Map to …" comboboxes on the step that decides
                           attribution. Named from the FILE coder (the row header's
                           stable string), never from the chosen value. */}
-                      <SelectTrigger className="w-full max-w-xs" aria-label={`Bring in ${c.username} as`}>
+                      <SelectTrigger className="w-full max-w-xs" aria-label={`Bring in ${c.username} as`}
+                        aria-describedby={proposal ? `merge-coder-note-${c.original_id}` : undefined}
+                      >
                         <SelectValue placeholder="Choose…" />
                       </SelectTrigger>
                       <SelectContent>
@@ -656,7 +714,7 @@ export function ConfirmStep(p: ConfirmStepProps) {
                           className="h-8 max-w-xs"
                           // #1034 — the name the import will actually give it when
                           // this one is taken by a coder it may not land on.
-                          defaultValue={c.name_in_use?.new_username ?? c.username}
+                          defaultValue={c.name_in_use?.new_username ?? c.create_username}
                           onChange={e => p.onRename(c.original_id, e.target.value)}
                         />
                       </div>
@@ -685,17 +743,23 @@ export function ConfirmStep(p: ConfirmStepProps) {
           voter here (a11y-name-sweep run 9). */}
       <div className="inline-flex items-center gap-1.5 text-xs text-mm-text-muted" title="Consensus + agreement (IRR) need at least two people. A model coder is compared on the Model comparison tab and never counts toward them.">
         <Info className="w-3.5 h-3.5 flex-none" aria-hidden="true" />
-        {p.newCoders.people > 0
-          ? `${p.newCoders.people} new ${p.newCoders.people === 1 ? 'person' : 'people'} — enables consensus + agreement (IRR).`
-          : resultingCoders >= 2
-            ? `Maps onto ${resultingCoders} existing people — consensus + agreement (IRR) stay available.`
-            : 'Mapping every person onto one existing coder keeps this project single-coder (no agreement stats).'}
+        {p.agreement}
         {p.newCoders.models > 0 && ` ${p.newCoders.models} new model coder${p.newCoders.models === 1 ? '' : 's'} — compared on the Model comparison tab, never in agreement figures.`}
       </div>
 
+      {p.blocker && (
+        <p id="merge-coders-blocker" className="text-sm text-amber-700 dark:text-amber-400 text-right">{p.blocker}</p>
+      )}
       <div className="flex items-center justify-end gap-2 pt-2">
         <Button variant="outline" onClick={p.onCancel}>Cancel</Button>
-        <Button onClick={p.onContinue}>{p.continueLabel} <ArrowRight className="w-4 h-4 ml-1.5" /></Button>
+        {/* #965 — aria-disabled + the handler's own guard, never `disabled` (it blurs). */}
+        <Button
+          aria-disabled={p.blocker ? true : undefined}
+          aria-describedby={p.blocker ? 'merge-coders-blocker' : undefined}
+          onClick={() => { if (!p.blocker) p.onContinue() }}
+        >
+          {p.continueLabel} <ArrowRight className="w-4 h-4 ml-1.5" />
+        </Button>
       </div>
     </div>
   )
@@ -928,25 +992,31 @@ function MergeReviewCell({ side }: { side: MergeReviewRow['local'] | MergeReview
   )
 }
 
-function ReviewStep({ plan, incomingLabel, newCoders, onBack, onMerge }: {
+function ReviewStep({ plan, incomingLabel, newCoders, agreement, additions, onBack, onMerge }: {
   plan: MergeReviewRow[]
   incomingLabel: string
   newCoders: { people: number; models: number }
+  agreement: string | null
+  /** #1190 (D15) — what the merge also adds; null from a server that predates it. */
+  additions: MergeAdditions | null
   onBack: () => void
   onMerge: () => void
 }) {
   const changed = plan.filter(r => r.kind !== 'unchanged').length
+  const adds = additions ? mergeAdditionsLines(additions) : null
   return (
     <div className="space-y-4">
       <p className="text-sm text-mm-text">
         Here's how your codebook will look after merging — read each row left to right.
         {changed > 0 ? ` ${changed} code${changed === 1 ? '' : 's'} change; ` : ' No codes change; '}
         {newCoders.people > 0
-          ? `${newCoders.people} new ${newCoders.people === 1 ? 'person turns' : 'people turn'} on agreement stats`
+          ? `${newCoders.people} new ${newCoders.people === 1 ? 'person' : 'people'}`
           : 'no new people'}
         {newCoders.models > 0
           ? `; ${newCoders.models} new model coder${newCoders.models === 1 ? '' : 's'} (never in agreement stats).`
           : '.'}
+        {/* #1273 — "turns on agreement stats" is decided against who already codes here. */}
+        {agreement && ` ${agreement}`}
       </p>
 
       {/* How to read */}
@@ -1007,6 +1077,27 @@ function ReviewStep({ plan, incomingLabel, newCoders, onBack, onMerge }: {
         </table>
       </ScrollableTable>
 
+      {/* #1190 (D15) — what ELSE arrives. A plain delete leaves no trace until 1.5.9,
+          so an older copy brings a deleted source, record or quote back silently; the
+          names are what let a researcher recognise one. Absent (no section) when the
+          server sent no preview; a withdrawn person is only ever counted. */}
+      {adds && (
+        <section aria-labelledby="merge-additions-heading" className="space-y-2 rounded-md border border-mm-surface-border bg-mm-surface p-3">
+          <h3 id="merge-additions-heading" className="text-sm font-medium text-mm-text">Also added from the file</h3>
+          {adds.lead ? (
+            <>
+              <p className="text-sm text-mm-text-muted">{adds.lead}</p>
+              <ul className="list-disc pl-5 space-y-1 text-sm text-mm-text break-words">
+                {adds.lines.map(line => <li key={line}>{line}</li>)}
+              </ul>
+            </>
+          ) : (
+            <p className="text-sm text-mm-text-muted">{MERGE_ADDS_NOTHING}</p>
+          )}
+          {adds.withdrawn && <p className="text-sm text-mm-text-muted">{adds.withdrawn}</p>}
+        </section>
+      )}
+
       <p className="text-xs text-mm-text-faint">A safety backup of your project is saved before merging.</p>
 
       <div className="flex items-center justify-between gap-2 pt-1">
@@ -1026,27 +1117,10 @@ function ReportStep({ report, safetyBackup, targetId, navigate, headingRef }: {
   navigate: (to: string) => void
   headingRef?: React.Ref<HTMLHeadingElement>
 }) {
-  const rows: [string, number][] = [
-    ['Codings added', report.applications_added],
-    ['Duplicate codings skipped', report.duplicates_skipped],
-    ['Shared sources matched', report.sources_matched],
-    ['Coders matched', report.coders_matched],
-    ['New coders added', report.coders_created],
-    ['Codes added', report.codes_created],
-    ['Codes linked', report.codes_linked],
-    ['Codes folded in', report.codes_collapsed],
-    // #35 — the merge kept this project's ratings; the differences wait in
-    // Reconciliation. Shown only when there were any, so a project without
-    // rating scales never meets the row.
-    ...(report.magnitude_conflicts
-      ? [['Rating differences flagged for reconciliation', report.magnitude_conflicts] as [string, number]]
-      : []),
-    // #869 (c): a colleague's rating that does not fit the code's scale here
-    // arrives unrated, with the number kept as a merge difference to adjudicate.
-    ...(report.ratings_out_of_range
-      ? [['Ratings outside a code’s scale, kept as differences', report.ratings_out_of_range] as [string, number]]
-      : []),
-  ]
+  // The rows and their zero / non-zero rules live in `lib/merge-report-rows.ts` (#35,
+  // #869 (c), and #1190's withdrawn and re-inserted-unlinked counts — never a name).
+  const rows = mergeReportRows(report)
+  const notes = mergeReportNotes(report)
   return (
     <Card>
       <CardContent className="py-6 space-y-4">
@@ -1066,6 +1140,9 @@ function ReportStep({ report, safetyBackup, targetId, navigate, headingRef }: {
             </div>
           ))}
         </dl>
+        {notes.map(sentence => (
+          <p key={sentence} className="text-sm text-mm-text-muted max-w-xl">{sentence}</p>
+        ))}
         {/* The snapshot has always been taken and was never NAMED — so a researcher
             who wanted to go back had to guess at a file they had never been told
             about. It is a `.mmproject`, so it comes back through Import — NOT through

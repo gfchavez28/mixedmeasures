@@ -8,6 +8,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { codesApi, serverDetailMessage, type Code } from '@/lib/api'
+import { invalidateAfterRating } from '@/lib/coding-cache'
 import {
   MAX_TICKS, formatMagnitude, isScalePoint, isTickable, stepsReachMax, tickValues,
   type MagnitudeAnchor, type MagnitudeScale,
@@ -66,10 +67,13 @@ export default function MagnitudeScaleDialog({ projectId, code, open, onOpenChan
           : old,
       )
       queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
-      // The other two caches that carry a scale: the Ratings page's queue (its
-      // entries carry each code's scale, and data stays fresh for 60 s) and the
-      // codebook tree (the merge dialog's scale-crossing note reads it).
-      queryClient.invalidateQueries({ queryKey: ['rating-queue', projectId] })
+      // The codebook tree carries a scale (the merge dialog's scale-crossing note
+      // reads it). Everything a RATING moves, a scale moves too (#1425): the
+      // queue (its entries carry each code's scale, and only scaled codes are
+      // in it), the rating α (one row per scaled code), the grid's *Ratings
+      // differ* (it compares against the step) and the participant table's
+      // marker (a scale is a score input, `routers/codes.py`).
+      invalidateAfterRating(queryClient, projectId)
       queryClient.invalidateQueries({ queryKey: ['codebook-tree', projectId] })
       onOpenChange(false)
       toast(scale ? `Rating scale set for "${code.name}"` : `Rating scale cleared for "${code.name}"`)

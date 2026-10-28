@@ -58,6 +58,7 @@ function reportFor(p: Participant): WithdrawalReport {
       document_id: d.id, name: d.name, segments: 2, code_applications: 0, excerpts: 0, notes: 0,
     })),
     total_items: 1 + p.linked_documents.length * 2,
+    unlinked_records_with_identifier: 0,
   }
 }
 

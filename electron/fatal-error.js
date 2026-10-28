@@ -22,6 +22,17 @@ const { StringDecoder } = require('node:string_decoder')
 const MM_FATAL_PREFIX = 'MM-FATAL: '
 
 /**
+ * Must match `MM_PHASE_PREFIX` in backend/app/startup_errors.py (#1362) — the same
+ * hand-mirrored contract, pinned by the same test. A phase line is never a failure and
+ * never reaches a dialog: it tells the shell the backend is updating its database, so
+ * the startup deadline can wait for that instead of killing it.
+ */
+const MM_PHASE_PREFIX = 'MM-PHASE: '
+
+/** The phases the backend announces (`STARTUP_PHASES` there); anything else is ignored. */
+const STARTUP_PHASES = ['migrating', 'migrated']
+
+/**
  * Newline-less output we hold before dropping the head, and how much tail we keep.
  *
  * `push` only splits on `\n`, so a stream that emits bare `\r` (a progress bar)
@@ -58,7 +69,11 @@ const MAX_FATAL_CHARS = 1200
  * without a trailing newline (uvicorn's progress output, say) can glue itself to the
  * front of ours, and that must not swallow the message.
  */
-function createFatalLineCollector({ prefix = MM_FATAL_PREFIX, maxLines = MAX_FATAL_LINES } = {}) {
+function createFatalLineCollector({
+  prefix = MM_FATAL_PREFIX,
+  maxLines = MAX_FATAL_LINES,
+  onPhase = () => {},
+} = {}) {
   const decoder = new StringDecoder('utf8')
   let pending = ''
   const found = []
@@ -70,12 +85,24 @@ function createFatalLineCollector({ prefix = MM_FATAL_PREFIX, maxLines = MAX_FAT
     if (text && sink.length < maxLines) sink.push(text)
   }
 
+  // #1362: only COMPLETE lines carry a phase — a split marker waits for its newline,
+  // which is why this rides the same buffer as the fatal line rather than a second one.
+  const phaseOf = (line) => {
+    const at = line.indexOf(MM_PHASE_PREFIX)
+    if (at === -1) return
+    const phase = line.slice(at + MM_PHASE_PREFIX.length).trim()
+    if (STARTUP_PHASES.includes(phase)) onPhase(phase)
+  }
+
   return {
     push(chunk) {
       pending += decoder.write(chunk)
       const parts = pending.split(/\r?\n/)
       pending = parts.pop() // the tail is incomplete until a newline arrives
-      for (const part of parts) take(part, found)
+      for (const part of parts) {
+        take(part, found)
+        phaseOf(part)
+      }
       if (pending.length > MAX_PENDING_CHARS) pending = pending.slice(-PENDING_KEEP_CHARS)
     },
     /**
@@ -201,6 +228,24 @@ function backendSpawnFailureMessage(err, exePath) {
   return `Mixed Measures could not start its engine (“${file}”): ${reason}. ${remedy}${where}`
 }
 
+/**
+ * #1362 — the guidance when an update of the database outlasts its own deadline.
+ *
+ * Shown through `crashDialogText`'s `startupError` arm, AFTER the shell has hard-stopped
+ * the engine (`stopBackend({ hard: true })`): an update runs as one transaction (#1312),
+ * so a stop part-way leaves the database as the previous version left it — which is
+ * what lets this sentence say so. If it had committed just before the stop, the next
+ * launch simply finds it done; the sentence stays true either way.
+ */
+function migrationTimeoutMessage(minutes) {
+  return `Updating your data to this version did not finish within ${minutes} minutes, `
+    + 'so Mixed Measures stopped it. Your data is safe: an update that is stopped is '
+    + 'undone, and the version you updated from can still open it. If your project is '
+    + 'very large or this computer was busy, open Mixed Measures again and leave it to '
+    + 'finish. For help, email contact@mixedmeasures.com with this message (Copy '
+    + 'details copies it), but never your recovery key or your database.'
+}
+
 /** What "Copy details" puts on the clipboard — the whole dialog, as support would want it. */
 function crashDialogClipboardText({ title, message, detail }) {
   return [title, '', message, '', detail].join('\n')
@@ -253,6 +298,9 @@ async function showCrashDialog({ dialog, clipboard, text, log = () => {} }) {
 
 module.exports = {
   MM_FATAL_PREFIX,
+  MM_PHASE_PREFIX,
+  STARTUP_PHASES,
+  migrationTimeoutMessage,
   MAX_FATAL_LINES,
   MAX_FATAL_CHARS,
   MAX_PENDING_CHARS,

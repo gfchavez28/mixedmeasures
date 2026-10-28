@@ -7,6 +7,10 @@ import { useListLoad } from '@/hooks/useListLoad'
 import { LoadState } from '@/components/LoadStatus'
 import type { ImportValidationResult, ProjectImportMode } from '@/lib/api'
 import { setPendingMerge } from '@/lib/pending-merge'
+import {
+  canKeepIdentity, codingCopyCandidates, codingCopyMapping, shouldAskWhoYouAre, whoIsYouBlocker,
+  type WhoIsYou,
+} from '@/lib/coding-copy'
 import { staleResultsNote } from '@/lib/stale-results'
 import type { ProjectImportResult } from '@/lib/api'
 import { toast } from 'sonner'
@@ -238,6 +242,18 @@ export default function Dashboard() {
   const [importPreview, setImportPreview] = useState<ImportValidationResult | null>(null)
   const [importValidating, setImportValidating] = useState(false)
   const [importLoading, setImportLoading] = useState(false)
+  // #1321 — no project here shares the file's identity, so the import can KEEP it.
+  const { user } = useAuth()
+  const keepIdentity = importPreview !== null && canKeepIdentity(importPreview)
+  // 🔴 D2 — a copy that keeps the identity asks which of the file's people is YOU. With no
+  // answer the server makes each of them a coder of their own (never by name, in a coding
+  // copy), so a researcher moving their own project here would become two coders, and
+  // reliability would compare them with themselves. The answer is REQUIRED before *Import*;
+  // *Import as an independent project* keeps today's rules and is not gated (D6).
+  const [whoIsYou, setWhoIsYou] = useState<WhoIsYou | null>(null)
+  const askWhoYouAre = keepIdentity && shouldAskWhoYouAre(importPreview?.file_coders, user?.id)
+  const whoCandidates = askWhoYouAre ? codingCopyCandidates(importPreview?.file_coders) : []
+  const whoBlocker = whoIsYouBlocker(askWhoYouAre, whoIsYou)
   // #1258 — the mode PRESSED, which the wait's words and the busy button key on.
   // They keyed on `existing_project` (the file's project exists here), so *Import
   // as new copy* said "Replacing your copy… then it is replaced" while it made a
@@ -268,6 +284,8 @@ export default function Dashboard() {
     if (refusal) { refuse(refusal); return }
     setImportRefusal(null)
     validatingRef.current = true
+    // An answer is about ONE file's people: the next file is asked again.
+    setWhoIsYou(null)
     setImportFile(file)
     setImportValidating(true)
     try {
@@ -288,6 +306,15 @@ export default function Dashboard() {
     // #1035 review §4 #8: the buttons stay focusable while it runs (aria-disabled,
     // #965), so the guard is what refuses a second press.
     if (!importFile || importLoading) return
+    // 🔴 D2 — *Import* is `aria-disabled` until "which of these people is you?" is
+    // answered, which changes what it announces and nothing about what it does (#754):
+    // this guard is the refusal, for Enter and Space too.
+    if (mode === 'copy_for_coding' && whoBlocker) return
+    // At most ONE entry (the person chosen as you, onto the active coder); none for
+    // "None of them". Only a coding copy asks, so only a coding copy sends one.
+    const coderMapping = mode === 'copy_for_coding'
+      ? codingCopyMapping(importPreview?.file_coders, user?.id, whoIsYou)
+      : undefined
     setImportMode(mode)
     setImportLoading(true)
     try {
@@ -295,6 +322,7 @@ export default function Dashboard() {
       const result = await projectPortabilityApi.importProject(importFile, {
         mode,
         targetProjectId: mode === 'overwrite' ? targetProjectId : undefined,
+        ...(coderMapping ? { coderMapping } : {}),
       })
       // #1206: before the navigate below — an overwrite comes back under the SAME
       // ids, and a new copy can take a deleted project's, so a cached page of the
@@ -345,7 +373,7 @@ export default function Dashboard() {
       setImportLoading(false)
       setImportMode(null)
     }
-  }, [importFile, importLoading, importPreview, queryClient, navigate])
+  }, [importFile, importLoading, importPreview, whoBlocker, whoIsYou, user?.id, queryClient, navigate])
 
   // Track J · J3-2: merge is a multi-step flow, so hand the file + validate result
   // off to the full-page merge page (a File can't ride a route param) and navigate.
@@ -600,6 +628,28 @@ export default function Dashboard() {
                         can't receive this merge.
                       </p>
                     </>
+                  ) : keepIdentity ? (
+                    <>
+                      {/* #1321 — the only door a colleague's copy can come back through.
+                          "new" re-mints the identity, so a copy imported that way could
+                          never be merged with the project it came from. */}
+                      <p>
+                        Import <strong>{importPreview?.manifest?.project_name}</strong>. It keeps the identity of
+                        the project it was exported from, so the two can be merged later — your coding
+                        merged back into the original, or the original's new work into this copy.
+                      </p>
+                      {/* What a merge refuses was MEASURED both ways (#1321 review, r1):
+                          409 for a split, a join or an edited turn, on either side; 200 once
+                          the copy that changed is undone (Rejoin / Unmerge / the words put
+                          back). Clip freezing was read, not driven, so no undo is promised
+                          for it. "Rejoin" and "Unmerge" are the workbench menu's labels. */}
+                      <p className="text-xs text-mm-text-muted">
+                        While the copies are apart, code, quote and add notes, memos and codes freely. A merge refuses
+                        copies whose units or words differ, so in neither copy split or join a turn or paragraph, edit
+                        its words, or freeze or unfreeze an observation's clips. If one was changed, undoing it in the
+                        copy that changed (Rejoin, Unmerge, or putting the words back) clears that refusal.
+                      </p>
+                    </>
                   ) : (
                     <>
                       <p>Import <strong>{importPreview?.manifest?.project_name}</strong> as a new project?</p>
@@ -642,6 +692,49 @@ export default function Dashboard() {
                 </div>
               </AlertDialogDescription>
             </AlertDialogHeader>
+            {/* 🔴 D2 — OUTSIDE the description on purpose (#955 d): controls are reached by
+                Tab, and inside it every option's words would be read as the dialog's
+                description. A real `fieldset`/`legend` (CodingImport's pattern; there is no
+                radio-group component), so each option announces with its question. Each
+                option's name is the file person's name and codings count — the FILE's
+                values, which nothing here changes (#770). */}
+            {askWhoYouAre && (
+              <fieldset className="min-w-0 space-y-2 text-left" aria-describedby="coding-copy-who-note">
+                <legend className="text-sm font-medium text-mm-text">Which of these people is you?</legend>
+                {/* ONE string (#1067 c): a described element's sentences are one text node. */}
+                <p id="coding-copy-who-note" className="text-xs text-mm-text-muted">
+                  {`If you coded this project on another computer, choose yourself: that coding becomes yours, as ${user?.username}. ` +
+                    'Everyone else in the file stays a coder of their own, so their coding and yours stay apart.'}
+                </p>
+                <div className="space-y-1.5">
+                  {whoCandidates.map(c => (
+                    <label key={c.original_id} className="flex items-start gap-2 text-sm text-mm-text">
+                      <input
+                        type="radio"
+                        name="coding-copy-who"
+                        className="mt-1 flex-none"
+                        checked={whoIsYou?.kind === 'person' && whoIsYou.originalId === c.original_id}
+                        onChange={() => setWhoIsYou({ kind: 'person', originalId: c.original_id })}
+                      />
+                      <span className="min-w-0 break-words">
+                        {c.username}{' '}
+                        <span className="text-mm-text-muted">— {countLabel(c.file_app_count, 'coding', 'codings')}</span>
+                      </span>
+                    </label>
+                  ))}
+                  <label className="flex items-start gap-2 text-sm text-mm-text">
+                    <input
+                      type="radio"
+                      name="coding-copy-who"
+                      className="mt-1 flex-none"
+                      checked={whoIsYou?.kind === 'none'}
+                      onChange={() => setWhoIsYou({ kind: 'none' })}
+                    />
+                    <span className="min-w-0">None of them</span>
+                  </label>
+                </div>
+              </fieldset>
+            )}
             {importLoading && (
               <LongWaitStatus
                 label={importWaitLabel(importMode)}
@@ -649,6 +742,13 @@ export default function Dashboard() {
               >
                 {importWaitSentence(importMode, !!importPreview?.existing_project)}
               </LongWaitStatus>
+            )}
+            {/* The REASON *Import* is off — visible, and its description (#959/#965:
+                never native `disabled`, which blurs a focused button). */}
+            {whoBlocker && (
+              <p id="coding-copy-who-blocker" className="text-sm text-amber-700 dark:text-amber-400 sm:text-right">
+                {whoBlocker}
+              </p>
             )}
             <AlertDialogFooter className="flex-wrap gap-2 sm:space-x-0">
               <AlertDialogCancel aria-disabled={importLoading || undefined}>Cancel</AlertDialogCancel>
@@ -683,6 +783,29 @@ export default function Dashboard() {
                     aria-disabled={importLoading || undefined}
                   >
                     Merge coding in…
+                  </Button>
+                </>
+              ) : keepIdentity ? (
+                <>
+                  <Button
+                    ref={busyRef('new')}
+                    variant="outline"
+                    className="scroll-mb-6"
+                    onClick={() => handleImportConfirm('new')}
+                    aria-disabled={importLoading || undefined}
+                    aria-busy={(importLoading && importMode === 'new') || undefined}
+                  >
+                    {importLoading && importMode === 'new' ? 'Importing…' : 'Import as an independent project'}
+                  </Button>
+                  <Button
+                    ref={busyRef('copy_for_coding')}
+                    className="scroll-mb-6"
+                    onClick={() => handleImportConfirm('copy_for_coding')}
+                    aria-disabled={(importLoading || !!whoBlocker) || undefined}
+                    aria-describedby={whoBlocker ? 'coding-copy-who-blocker' : undefined}
+                    aria-busy={(importLoading && importMode === 'copy_for_coding') || undefined}
+                  >
+                    {importLoading && importMode === 'copy_for_coding' ? 'Importing…' : 'Import'}
                   </Button>
                 </>
               ) : (
@@ -775,7 +898,7 @@ export default function Dashboard() {
         open={duplicateProjectId !== null}
         onOpenChange={(open) => { if (!open) setDuplicateProjectId(null) }}
         title="Duplicate this project?"
-        description="This creates an independent copy with its own identity — it can't be merged back into the original. To code a copy elsewhere and merge it in later, use Export Project instead."
+        description="This creates an independent copy with its own identity — it can't be merged back into the original. To code a copy elsewhere and merge it in later, use Export Project instead, then open the file there with Import Project and choose Import, which keeps the project's identity."
         destructive={false}
         confirmLabel="Duplicate"
         loading={duplicateMutation.isPending}

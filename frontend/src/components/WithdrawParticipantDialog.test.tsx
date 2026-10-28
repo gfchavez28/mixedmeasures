@@ -26,8 +26,9 @@ const P07 = { identifier: 'P07', display_name: null }
 const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   participant_id: 1, identifier: 'P07', display_name: 'Maria', role: null,
   has_demographics: true, speaker_names: ['Maria'], total_items: 20,
+  unlinked_records_with_identifier: 0,
   conversations: [{
-    conversation_id: 1, name: 'Focus group', segments: 3,
+    conversation_id: 1, name: 'Focus group', segments: 3, combined_turns: 0,
     code_applications: 2, excerpts: 1, notes: 1,
   }],
   datasets: [{
@@ -163,6 +164,31 @@ describe('#1131 — the dialog’s description carries the decision', () => {
     expect(dialog).toHaveAccessibleDescription(/cannot tell you whether this satisfies your obligations/)
   })
 
+  /**
+   * #1320 (D12) — what still holds the data is part of the decision, so it is
+   * heard on open: inside the description, not beside it.
+   */
+  it('#1320: the description names every copy that still holds the data, and recordings', () => {
+    setup()
+    const dialog = screen.getByRole('alertdialog')
+    expect(dialog).toHaveAccessibleDescription(/A full backup is taken first\. That backup, your earlier backups/)
+    expect(dialog).toHaveAccessibleDescription(/the safety copies kept before a merge or overwrite/)
+    expect(dialog).toHaveAccessibleDescription(/any file already exported or shared still hold everything this removes/)
+    expect(dialog).toHaveAccessibleDescription(/Automatic and On quit backups are replaced over time/)
+    expect(dialog).toHaveAccessibleDescription(/Settings › Backup & Data/)
+    expect(dialog).toHaveAccessibleDescription(/Recordings are not edited — their voice stays in the audio or video/)
+  })
+
+  it('#1320: a merged or split turn is named as removed whole, in the description', () => {
+    setup(report({
+      conversations: [{ conversation_id: 1, name: 'Focus group', segments: 3, combined_turns: 2,
+                        code_applications: 2, excerpts: 1, notes: 1 }],
+    }))
+    const dialog = screen.getByRole('alertdialog')
+    expect(dialog).toHaveAccessibleDescription(/2 merged or split turns holding theirs/)
+    expect(dialog).toHaveAccessibleDescription(/Unmerge brings it back/)
+  })
+
   it('while the report loads, the description says it is checking', () => {
     setup(null)
     expect(screen.getByRole('alertdialog')).toHaveAccessibleDescription(/Checking what would be removed/)
@@ -170,7 +196,7 @@ describe('#1131 — the dialog’s description carries the decision', () => {
 
   it('one turn is "stays … as an empty placeholder", not "stay … placeholders"', () => {
     const one = keptSummary(report({
-      conversations: [{ conversation_id: 1, name: 'F', segments: 1, code_applications: 0, excerpts: 0, notes: 0 }],
+      conversations: [{ conversation_id: 1, name: 'F', segments: 1, combined_turns: 0, code_applications: 0, excerpts: 0, notes: 0 }],
     })).join(' | ')
     expect(one).toMatch(/Their 1 turn stays in place as an empty placeholder,/)
     expect(keptSummary(report()).join(' | ')).toMatch(/Their 3 turns stay in place as empty placeholders,/)

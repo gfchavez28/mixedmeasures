@@ -11,15 +11,16 @@ import {
   Cell,
   ResponsiveContainer,
 } from 'recharts'
-import type { TooltipContentProps, LabelProps } from 'recharts'
+import type { TooltipContentProps, BarRectangleItem } from 'recharts'
 import { useChartColors } from '@/lib/theme-context'
 import type { SourceFrequenciesResponse } from '@/lib/api'
 import type { QualValueMode, QualDenominatorMode, QualSortOrder } from '@/lib/qual-analysis-types'
 import type { DataLabelPosition } from '@/lib/chart-data'
 import { compareValueLabels } from '@/lib/chart-data'
 import type { ChartDataRow } from '@/lib/chart-types'
-import { shapeQualBarData, computeCellValue, resolveRenderedBarEntry, QUAL_GROUP_COLORS } from './qual-chart-data'
+import { shapeQualBarData, computeCellValue, QUAL_GROUP_COLORS } from './qual-chart-data'
 import { ChartFigure } from '@/components/charts/ChartFigure'
+import { barClickRow, barRowLabel } from '@/components/charts/bar-row-label'
 
 interface QualBarChartProps {
   data: SourceFrequenciesResponse
@@ -231,11 +232,10 @@ export default function QualBarChart({
                   barSize={18}
                   isAnimationActive={false}
                   cursor={onCodeClick ? 'pointer' : undefined}
-                  onClick={(data: unknown, index: number) => {
+                  onClick={(clicked: BarRectangleItem) => {
                     if (!onCodeClick) return
-                    // #504: index enumerates rendered rects (a 0-value group omits its rect)
-                    const payload = (data as { payload?: { _codeId?: number } } | null)?.payload
-                    const codeId = payload?._codeId ?? (chartData[index]?._codeId as number | undefined)
+                    // #504/#1314: the clicked bar's own row — recharts' index skips a 0-value group's bar.
+                    const codeId = barClickRow<ChartDataRow>(clicked)?._codeId as number | undefined
                     if (codeId != null) onCodeClick(codeId)
                   }}
                 >
@@ -273,20 +273,15 @@ export default function QualBarChart({
               barSize={20}
               isAnimationActive={false}
               cursor={onCodeClick ? 'pointer' : undefined}
-              onClick={(data: unknown, index: number) => {
+              onClick={(clicked: BarRectangleItem) => {
                 if (!onCodeClick) return
-                // #504: index enumerates rendered rects; prefer the clicked rect's own payload
-                const payload = (data as { payload?: { _codeId?: number } } | null)?.payload
-                const codeId = payload?._codeId
-                  ?? resolveRenderedBarEntry(simpleChartData, index, (data as { value?: number } | null)?.value ?? NaN)?._codeId
+                // #504/#1314: the clicked bar's own row — recharts' index skips an unused code's bar.
+                const codeId = barClickRow<(typeof simpleChartData)[number]>(clicked)?._codeId
                 if (codeId != null) onCodeClick(codeId)
               }}
-              label={(props: LabelProps) => {
-                const { x, y, width, height, value, index } = props as unknown as { x: number; y: number; width: number; height: number; value: number; index: number }
-                if (dataLabels === 'none') return null
-                const entry = resolveRenderedBarEntry(simpleChartData, index, value)
-                if (!entry || entry.value === 0) return null
-
+              // #504/#1314: the label reads its own row (bar-row-label.ts). An unused code draws
+              // no bar, so recharts calls this for none.
+              label={dataLabels === 'none' ? false : barRowLabel<(typeof simpleChartData)[number]>((entry, { x, y, width, height }) => {
                 const barEnd = x + width
                 const cy = y + height / 2
                 const displayValue = isPercent
@@ -321,7 +316,7 @@ export default function QualBarChart({
                     {displayValue}
                   </text>
                 )
-              }}
+              })}
             >
               {simpleChartData.map((entry, i) => (
                 <Cell key={i} fill={entry._color} />

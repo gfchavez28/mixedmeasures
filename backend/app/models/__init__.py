@@ -29,6 +29,7 @@ from .excerpt import Excerpt
 from .scratchpad import ScratchpadEntry
 from .quote_board_config import QuoteBoardConfig
 from .canvas import Canvas, CanvasTheme, CanvasThemeRelationship, CanvasPendingItem
+from .removal_tombstone import RemovalTombstone
 
 __all__ = [
     "User",
@@ -77,4 +78,5 @@ __all__ = [
     "CanvasTheme",
     "CanvasThemeRelationship",
     "CanvasPendingItem",
+    "RemovalTombstone",
 ]

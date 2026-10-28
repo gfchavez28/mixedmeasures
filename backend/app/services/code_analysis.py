@@ -26,6 +26,7 @@ from .coding_layers import LAYER_CONSENSUS, layer_scope_filter
 from .grouping import order_value_labels
 from .missing_values import column_missing_rules, is_missing
 from .text_analysis import substantive_text_clause, treat_as_empty_for_project
+from .undefined_stats import NO_SEGMENTS
 
 # ── Rounding precision constants ─────────────────────────────────────────────
 DISPLAY_PERCENTAGE_PRECISION = 1  # round(x, 1) for display percentages (e.g. 42.9%)
@@ -3573,8 +3574,17 @@ def get_demographic_comparison(
         for g in groups:
             count = group_code_counts[g].get(code.id, 0)
             total = group_seg_totals[g]
-            proportion = count / total if total > 0 else 0.0
-            by_group[g] = {"count": count, "proportion": round(proportion, 4)}
+            # #1421: a group with no segments in the material compared has no
+            # share to report — None WITH a reason, never 0.0, which read as
+            # "this group never said it" and made a full-size difference.
+            # ⚠️ Keyed on the TOTAL, never on the count: a group WITH segments
+            # and none coded this code is a real 0.0 and must stay one.
+            if total > 0:
+                by_group[g] = {"count": count, "proportion": round(count / total, 4),
+                               "undefined_reason": None}
+            else:
+                by_group[g] = {"count": count, "proportion": None,
+                               "undefined_reason": NO_SEGMENTS}
 
         # Statistical test
         delta = None
@@ -3582,7 +3592,11 @@ def get_demographic_comparison(
 
         if len(groups) == 2:
             g1, g2 = groups
-            delta = round(by_group[g1]["proportion"] - by_group[g2]["proportion"], 4)
+            p1, p2 = by_group[g1]["proportion"], by_group[g2]["proportion"]
+            # #1421: a difference needs both shares. Every code's Δ is then None
+            # together, so the |Δ| sort below leaves the codebook order — it ranks
+            # nothing, which is the honest answer.
+            delta = round(p1 - p2, 4) if p1 is not None and p2 is not None else None
             # Fisher's exact test on 2x2 table
             a = by_group[g1]["count"]
             b = group_seg_totals[g1] - a

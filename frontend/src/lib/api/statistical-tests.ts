@@ -39,7 +39,7 @@ export const statisticalTestsApi = {
     target_id: number
     config?: Record<string, unknown>
   }) =>
-    api.post<StatisticalTestResponse>(`/projects/${projectId}/statistical-tests/`, data).then(res => res.data),
+    api.post<StatisticalTestResponse>(`/projects/${projectId}/statistical-tests`, data).then(res => res.data),
   delete: (projectId: number, testId: number) =>
     api.delete(`/projects/${projectId}/statistical-tests/${testId}`).then(res => res.data),
   compute: (projectId: number, testId: number) =>

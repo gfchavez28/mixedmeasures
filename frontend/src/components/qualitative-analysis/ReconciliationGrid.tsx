@@ -25,6 +25,7 @@ import {
 import { cn, formatTimecode } from '@/lib/utils'
 import { formatMagnitude } from '@/lib/magnitude'
 import type { ListStatus } from '@/lib/list-status'
+import { invalidateDerivedCounts } from '@/lib/coding-cache'
 
 const RENDER_CAP = 200 // matches the backend limit; disagreements-first keeps the set small
 
@@ -105,16 +106,21 @@ export default function ReconciliationGrid({
   const recomputeMutation = useMutation({
     mutationFn: () => codeAnalysisApi.recomputeConsensus(projectId),
     onSuccess: (res) => {
-      queryClient.invalidateQueries({ queryKey: ['reconciliation', projectId] })
-      queryClient.invalidateQueries({ queryKey: ['consensus-status', projectId] })
+      // #1337 — the consensus LAYER moved: every consensus-scoped analysis reads it
+      // (reconciliation and consensus-status are in the helper's list).
+      invalidateDerivedCounts(queryClient, projectId)
       toast(res.recomputed > 0 ? `Recomputed ${res.recomputed} consensus target${res.recomputed === 1 ? '' : 's'}` : 'Consensus already up to date')
     },
     onError: () => toast.error('Could not recompute consensus'),
   })
 
+  // #1337 — an edit in your own cell is a coding like any other: it moves the IRR,
+  // the counts and the coverage too, not only this grid (#450's rule — never a
+  // hand-list). `codes` is the page's "N uses", which the helper leaves to hosts.
   const onCodeChange = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['reconciliation', projectId] })
-    queryClient.invalidateQueries({ queryKey: ['consensus-status', projectId] })
+    queryClient.invalidateQueries({ queryKey: ['codes', projectId] })
+    queryClient.invalidateQueries({ queryKey: ['observation-segments', projectId] })
+    invalidateDerivedCounts(queryClient, projectId)
   }, [queryClient, projectId])
 
   // #471(b): chips pivot to where the coding lives. The unit carries source_type/source_id

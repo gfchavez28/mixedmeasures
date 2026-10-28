@@ -153,6 +153,12 @@ export interface ParticipantLinkReport {
   skipped_duplicate: number
   skipped_conflict: number
   already_linked: number
+  /**
+   * #1190 — records whose ID belongs to a participant who WITHDREW: never linked, and no
+   * participant is created for them. Optional: a server that predates it omits the key,
+   * which reads as none (`?? 0` at every reader — `lib/link-by-column-copy.ts::skippedWithdrawn`).
+   */
+  skipped_withdrawn?: number
   duplicate_values: string[]
 }
 

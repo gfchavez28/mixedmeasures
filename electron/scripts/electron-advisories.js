@@ -34,6 +34,8 @@ const REVIEWED = Object.freeze({
   // advisory's own text names the fixed versions 42.0.0-beta.2, 41.10.5 and 39.8.10. So the
   // open range is a slip for the 40 line. The app DOES ship Squirrel.Mac (electron-updater's
   // MacUpdater), so this entry stands only while 44.x descends from 42's fix.
+  // Re-read 2026-10-24 and 2026-10-28 for 44.9.3 (#1366): both copies unchanged since 2026-09-29, and
+  // 44.7.0's Squirrel.Mac roll (8d808803 -> fffea30e, #54204) is 3 commits ahead of the old pin and 0 behind.
   'GHSA-vv43-5jgx-7qv8': "the repository copy's open range '>= 40.0.0-alpha.1' is a slip: GitHub's curated copy reads " +
     "'< 41.10.5' for that line and the advisory names 42.0.0-beta.2 as fixed, which 44.x descends from",
 })

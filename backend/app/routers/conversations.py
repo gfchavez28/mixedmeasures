@@ -72,6 +72,12 @@ def ensure_participant_for_speaker(
     if existing:
         speaker.participant_id = existing.id
     else:
+        # #1190 — never re-create a withdrawn participant from a speaker label.
+        from ..models.project import Project
+        from ..services.tombstones import is_withdrawn_identifier
+        project_uuid = db.query(Project.project_uuid).filter(Project.id == project_id).scalar()
+        if is_withdrawn_identifier(db, project_uuid, name):
+            return
         participant = Participant(
             project_id=project_id,
             identifier=name,

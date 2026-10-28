@@ -334,7 +334,10 @@ export interface GroupTotal {
 
 export interface GroupCodeStats {
   count: number
-  proportion: number
+  /** #1421: `null` when the group has no segments in the material compared —
+   *  `undefined_reason` says why. Never read it with `?? 0`. */
+  proportion: number | null
+  undefined_reason: string | null
 }
 
 export interface StatTestResult {

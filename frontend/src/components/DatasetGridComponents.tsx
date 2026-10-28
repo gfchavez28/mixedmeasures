@@ -23,6 +23,8 @@ import {
   retryUnanswered,
 } from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
+import { useWithdrawnIdentifierConfirm } from '@/hooks/useWithdrawnIdentifierConfirm'
+import { createConfirmingWithdrawn } from '@/lib/withdrawn-identifier'
 import { LoadState } from '@/components/LoadStatus'
 import {
   ContextMenu,
@@ -839,6 +841,10 @@ function ParticipantPicker({
   const [creating, setCreating] = useState(false)
   const queryClient = useQueryClient()
   const limitNoteId = useId()
+  // #1190 (D12) — rendered INSIDE the popover's content, so the dialog is a React
+  // descendant of it: Radix's layers keep the picker open beneath it, and Cancel hands
+  // focus back to the create button it was pressed from.
+  const { ask: askWithdrawn, dialog: withdrawnDialog } = useWithdrawnIdentifierConfirm()
 
   const participantsQuery = useQuery({
     queryKey: ['participants', projectId],
@@ -897,7 +903,16 @@ function ParticipantPicker({
     if (!suggestedIdentifier || creating || !participantsKnown) return
     setCreating(true)
     try {
-      const created = await participantsApi.create(projectId, { identifier: suggestedIdentifier })
+      // #1190 (D12) — an ID that belongs to someone who withdrew is refused with its
+      // own 409; the researcher is asked, and only "Create anyway" sends the override.
+      // Every OTHER 409 (the duplicate below) is rethrown as it came.
+      const created = await createConfirmingWithdrawn(
+        (confirm) => participantsApi.create(projectId, confirm
+          ? { identifier: suggestedIdentifier, confirm_withdrawn: true }
+          : { identifier: suggestedIdentifier }),
+        askWithdrawn,
+      )
+      if (created === null) return // declined — nothing created, the picker stays as it was
       queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
       toast.success(`Created participant "${created.display_name || created.identifier}"`)
       handleSelect(created)
@@ -1066,7 +1081,13 @@ function ParticipantPicker({
             // #963 — a transient precondition, so native `disabled`
             // (`lib/mode-disabled.ts`): the 409 recovery this button relies
             // on cannot work against an unanswered list.
-            disabled={creating || !participantsKnown}
+            disabled={!participantsKnown}
+            // #1190 (D12) — BUSY is `aria-disabled` + the handler's `creating`
+            // guard, never `disabled` (#959/#965): a withdrawn ID's confirm opens
+            // while the request is in flight, and a button Chrome had blurred left
+            // the dialog no opener to hand focus back to on Cancel.
+            aria-disabled={creating || undefined}
+            aria-busy={creating || undefined}
             title={
               !participantsKnown
                 ? (participantsLoad.status === 'failed'
@@ -1074,7 +1095,7 @@ function ParticipantPicker({
                   : 'Still loading the participants')
                 : undefined
             }
-            className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-sm text-mm-green-text hover:bg-mm-surface-hover disabled:opacity-50"
+            className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-sm text-mm-green-text hover:bg-mm-surface-hover disabled:opacity-50 aria-disabled:opacity-50"
           >
             {creating ? (
               <LoaderCircle className="w-3.5 h-3.5 shrink-0 animate-spin" aria-hidden="true" />
@@ -1087,6 +1108,7 @@ function ParticipantPicker({
           </button>
         </div>
       )}
+      {withdrawnDialog}
     </>
   )
 }
@@ -1115,6 +1137,7 @@ export const DataRow = memo(function DataRow({
   deleteRowRefusal,
   linkRefusal,
   domainScoreCols,
+  declareRowPosition,
 }: {
   row: DatasetDataRow
   rowIndex: number
@@ -1144,6 +1167,9 @@ export const DataRow = memo(function DataRow({
   /** Row 45 (i) — refuses re-linking a row on a tool-maintained table. */
   linkRefusal?: string | null
   domainScoreCols?: DomainScoreColumn[]
+  /** 10-19 row 19 — true when the grid shows one PAGE of a larger dataset, so
+   *  the row says where it sits in the whole set (`aria-rowindex`). */
+  declareRowPosition?: boolean
 }) {
   // ⚠️ `rowIndex` is DATASET-scoped, not page-scoped — the caller adds the
   // page offset. Page-scoped it restarted at "R1" on every page, so on a
@@ -1172,7 +1198,13 @@ export const DataRow = memo(function DataRow({
             each cell: `EditableCell` returns ten different `<td>` branches by
             type and edit state, so a per-cell attribute would be ten places to
             keep in step. Renaming this attribute breaks `useRecordFocus`. */}
-        <tr className="group border-b" data-row-id={row.id}>
+        {/* `aria-rowindex` is 1-based and counts the header row, so record N
+            of the dataset is row N + 1 (`DatasetView`'s `aria-rowcount`). */}
+        <tr
+          className="group border-b"
+          data-row-id={row.id}
+          aria-rowindex={declareRowPosition ? rowIndex + 2 : undefined}
+        >
           {/* #772 — the record id is this row's HEADER, not a value.
             *
             * It was a `<td>`, so every body cell in a 120×11 grid had a column
@@ -1285,6 +1317,7 @@ export const DataRow = memo(function DataRow({
   if (prev.deleteRowRefusal !== next.deleteRowRefusal) return false
   if (prev.linkRefusal !== next.linkRefusal) return false
   if (prev.domainScoreCols !== next.domainScoreCols) return false
+  if (prev.declareRowPosition !== next.declareRowPosition) return false
   // Only re-render if selectedCell/editingCell relevance to THIS row changed
   const prevHasSelected = prev.selectedCell?.rowId === prev.row.id
   const nextHasSelected = next.selectedCell?.rowId === next.row.id

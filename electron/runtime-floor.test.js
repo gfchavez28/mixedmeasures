@@ -23,16 +23,29 @@ const path = require('node:path')
 //     and 44.4.0 (CVE-2026-87491, #53769), and natively from 44.4.2;
 //   - 44.4.0 and 44.4.4 also fix two events this shell listens to (`unresponsive` after
 //     sleep on Windows; `ready-to-show` never firing for some hidden windows).
-// 44.5.1 is the line's head as taken: 44.5.0's Linux fixes plus 27 upstream backports.
+// 44.5.1 was the line's head as taken at that move. 1.5.8 takes 44.9.3 (#1366), the head on
+// 2026-10-24, and here the floor IS a security floor:
+//   - GHSA-jr5w-w6x2-84p9 (high, 2026-10-22): compromised eMudhra intermediate certificates,
+//     blocked in Chromium networking and in Node tls/https/fetch from 44.9.1. The update
+//     check is this app's one outbound TLS connection, and on Linux nothing behind TLS
+//     checks the AppImage it downloads. 44.9.0 is NOT enough: it is what a bare
+//     `npm update electron` resolved on 2026-10-24 under the 7-day window, and GHSA-jr5w
+//     names it.
+//   - 44.7.2's fix for an interrupted Squirrel.Mac install leaving an app macOS calls
+//     "damaged" (#54844), on the path electron-updater's MacUpdater drives;
+//   - 44.9.3's 69 upstream ANGLE, Chromium, PDFium, Skia and V8 backports (#55149).
+// Taken 2026-10-28 over 44.10.0 (10-27, inside the window), whose release notes were read
+// that day: its named fixes (Node 24.22.1's CVEs) reach no Node API this shell calls
+// (RELEASING §1b's 1.5.8 block).
 //
 // A MAJOR move fails here until FLOOR moves with it, deliberately. A patched version is
-// per LINE (qmv3 is fixed in 42.10.0, 43.5.0 and 44.0.0-beta.6), so a bare "44.5.1 or
-// higher" would wave through the next line's early releases, which can lack a fix that
-// was backported here.
+// per LINE (qmv3 is fixed in 42.10.0, 43.5.0 and 44.0.0-beta.6; jr5w in 42.11.16, 43.8.1,
+// 44.9.1 and 45.0.0-beta.6), so a bare "44.9.3 or higher" would wave through the next
+// line's early releases, which can lack a fix that was backported here.
 // Whoever changes the major reads that line's advisories and sets FLOOR to the version
 // they took. ⚠️ The move after 44 also needs #1121 first: Electron 46 removes the
 // synchronous safeStorage calls key-manager.js uses.
-const FLOOR = '44.5.1'
+const FLOOR = '44.9.3'
 
 const ELECTRON_DIR = __dirname
 const pkg = JSON.parse(fs.readFileSync(path.join(ELECTRON_DIR, 'package.json'), 'utf8'))

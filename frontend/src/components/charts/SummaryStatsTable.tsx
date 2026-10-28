@@ -163,7 +163,7 @@ export default function SummaryStatsTable({
         </thead>
         <tbody>
           {data.map(row => (
-            <tr key={row.metricId}>
+            <tr key={`${row.metricId}/${row.groupValue ?? ''}`}>
               <th
                 scope="row"
                 className="text-left px-3 py-2 font-medium border-r"

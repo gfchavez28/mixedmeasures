@@ -235,7 +235,7 @@ class TestNonAsciiSurvivesTheMarkerLine:
     #: A character cp1252 CAN encode → a lone 0xC9 byte. THIS is the one that shipped:
     #: it is not valid UTF-8, so the reader's StringDecoder yields U+FFFD and the path
     #: silently names nowhere. The suite had no Latin-1 case at all before #762.
-    LATIN1_MSG = "Could not create the pre-migration backup at C:\\Users\\gchav\\Évaluation\\backups."
+    LATIN1_MSG = "Could not create the pre-migration backup at C:\\Users\\Researcher\\Évaluation\\backups."
 
     def _emit_bytes(self, msg: str, encoding: str) -> bytes:
         """Emit through a stream whose TEXT layer uses `encoding` — as PyInstaller's does."""

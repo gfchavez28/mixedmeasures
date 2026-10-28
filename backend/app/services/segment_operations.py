@@ -1,7 +1,10 @@
 """Shared segment split/merge operations for both conversations and documents,
-plus the observation-clip TIME operations (slab 3b)."""
+plus the observation-clip TIME operations (slab 3b) and the text edit's quote
+rebase (#1319)."""
 
+import difflib
 import math
+import re
 
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import func
@@ -1250,6 +1253,452 @@ def _char_excerpt_carry_plan(
             ))
 
     return plan
+
+
+# ── Text edits (#1319) ───────────────────────────────────────────────────────
+#
+# Editing a turn's or paragraph's text is a SEGMENT OPERATION: every char-range
+# quote on it is an offset pair into that text, so an edit that leaves the offsets
+# alone silently moves every later quote onto other words (#1319 measured 'not
+# helpful' → ' it was not' and, on a shortened turn, ''). Both edit doors
+# (`routers/segments.py::update_segment`, `routers/documents.py::
+# update_document_segment`) go through `apply_text_edit`, which is the ONE writer
+# of `Segment.text` for a text edit; a fail-closed AST scan
+# (`tests/test_text_edit_quote_rebase.py`) refuses any other.
+#
+# ⚠️ It shares the split carry's COORDINATE model (code points, one run of source
+# text landing at a known place) and deliberately NOT its decision: the split
+# DIVIDES a quote across the regions it overlaps, which for an edit would turn the
+# unchanged stretches either side of a typo into two quotes. An edit keeps ONE
+# quote per quote, and asks before moving an edge it cannot place.
+
+# Word-plus-trailing-space tokens. Separate whitespace tokens repeat thousands of
+# times in a long paragraph and make an autojunk-free SequenceMatcher quadratic in
+# practice (measured: 3.3 s at 20k characters of a small vocabulary; 0.2 s with
+# these tokens).
+_EDIT_TOKEN = re.compile(r"\S+\s*|\s+")
+
+# Above this many tokens on either side of the changed middle, the middle is ONE
+# change rather than a diff. Measured on real transcript text (a Supreme Court
+# argument): 1,751 tokens in 14 ms, 3,526 in 28 ms, 10,661 in 418 ms; a small-
+# vocabulary worst case ~100 ms at this cap. Both doors are `async def`, so this
+# work runs on the event loop and the cap is what bounds the freeze. Over it,
+# quotes inside the middle are offered for confirmation instead of being
+# followed — never moved silently.
+TEXT_EDIT_TOKEN_CAP = 2_000
+
+REBASE_SILENT = "silent"
+REBASE_EDGE = "edge"
+REBASE_STRADDLE = "straddle"
+REBASE_GONE = "gone"
+# The outcomes D5 shows before saving: a change touches the quote's edge from
+# inside, crosses an edge, or leaves none of its words.
+REBASE_NEEDS_CONFIRM = frozenset({REBASE_EDGE, REBASE_STRADDLE, REBASE_GONE})
+
+
+class _EditRun(NamedTuple):
+    """One changed stretch: OLD text [old_start, old_end) became NEW text
+    [new_start, new_end). Absolute code-point positions in each string."""
+    old_start: int
+    old_end: int
+    new_start: int
+    new_end: int
+
+
+class QuoteRebase(NamedTuple):
+    """What a text edit does to one char-range quote (#1319)."""
+    excerpt_id: int
+    outcome: str            # REBASE_SILENT / _EDGE / _STRADDLE / _GONE
+    old_start: int
+    old_end: int
+    new_start: int | None   # None when the outcome is GONE
+    new_end: int | None
+
+
+class RebasePlan(NamedTuple):
+    quotes: list[QuoteRebase]
+    capped: bool            # the changed middle exceeded TEXT_EDIT_TOKEN_CAP
+
+
+def _is_word(text: str, i: int) -> bool:
+    """A non-space character at ``i`` — the token model's notion of 'inside a word'."""
+    return 0 <= i < len(text) and not text[i].isspace()
+
+
+def _text_edit_runs(old: str, new: str) -> tuple[list[_EditRun], bool]:
+    """The changed stretches between ``old`` and ``new``, in CODE POINTS.
+
+    1. Trim the common prefix and suffix (linear) — a typo fix touches a few
+       characters of a long turn, and everything outside them is unchanged by
+       definition.
+    2. Widen that window to whitespace boundaries when it would start or end
+       MID-WORD, so a run never begins inside a word the edit changed. Character
+       alignment is the trap here: "was not" → "wasn't" would otherwise keep the
+       'n' and turn the quote 'not helpful' into "n't helpful" silently.
+    3. Diff the middle by word-plus-trailing-space tokens with ``autojunk=False``
+       (the default junks any token past 1% of a 200+-token middle, so common
+       words stop anchoring the alignment), capped at TEXT_EDIT_TOKEN_CAP.
+    4. Refine each changed run: ONE word replaced by ONE word shrinks to its
+       minimal character change (so 'helpfull' → 'helpful' is the deletion of an
+       'l', not a change to the whole word); any other run sheds only the
+       whitespace and punctuation both sides share, so a word's trailing space or
+       full stop never makes a run cross a quote that ends at the word — and a
+       letter is never shed, so a run never starts or ends mid-word.
+    """
+    n = min(len(old), len(new))
+    p = 0
+    while p < n and old[p] == new[p]:
+        p += 1
+    s = 0
+    while s < n - p and old[-1 - s] == new[-1 - s]:
+        s += 1
+    if p == len(old) and p == len(new):
+        return [], False
+
+    if _is_word(old, p - 1) and (_is_word(old, p) or _is_word(new, p)):
+        while _is_word(old, p - 1):
+            p -= 1
+    if _is_word(old, len(old) - s) and (
+        _is_word(old, len(old) - s - 1) or _is_word(new, len(new) - s - 1)
+    ):
+        while s > 0 and _is_word(old, len(old) - s):
+            s -= 1
+
+    a_end, b_end = len(old) - s, len(new) - s
+    ta = [(m.start() + p, m.end() + p) for m in _EDIT_TOKEN.finditer(old[p:a_end])]
+    tb = [(m.start() + p, m.end() + p) for m in _EDIT_TOKEN.finditer(new[p:b_end])]
+    if len(ta) > TEXT_EDIT_TOKEN_CAP or len(tb) > TEXT_EDIT_TOKEN_CAP:
+        return [_EditRun(p, a_end, p, b_end)], True
+
+    matcher = difflib.SequenceMatcher(
+        None,
+        [old[x:y] for x, y in ta],
+        [new[x:y] for x, y in tb],
+        autojunk=False,
+    )
+    runs: list[_EditRun] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        o1 = ta[i1][0] if i1 < len(ta) else a_end
+        o2 = ta[i2 - 1][1] if i2 > i1 else o1
+        n1 = tb[j1][0] if j1 < len(tb) else b_end
+        n2 = tb[j2 - 1][1] if j2 > j1 else n1
+        one_word = (i2 - i1 == 1 and j2 - j1 == 1)
+        while o1 < o2 and n1 < n2 and old[o1] == new[n1] and (one_word or not old[o1].isalnum()):
+            o1 += 1
+            n1 += 1
+        while o2 > o1 and n2 > n1 and old[o2 - 1] == new[n2 - 1] and (
+            one_word or not old[o2 - 1].isalnum()
+        ):
+            o2 -= 1
+            n2 -= 1
+        runs.append(_EditRun(o1, o2, n1, n2))
+    return runs, False
+
+
+def _rebase_one_quote(
+    runs: list[_EditRun], excerpt_id: int, s: int, e: int,
+) -> QuoteRebase:
+    """One quote's outcome — the four cases D5 names, decided on the runs alone.
+
+    - **silent** — both ends sit in unchanged text. A change wholly INSIDE the quote
+      is absorbed (the quote keeps its words, with the change), and a pure insertion
+      exactly AT an edge stays OUTSIDE it: text typed before a quote's first word is
+      not something the researcher marked.
+    - **edge** — a change touches an edge from inside (a typo in the quote's last
+      word). Proposed span: the quote with that change.
+    - **straddle** — a change crosses an edge. Proposed span: WIDENED to cover the
+      change, so no marked word is dropped (a deletion crossing an edge narrows it to
+      what survives, by the same rule).
+    - **gone** — none of the quote's words survive: its span is deleted, or every
+      character was replaced as part of a larger change. No span is proposed.
+    """
+    start_shift = end_shift = 0
+    crossed_start: int | None = None
+    crossed_end: int | None = None
+    touches_edge = False
+    covered = 0
+    covered_by_wider_change = False
+    for r in runs:
+        delta = (r.new_end - r.new_start) - (r.old_end - r.old_start)
+        if r.old_end <= s:
+            # Wholly before — a pure insertion AT s included, so it stays outside.
+            start_shift += delta
+        if r.old_end <= e and r.old_start < e:
+            # Every run before the end moves it — except a pure insertion AT e.
+            end_shift += delta
+        if r.old_start < s < r.old_end:
+            crossed_start = r.new_start
+        if r.old_start < e < r.old_end:
+            crossed_end = r.new_end
+        if (
+            s <= r.old_start and r.old_end <= e and r.old_start < r.old_end
+            and (r.old_start == s or r.old_end == e)
+        ):
+            touches_edge = True
+        lo, hi = max(r.old_start, s), min(r.old_end, e)
+        if hi > lo:
+            covered += hi - lo
+            if r.old_start < s or r.old_end > e:
+                covered_by_wider_change = True
+
+    new_start = crossed_start if crossed_start is not None else s + start_shift
+    new_end = crossed_end if crossed_end is not None else e + end_shift
+    if new_end <= new_start or (covered == e - s and covered_by_wider_change):
+        return QuoteRebase(excerpt_id, REBASE_GONE, s, e, None, None)
+    if crossed_start is not None or crossed_end is not None:
+        outcome = REBASE_STRADDLE
+    elif touches_edge:
+        outcome = REBASE_EDGE
+    else:
+        outcome = REBASE_SILENT
+    return QuoteRebase(excerpt_id, outcome, s, e, new_start, new_end)
+
+
+def plan_text_edit_rebase(
+    old: str, new: str, quotes: list[tuple[int, int, int]],
+) -> RebasePlan:
+    """Decide where each char-range quote goes when ``old`` is edited into ``new``.
+
+    ``quotes`` is ``(excerpt_id, start_offset, end_offset)`` in code points (#687).
+    Pure: no session, no writes — the preview and the apply share it, which is
+    what makes the preview a promise about the apply.
+
+    ⚠️ A quote whose offsets do not fit the OLD text (past damage, #1319 out of
+    scope) is left exactly where it is, as SILENT: this edit neither repairs it
+    nor deletes it.
+    """
+    runs, capped = _text_edit_runs(old, new)
+    out: list[QuoteRebase] = []
+    for excerpt_id, s, e in quotes:
+        if not (0 <= s < e <= len(old)):
+            out.append(QuoteRebase(excerpt_id, REBASE_SILENT, s, e, s, e))
+            continue
+        out.append(_rebase_one_quote(runs, excerpt_id, s, e))
+    return RebasePlan(out, capped)
+
+
+def _span_collisions(spans: dict[int, tuple[int, int]]) -> list[list[int]]:
+    """Groups of excerpt ids that would share one span — `ix_excerpt_segment_range`
+    is unique per segment, so this is a refusal, never an IntegrityError."""
+    by_span: dict[tuple[int, int], list[int]] = {}
+    for excerpt_id, span in spans.items():
+        by_span.setdefault(span, []).append(excerpt_id)
+    return [sorted(ids) for ids in by_span.values() if len(ids) > 1]
+
+
+def _char_quotes(segment: Segment) -> list[Excerpt]:
+    return sorted(
+        (ex for ex in segment.excerpts if ex.start_offset is not None and ex.end_offset is not None),
+        key=lambda ex: ex.id,
+    )
+
+
+def _has_live_note(ex: Excerpt) -> bool:
+    return ex.note is not None and not ex.note.is_archived
+
+
+def _plan_item(
+    q: QuoteRebase, ex: Excerpt, old: str, new: str, *,
+    new_span: tuple[int, int] | None, removed: bool = False, explicit: bool = False,
+) -> dict:
+    """One quote's line in the report the client shows (and keeps for undo)."""
+    return {
+        "excerpt_id": q.excerpt_id,
+        "outcome": q.outcome,
+        "old_start": q.old_start,
+        "old_end": q.old_end,
+        "new_start": new_span[0] if new_span else None,
+        "new_end": new_span[1] if new_span else None,
+        "old_text": old[q.old_start:q.old_end],
+        "new_text": new[new_span[0]:new_span[1]] if new_span else None,
+        "has_note": _has_live_note(ex),
+        "removed": removed,
+        "explicit": explicit,
+    }
+
+
+def preview_text_edit(segment: Segment, new_text: str) -> dict:
+    """The plan for editing ``segment``'s text to ``new_text`` — READ-ONLY.
+
+    The #1054 plan-then-apply shape: the client shows the quotes this edit would
+    move before anything is written, because `useHistory.execute` swallows a failed
+    act and an apply refusal alone would leave the researcher guessing.
+    ``collisions`` are the groups that would share a span if every flagged quote
+    were KEPT as proposed; removing them is always possible.
+    """
+    old = segment.text or ""
+    by_id = {ex.id: ex for ex in _char_quotes(segment)}
+    plan = plan_text_edit_rebase(
+        old, new_text, [(ex.id, ex.start_offset, ex.end_offset) for ex in by_id.values()],
+    )
+    items = []
+    kept: dict[int, tuple[int, int]] = {}
+    for q in plan.quotes:
+        span = (q.new_start, q.new_end) if q.new_start is not None else None
+        if span is not None:
+            kept[q.excerpt_id] = span
+        items.append(_plan_item(q, by_id[q.excerpt_id], old, new_text, new_span=span))
+    return {
+        "text": new_text,
+        "quotes": items,
+        "needs_confirmation": any(q.outcome in REBASE_NEEDS_CONFIRM for q in plan.quotes),
+        "collisions": _span_collisions(kept),
+        "capped": plan.capped,
+    }
+
+
+def _refuse(status: int, error: str, message: str, **extra) -> HTTPException:
+    return HTTPException(status_code=status, detail={"error": error, "message": message, **extra})
+
+
+def apply_text_edit(
+    db: Session,
+    segment: Segment,
+    new_text: str,
+    *,
+    remove_excerpt_ids: list[int] | None = None,
+    excerpt_offsets: list[tuple[int, int, int]] | None = None,
+) -> tuple[dict, dict]:
+    """Write a text edit and carry every char-range quote with it (#1319).
+
+    THE writer of `Segment.text` for a text edit. Returns ``(plan, audit)``: the
+    per-quote report for the response, and the same report WITHOUT WORDS for the
+    audit row (D6 — a document edit's audit row carries lengths and the rebase,
+    never text: the old text would outlive a withdrawal).
+
+    - ``excerpt_offsets`` — ``(excerpt_id, start, end)`` placed EXACTLY, in the new
+      text's code points. It is how an undo restores every quote to its pre-edit
+      offsets (the #1023 shape: captured at the act, never re-derived), and how
+      "keep as shown" keeps a flagged quote at the span the researcher was shown.
+      An id that is no longer on this segment is ignored: there is nothing to put
+      back (a quote deleted since, or re-created under a new id by an undo).
+    - ``remove_excerpt_ids`` — the quotes this edit deletes. It must EQUAL the
+      plan's unplaceable set — the flagged quotes (edge / straddle / gone) that
+      ``excerpt_offsets`` does not place — or the edit is refused with a 409: the
+      server never deletes a quote the client did not name, and never moves a
+      flagged quote the client was not shown.
+    - Two quotes landing on one span is a 409 (``ix_excerpt_segment_range``), not
+      an IntegrityError.
+    """
+    old = segment.text or ""
+    quotes = _char_quotes(segment)
+    by_id = {ex.id: ex for ex in quotes}
+    remove = set(remove_excerpt_ids or [])
+    explicit: dict[int, tuple[int, int]] = {}
+    for excerpt_id, start, end in excerpt_offsets or []:
+        if excerpt_id not in by_id:
+            continue
+        if not (0 <= start < end <= len(new_text)):
+            raise _refuse(
+                400, "excerpt_offsets_invalid",
+                "A quote's position falls outside the edited text.",
+                excerpt_ids=[excerpt_id],
+            )
+        explicit[excerpt_id] = (start, end)
+    both = sorted(remove & set(explicit))
+    if both:
+        raise _refuse(
+            400, "excerpt_offsets_invalid",
+            "A quote cannot be both kept at a position and removed.",
+            excerpt_ids=both,
+        )
+
+    plan = plan_text_edit_rebase(
+        old, new_text, [(ex.id, ex.start_offset, ex.end_offset) for ex in quotes],
+    )
+    unplaceable = {
+        q.excerpt_id for q in plan.quotes
+        if q.outcome in REBASE_NEEDS_CONFIRM and q.excerpt_id not in explicit
+    }
+    if remove != unplaceable:
+        raise _refuse(
+            409, "quotes_need_confirmation",
+            "This change would alter the words of a quote on this passage without "
+            "saying what should happen to it, so nothing was changed.",
+            unplaceable_excerpt_ids=sorted(unplaceable),
+        )
+
+    final: dict[int, tuple[int, int]] = {}
+    for q in plan.quotes:
+        if q.excerpt_id in remove:
+            continue
+        final[q.excerpt_id] = explicit.get(q.excerpt_id, (q.new_start, q.new_end))
+    collisions = _span_collisions(final)
+    if collisions:
+        raise _refuse(
+            409, "quotes_collide",
+            "Two quotes would mark the same words after this change, so nothing was "
+            "changed. Remove one of them first.",
+            collisions=collisions,
+        )
+
+    items: list[dict] = []
+    audit_quotes: list[dict] = []
+    for q in plan.quotes:
+        ex = by_id[q.excerpt_id]
+        removed = q.excerpt_id in remove
+        span = None if removed else final[q.excerpt_id]
+        items.append(_plan_item(
+            q, ex, old, new_text, new_span=span,
+            removed=removed, explicit=q.excerpt_id in explicit,
+        ))
+        audit_quotes.append({
+            "excerpt_id": q.excerpt_id,
+            "outcome": q.outcome,
+            "old": [q.old_start, q.old_end],
+            "new": list(span) if span else None,
+            "removed": removed,
+            "explicit": q.excerpt_id in explicit,
+        })
+
+    # Removals first: a removed quote's span may be another quote's destination.
+    # The note survives with its link cleared, exactly as the excerpt DELETE door does.
+    if remove:
+        db.query(Note).filter(Note.excerpt_id.in_(sorted(remove))).update(
+            {Note.excerpt_id: None}, synchronize_session=False,
+        )
+        for excerpt_id in sorted(remove):
+            db.delete(by_id[excerpt_id])
+        db.flush()
+
+    # Two phases: SQLite checks `ix_excerpt_segment_range` per UPDATE, so moving A
+    # onto B's OLD span before B leaves it collides transiently even when the final
+    # state is unique. Park every mover beyond both texts first.
+    movers = [
+        excerpt_id for excerpt_id, span in final.items()
+        if span != (by_id[excerpt_id].start_offset, by_id[excerpt_id].end_offset)
+    ]
+    if movers:
+        park = max(
+            [len(old), len(new_text)]
+            + [ex.end_offset for ex in quotes if ex.id not in remove]
+        ) + 1
+        for k, excerpt_id in enumerate(movers):
+            by_id[excerpt_id].start_offset = park + 2 * k
+            by_id[excerpt_id].end_offset = park + 2 * k + 1
+        db.flush()
+        for excerpt_id in movers:
+            by_id[excerpt_id].start_offset, by_id[excerpt_id].end_offset = final[excerpt_id]
+
+    segment.text = new_text
+    segment.word_count = len(new_text.split())
+    db.flush()
+
+    report = {
+        "text": new_text,
+        "quotes": items,
+        "needs_confirmation": False,
+        "collisions": [],
+        "capped": plan.capped,
+    }
+    audit = {
+        "old_length": len(old),
+        "new_length": len(new_text),
+        "quote_rebase": audit_quotes,
+    }
+    return report, audit
 
 
 def _clip_excerpt_carry_plan(

@@ -324,7 +324,10 @@ class GroupTotal(BaseModel):
 
 class GroupCodeStats(BaseModel):
     count: int
-    proportion: float
+    # #1421: None when the group has no segments in the material compared —
+    # `undefined_reason` (services/undefined_stats.py) says why.
+    proportion: float | None
+    undefined_reason: str | None = None
 
 
 class StatTestResult(BaseModel):

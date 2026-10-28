@@ -3,7 +3,6 @@
 import pytest
 
 from app.services.document_import import (
-    _strip_html,
     _clean_text,
     _normalize_block_text,
     _join_block_texts,
@@ -27,21 +26,46 @@ from app.models.document import SegmentationMode
 
 
 # ---------------------------------------------------------------------------
-# _strip_html
+# #1317: text between `<` and `>`, and entity-like text, is kept verbatim
 # ---------------------------------------------------------------------------
 
-class TestStripHtml:
-    def test_removes_tags(self):
-        assert _strip_html("<p>Hello <b>world</b></p>") == "Hello world"
+#: What the old "defense-in-depth" strip destroyed: a participant's own words
+#: between a `<` and a later `>`, transcription marks, an address, and text that
+#: merely looks like an HTML entity.
+VERBATIM = [
+    "I scored <5 on one and >9 on the other.",
+    "Well <laughs> I suppose so <crosstalk>",
+    "Write to <maria@example.org> for the forms.",
+    "The record said &lt;nothing&gt; &amp; that was all.",
+    "<p>Tagged paragraph</p>",
+]
 
-    def test_decodes_entities(self):
-        assert _strip_html("&amp; &lt; &gt; &quot;") == '& < > "'
 
-    def test_combined_tags_and_entities(self):
-        assert _strip_html("<span>Tom &amp; Jerry</span>") == "Tom & Jerry"
+class TestTextIsKeptVerbatim:
+    """Every import path keeps these as written (#1317). No surface renders
+    document text as HTML, so the strip that used to run here defended nothing."""
 
-    def test_plain_text_unchanged(self):
-        assert _strip_html("no tags here") == "no tags here"
+    def test_the_pdf_line_path(self):
+        # PDF lines go through `_clean_text` one at a time.
+        for text in VERBATIM:
+            assert _clean_text(text) == text
+
+    def test_a_txt_file(self):
+        doc = extract_text_from_txt("\n\n".join(VERBATIM).encode("utf-8"))
+        assert [p.text for p in doc.paragraphs] == VERBATIM
+
+    def test_a_docx_file(self):
+        import docx
+        from io import BytesIO
+
+        d = docx.Document()
+        for text in VERBATIM:
+            d.add_paragraph(text)
+        buf = BytesIO()
+        d.save(buf)
+
+        extracted = extract_text_from_docx(buf.getvalue())
+        assert [p.text for p in extracted.paragraphs] == VERBATIM
 
 
 # ---------------------------------------------------------------------------
@@ -49,8 +73,8 @@ class TestStripHtml:
 # ---------------------------------------------------------------------------
 
 class TestCleanText:
-    def test_strips_html_and_whitespace(self):
-        assert _clean_text("  <p>Hello</p>  ") == "Hello"
+    def test_trims_surrounding_whitespace(self):
+        assert _clean_text("  Hello  ") == "Hello"
 
     def test_empty_string(self):
         assert _clean_text("") == ""
@@ -290,11 +314,6 @@ class TestExtractTextFromTxt:
         assert len(doc.paragraphs) == 1
         assert "sum" in doc.paragraphs[0].text
 
-    def test_strips_html_tags(self):
-        text = "<p>Tagged paragraph</p>\n\n<b>Bold text</b>"
-        doc = extract_text_from_txt(text.encode("utf-8"))
-        assert all("<" not in p.text for p in doc.paragraphs)
-
     def test_skips_blank_paragraphs(self):
         text = "First.\n\n\n\n   \n\nSecond."
         doc = extract_text_from_txt(text.encode("utf-8"))
@@ -408,11 +427,25 @@ class TestExtractionWarningSurfacing:
         that affected the PDF scanned-image warning too)."""
         doc = ExtractedDocument(
             paragraphs=[ExtractedParagraph(text="Body text.")],
-            extraction_warning="2 tables in this document were not imported — ...",
+            extraction_warnings=["2 tables in this document were not imported — ..."],
         )
         segments, warnings = segment_document(doc, SegmentationMode.PARAGRAPH)
         assert len(segments) == 1
         assert warnings and warnings[0].startswith("2 tables in this document")
+
+    def test_every_extraction_warning_is_prepended_in_order(self):
+        """#1318: a Word document can owe two sentences (parts not imported,
+        tracked changes accepted); both reach the import, ahead of the
+        segmentation's own warnings."""
+        doc = ExtractedDocument(
+            paragraphs=[ExtractedParagraph(text="Body text.")],
+            extraction_warnings=["first", "second"],
+        )
+        _, warnings = segment_document(doc, SegmentationMode.HEADING)
+        assert warnings == [
+            "first", "second",
+            "No headings detected in this document. Fell back to paragraph mode.",
+        ]
 
     def test_no_extraction_warning_means_no_warning(self):
         doc = ExtractedDocument(paragraphs=[ExtractedParagraph(text="Body.")])
@@ -424,7 +457,7 @@ class TestExtractionWarningSurfacing:
         re-prepend the warning."""
         doc = ExtractedDocument(
             paragraphs=[ExtractedParagraph(text="Body text.")],
-            extraction_warning="1 table in this document was not imported — ...",
+            extraction_warnings=["1 table in this document was not imported — ..."],
         )
         preview = preview_segmentation(doc, SegmentationMode.PARAGRAPH)
         occurrences = [w for w in preview.warnings if "table" in w]
@@ -450,8 +483,9 @@ class TestDocxTableDetection:
 
     def test_docx_with_table_sets_warning(self):
         extracted = extract_text_from_docx(self._docx_bytes(with_table=True))
-        assert extracted.extraction_warning is not None
-        assert "not imported" in extracted.extraction_warning
+        assert len(extracted.extraction_warnings) == 1
+        assert "not imported" in extracted.extraction_warnings[0]
+        assert "1 table" in extracted.extraction_warnings[0]
         # Heading + intro paragraph still extracted.
         assert any("Benefit Tier" in p.text for p in extracted.paragraphs)
         # And it flows through to the import path.
@@ -460,7 +494,7 @@ class TestDocxTableDetection:
 
     def test_docx_without_table_has_no_warning(self):
         extracted = extract_text_from_docx(self._docx_bytes(with_table=False))
-        assert extracted.extraction_warning is None
+        assert extracted.extraction_warnings == []
 
 
 class TestDocxImageExtraction:

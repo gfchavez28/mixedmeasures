@@ -16,7 +16,8 @@ swapped the files must still say so.
 until the lifespan finishes), so a repair must cost a settled install a few
 queries — never a scan of the data. #1069's is gated on column metadata for
 exactly that reason; #1230's walks one index (`audit_entries.project_id`) and
-writes only where a read found something.
+writes only where a read found something; #1313's is one query over the
+variable-group metrics' stored results.
 """
 
 import logging
@@ -96,6 +97,64 @@ def repair_deleted_project_audit(session_factory) -> None:
         db.close()
 
 
+def repair_material_rc_keys(session_factory) -> None:
+    """#1315 — the Relationships & Comparisons keys an older saver wrote on every tab.
+
+    Strips them from every stored copy of a Descriptives chart and stamps `rc_view`
+    on an R&C chart saved without one: the material, each canvas embed's own copy,
+    each canvas snapshot. `material_config.normalise_rc_keys` owns the rule;
+    `rc_keys_need_repair` is the gate — ONE query over `materials`, so a settled
+    install pays exactly that. After a restore it repairs a backup taken before the
+    fix. Never raises.
+    """
+    from .material_config import RcRepairScope, normalise_rc_keys, rc_keys_need_repair
+
+    db = session_factory()
+    try:
+        if not rc_keys_need_repair(db):
+            return
+        normalise_rc_keys(db, scope=RcRepairScope.everything())
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("R&C key repair (#1315) failed; skipping")
+    finally:
+        db.close()
+
+
+def repair_record_scores(session_factory) -> None:
+    """#1313 — record scores and saved tests computed before the own-dataset rule.
+
+    An older build judged a record against every column of a variable group across
+    every dataset, so a group over two or more datasets scored almost no one, and
+    a saved t-test or ANOVA read a sample the stored scores did not. Nothing marked
+    them, so quick compute kept serving them. `metrics.repair_record_score_rule`
+    owns the rule; `metrics_lacking_record_score_rule` is the gate — ONE query, and
+    it finds nothing once every metric is recomputed or stamped. Marks only, never
+    recomputes. After a restore it repairs a backup taken before the fix. Never
+    raises.
+    """
+    from .metrics import metrics_lacking_record_score_rule, repair_record_score_rule
+
+    db = session_factory()
+    try:
+        metric_ids = metrics_lacking_record_score_rule(db)
+        if not metric_ids:
+            return
+        report = repair_record_score_rule(db, metric_ids)
+        db.commit()
+        if report.marked_stale or report.tests_marked:
+            logger.info(
+                "Record-score repair (#1313): %d metric(s) and %d saved test(s) marked out of date",
+                len(report.marked_stale), report.tests_marked,
+            )
+    except Exception:
+        db.rollback()
+        logger.exception("Record-score repair (#1313) failed; skipping")
+    finally:
+        db.close()
+
+
 def run_data_repairs(session_factory) -> None:
     """Every repair, in order. Blocking (the media backfill opens files), so an
     async caller runs it in a worker thread."""
@@ -104,4 +163,6 @@ def run_data_repairs(session_factory) -> None:
     repair_reverse_recodes(session_factory)
     repair_missing_value_numbers(session_factory)
     repair_deleted_project_audit(session_factory)
+    repair_material_rc_keys(session_factory)
+    repair_record_scores(session_factory)
     run_media_duration_backfill(session_factory)

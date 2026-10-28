@@ -24,6 +24,8 @@ export function withdrawalLocations(report: WithdrawalReport): string[] {
   const lines: string[] = []
   for (const c of report.conversations) {
     const parts = [n(c.segments, 'turn')]
+    // #1320 — the turns their words reached by a merge or a split.
+    if (c.combined_turns) parts.push(n(c.combined_turns, 'merged or split turn'))
     if (c.code_applications) parts.push(n(c.code_applications, 'code'))
     if (c.excerpts) parts.push(n(c.excerpts, 'quote'))
     if (c.notes) parts.push(n(c.notes, 'note'))
@@ -65,7 +67,8 @@ export function describeDeleteConsequence(report: WithdrawalReport | null): stri
       + 'turns, responses, speaker name and any document about them remain in the project, '
       + 'no longer linked to anyone.'
   }
-  const turns = report.conversations.reduce((t, c) => t + c.segments, 0)
+  // #1320 — a merged or split turn holding their words survives a delete too.
+  const turns = report.conversations.reduce((t, c) => t + c.segments + c.combined_turns, 0)
   const responses = report.datasets.reduce((t, d) => t + d.responses, 0)
   const documents = report.documents.length
 
@@ -129,13 +132,68 @@ export function withdrawalHeadline(report: WithdrawalReport): string {
  * is manual"*, beside the button that removes it. The residual is the one the
  * confirm's warning states (`withdrawal_redaction.py`'s ⛔ section): finding the
  * name in someone else's words is reading, by a person.
+ *
+ * #1320 (D12) — and what it does not reach at all: recordings, and every copy made
+ * before it (backups, safety copies, exported files). It said nothing of either.
  */
 export const WITHDRAWAL_SCOPE_NOTE =
   'The withdrawal button in this participant’s row blanks their conversation turns, '
   + 'deletes their survey responses and this record, and unlinks documents about them. '
+  + 'It does not edit recordings, and backups, safety copies and files exported before '
+  + 'the withdrawal still hold their data. '
   + 'It cannot find their name in other people’s turns, in free-text answers, or in '
   + 'notes and memos — search for those yourself. This describes the software; it is '
   + 'not compliance advice.'
+
+/**
+ * #1190 — what the withdrawal LEAVES behind on purpose: a record of it (the removal
+ * tombstones, `services/tombstones.py`), and what that record does and does not do.
+ *
+ * Says no more than the design guarantees, each clause checked against the code:
+ * - **merging a copy** skips her participant, speakers, records, quotes and notes, and
+ *   **importing one** that still holds her is refused — both read the tombstones kept
+ *   under the project's identity, which outlive the project row (D8);
+ * - **linking records or speakers** never links to or creates her (Link by column, the
+ *   import's own linking and Append share `plan_identifier_links`; a conversation
+ *   import's speaker linking is `ensure_participant_for_speaker`);
+ * - **adding her ID by hand asks first** (D12, `lib/withdrawn-identifier.ts`);
+ * - **files exported afterwards carry the record** (`project.json`'s `tombstones`, D10).
+ * Copies made BEFORE are the earlier sentence's — they still hold her, and another
+ * install that never saw the record imports one as it is.
+ *
+ * 🔴 D9 — the record keeps her identifier as a one-way code (SHA-256 over the
+ * normalised ID). Short codes and names are recoverable from such a code by guessing,
+ * so it is NOT anonymisation, and the sentence says so: a researcher reporting that a
+ * request was honoured must know that a coded trace of the ID stays in the project and
+ * travels in every file exported from it.
+ */
+export const WITHDRAWAL_RECORD_NOTE =
+  'Afterwards this project keeps a record of the withdrawal: merging or importing a copy '
+  + 'of it, or linking records or speakers to participants, does not bring them back, and '
+  + 'adding a participant with their ID asks first. Project files exported afterwards carry '
+  + 'that record. It keeps their ID as a one-way code, which is not anonymisation — anyone '
+  + 'who can guess the ID can confirm it from the code.'
+
+/**
+ * #1320 (D12) — what the confirm says BEFORE it lists anything: the backup, every
+ * other copy that still holds the data, recordings, and that there is no
+ * per-person undo. Here rather than in the dialog so a test can hold the wording
+ * and the dialog can be tested for WHERE it sits (inside the description).
+ */
+export const WITHDRAWAL_RESIDUAL_NOTE =
+  'For honouring a withdrawal request. A full backup is taken first. That backup, your '
+  + 'earlier backups, the safety copies kept before a merge or overwrite, and any file '
+  + 'already exported or shared still hold everything this removes until they are '
+  + 'deleted. Automatic and On quit backups are replaced over time; the others stay '
+  + 'until you delete them in Settings › Backup & Data. Recordings are not edited — '
+  + 'their voice stays in the audio or video. There is no per-person undo: restoring '
+  + 'a backup also undoes any work done after it. '
+  + WITHDRAWAL_RECORD_NOTE
+
+/** #1320 (D12) — appended to the note after a withdrawal. */
+export const WITHDRAWAL_BACKUP_RESIDUAL =
+  'The “Before a withdrawal” backup taken now, and every earlier backup, still hold '
+  + 'their data until you delete them in Settings › Backup & Data.'
 
 
 /**
@@ -159,6 +217,14 @@ export function removedSummary(r: WithdrawalReport | null): string[] {
   const turns = r.conversations.reduce((n, c) => n + c.segments, 0)
   if (turns > 0) {
     out.push(`The words of their ${turns} conversation turn${turns === 1 ? '' : 's'}`)
+  }
+  // #1320 (D7) — a turn their words were merged or split into is blanked WHOLE,
+  // so it says so: the other speaker's words in it go from view too.
+  const shared = r.conversations.reduce((n, c) => n + c.combined_turns, 0)
+  if (shared > 0) {
+    out.push(shared === 1
+      ? 'All the words of 1 merged or split turn holding theirs, including anything others said in it'
+      : `All the words of ${shared} merged or split turns holding theirs, including anything others said in them`)
   }
   const responses = r.datasets.reduce((n, d) => n + d.responses, 0)
   if (responses > 0) {
@@ -190,6 +256,13 @@ export function keptSummary(r: WithdrawalReport | null): string[] {
       + 'so the other participants’ conversation still reads correctly',
     )
   }
+  // #1320 (D7) — what the blanked merged turn costs the other speaker: nothing
+  // lost, because their own turn from before the merge is kept hidden.
+  const shared = r.conversations.reduce((n, c) => n + c.combined_turns, 0)
+  if (shared > 0) {
+    out.push('What others said in a merged turn is still in their own turn from '
+      + 'before the merge — Unmerge brings it back')
+  }
   const codes = r.conversations.reduce((n, c) => n + c.code_applications, 0)
   if (codes > 0) {
     out.push(`${codes} code${codes === 1 ? '' : 's'} you applied to those turns — your analysis, not their data`)
@@ -211,20 +284,44 @@ export function keptSummary(r: WithdrawalReport | null): string[] {
     out.push(`${docs.length} documents about them stay, no longer linked to them — `
       + 'read them yourself: a document about someone can also be their own words')
   }
+  const unlinked = unlinkedRecordsNote(r)
+  if (unlinked) out.push(unlinked)
   return out
+}
+
+/**
+ * #1190 (D14) — dataset records linked to no one whose ID column carries this person's
+ * ID. The withdrawal acts on LINKED records only, so these stay; a matching ID is not
+ * proof the record is theirs (another person can share a code, and an ID column can be
+ * mistyped), so they are counted — never named, never deleted — and left to the
+ * researcher. Null when there are none.
+ */
+export function unlinkedRecordsNote(r: WithdrawalReport): string | null {
+  const count = r.unlinked_records_with_identifier
+  if (!(count > 0)) return null
+  return count === 1
+    ? '1 dataset record linked to no one carries their ID. It stays — check it yourself: '
+      + 'a matching ID does not prove the record is theirs'
+    : `${count} dataset records linked to no one carry their ID. They stay — check them `
+      + 'yourself: a matching ID does not prove a record is theirs'
 }
 
 /**
  * #1123 — the sentence after a withdrawal, which said nothing about documents
  * although the server returns how many it unlinked.
+ *
+ * #1320 (D12) — and it ends on the backups, which hold everything just removed:
+ * the "Before a withdrawal" one was taken a moment ago.
  */
 export function withdrawalDoneNote(documentsUnlinked: number): string {
   const base = 'Now search your transcripts and free-text answers for their name — '
     + 'that part cannot be automated.'
-  if (!documentsUnlinked) return base
-  return documentsUnlinked === 1
-    ? `${base} 1 document no longer says who it is about — read it too.`
-    : `${base} ${documentsUnlinked} documents no longer say who they are about — read them too.`
+  const documents = !documentsUnlinked
+    ? ''
+    : documentsUnlinked === 1
+      ? ' 1 document no longer says who it is about — read it too.'
+      : ` ${documentsUnlinked} documents no longer say who they are about — read them too.`
+  return `${base}${documents} ${WITHDRAWAL_BACKUP_RESIDUAL}`
 }
 
 /**

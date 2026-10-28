@@ -185,6 +185,34 @@ test('the release workflow proves the macOS floor, stamps the feed, checks it, a
   )
 })
 
+test('every ticket-service call in release.yml goes through scripts/stapler.js, self-tested before publishing (#1293)', () => {
+  // `xcrun stapler` asks Apple's ticket service about the file. At the v1.5.7 cut one dropped call
+  // failed the mac leg three times, on three different calls, and two of them sent stapler's
+  // output to /dev/null. The helper retries a drop and prints a failure. A bare call is the old shape.
+  // (electron-builder's own staple of the .app happens inside the tool, not in this file.)
+  const code = releaseYml.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
+  assert.doesNotMatch(code, /\bxcrun\s+stapler\b/, 'call stapler as `node scripts/stapler.js <staple|validate> <file>`')
+  // Population: the five calls the mac leg makes, so a rename cannot pass this vacuously.
+  for (const call of [
+    /node scripts\/stapler\.js staple "\$DMG"/,
+    /node scripts\/stapler\.js validate "\$DMG"/,
+    /if node scripts\/stapler\.js validate "\$NEW"; then/,
+    /ticket "stapler validate \(\.app notarization\)"\s+"\$APP"/,
+    /ticket "stapler validate \(\.dmg\)" "\$DMG"/,
+  ]) {
+    assert.match(code, call, 'release.yml no longer makes this ticket call through the helper')
+  }
+  assert.match(code, /ticket\(\) \{[^\n]*\n\s+node scripts\/stapler\.js validate "\$2"\n/, 'ticket() no longer calls the helper')
+  // The Gatekeeper gate prints a failing check's output instead of discarding it.
+  const gate = releaseYml.slice(releaseYml.indexOf('- name: Verify — codesign + notarization + Gatekeeper (macOS)'))
+  const gateBody = gate.slice(0, gate.indexOf('\n      - name:', 1))
+  assert.doesNotMatch(gateBody, /\/dev\/null/, 'the Gatekeeper gate discards a check\'s output again')
+  // The self-test runs on the mac leg before anything reaches the draft.
+  const selfTest = code.indexOf('run: node scripts/stapler.js --self-test')
+  assert.notEqual(selfTest, -1, 'the mac leg no longer self-tests the retry')
+  assert.ok(selfTest < code.indexOf('- name: Package & publish'), 'the retry self-test must run before anything is published')
+})
+
 test('the licence-notice check runs on every leg, not only the mac one (#1122)', () => {
   // The step reads the .app on mac and <target>-unpacked elsewhere; an `if:` added to it would
   // silently drop Windows and Linux.

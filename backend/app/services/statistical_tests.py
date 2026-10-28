@@ -16,17 +16,17 @@ from sqlalchemy.orm import Session
 from ..models.metric import MetricDefinition
 from ..models.statistical_test import StatisticalTest
 from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
-from ..models.dataset import DatasetColumn, DatasetRow, Dataset
+from ..models.dataset import DatasetColumn
 from ..models.equivalence_group import EquivalenceGroup
 from .grouping import order_value_labels
 from .reliability_basis import RELIABILITY_FACET_ITEMS
 from .undefined_stats import finite_or_none
 from .metrics import (
+    domain_record_scores,
     resolve_dataset_column,
     resolve_dataset_domain,
     _parse_json,
     STATS_PRECISION,
-    MISSING_ITEM_THRESHOLD,
 )
 
 logger = logging.getLogger(__name__)
@@ -724,50 +724,30 @@ def _resolve_grouped_values(
         return result
 
     elif metric.input_source_type == "dataset_domain":
-        # Compute per-record domain scores, then split by group
-        matrix, grouping_map, column_ids, _ = build_row_item_matrix(
-            db,
-            metric.input_source_id,
-            exclude_values=metric.exclude_values,
-            grouping_column_id=metric.grouping_column_id,
-            grouping_column_id_2=metric.grouping_column_id_2,
-        )
+        # #1313: resolve as the METRIC — its decompose list, exclusions, dataset
+        # grouping and sibling grouping all apply — and score each record by the
+        # one rule its stored scores use (`metrics.domain_record_scores`). This
+        # held its own copy until then: a plain mean judged against every column
+        # of the group across every dataset, through a proxy with no `config`, so
+        # a decomposed metric's test silently tested the WHOLE group.
+        # ⚠️ So a proportion metric's test reads per-record PROPORTIONS now, as
+        # its stored scores always did, not the mean of the raw item values.
+        column_groups = resolve_dataset_domain(metric, db)
+        scores = domain_record_scores(db, metric, column_groups)
 
-        # Build dataset grouping map if needed
-        dataset_grouping_map: dict[int, str] = {}
-        if metric.grouping_mode == "dataset" and matrix:
-            # Map row_id (DatasetRow.id) → Dataset.name
-            row_ids = list(matrix.keys())
-            row_dataset_rows = (
-                db.query(DatasetRow.id, Dataset.name)
-                .join(Dataset, DatasetRow.dataset_id == Dataset.id)
-                .filter(DatasetRow.id.in_(row_ids))
-                .all()
-            )
-            dataset_grouping_map = {rid: dname for rid, dname in row_dataset_rows}
+        # A record sits in one bucket per column: its dataset's name (dataset
+        # grouping), its grouping value (None when missing), or None (ungrouped).
+        record_group: dict[int, str | None] = {}
+        for group_map in column_groups.values():
+            for group_val, rows in group_map.items():
+                for row in rows:
+                    record_group[row.row_id] = group_val
 
         result: dict[str, list[float]] = {}
-        for row_id, items in matrix.items():
-            # Compute record domain score = mean of valid numerics
-            valid_nums = []
-            for col_id in column_ids:
-                item = items.get(col_id)
-                if item and not item.excluded and item.numeric is not None:
-                    valid_nums.append(item.numeric)
-            total_items = len(column_ids)
-            if not valid_nums or (total_items > 0 and len(valid_nums) / total_items < MISSING_ITEM_THRESHOLD):
+        for row_id, score in scores.items():
+            if score is None:
                 continue
-
-            score = statistics.mean(valid_nums)
-
-            if metric.grouping_mode == "dataset":
-                group_val = dataset_grouping_map.get(row_id)
-            else:
-                group_val = grouping_map.get(row_id)
-
-            if group_val not in result:
-                result[group_val] = []
-            result[group_val].append(score)
+            result.setdefault(record_group.get(row_id), []).append(score)
 
         return result
 

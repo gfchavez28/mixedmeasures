@@ -22,6 +22,7 @@ export type UndefinedReason =
   | 'degenerate'
   | 'not_numeric'
   | 'scores_not_computed'
+  | 'no_segments'
 
 /** What a missing number looks like. One character, everywhere. */
 export const NO_VALUE = '—'
@@ -72,6 +73,11 @@ const REASON_TEXT: Record<UndefinedReason, string> = {
   // data and offers a remedy that cannot work — #830(b)'s shape one statistic over.
   // The sentence names the act, because nothing on this surface can perform it.
   scores_not_computed: 'This variable group’s scale score has not been computed yet, so there is nothing to correlate. Recompute it from the Analysis view.',
+  // #1421: the qualitative group comparison. True of all four ways a group gets
+  // there — never a speaker, only in conversations not selected, only a
+  // facilitator, only a document — because the comparison counts participant
+  // turns in conversations (the scope sentence above that table says so).
+  no_segments: 'No participant turns from this group in the conversations compared, so there is no share to compare.',
 }
 
 /**

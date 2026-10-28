@@ -48,13 +48,6 @@ from ..services.code_sets import (
     SET_BASIS_EXHAUSTIVE_WITH_MISSING,
     SET_BASIS_INCLUSIVE_WITH_NONE,
 )
-from ..services.computed_columns import (
-    parse as parse_expression,
-    validate as validate_expression,
-    to_r_expression,
-    ColumnInfo as CCColumnInfo,
-    ExpressionError,
-)
 from ..auth import get_current_user
 from .helpers import _get_project_or_404
 from .export_helpers import _build_category_tree_and_chains, csv_safe
@@ -93,6 +86,58 @@ def _make_r_identifier(name: str) -> str:
     if s[0].isdigit():
         s = "x_" + s
     return s
+
+
+# ── The names the CSV is written under, and the script reads by (#1371) ──────
+# 🔴 A CSV column's name is decided ONCE, where the header is built, and every
+# script line that reads the column looks the name up — never re-derives it.
+# The script used to rebuild a variable group's score column as
+# `_make_r_identifier(name) + "_score"` (60 characters, no collision suffix)
+# while the CSV wrote `_slugify(name, 40) + "_score"` plus `x_` and `_2`, so a
+# name over 40 characters, a group sharing a slug, or an imported column called
+# `<group>_score` made the script HALT on a column that does not exist or, worse,
+# READ THE IMPORTED COLUMN in place of the score with no word.
+
+
+def _unique_r_name(base: str, used_names: set[str]) -> str:
+    """`base`, or `base_2`, `base_3`… — the first not in `used_names`, reserved."""
+    candidate, counter = base, 2
+    while candidate in used_names:
+        candidate = f"{base}_{counter}"
+        counter += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def _dataset_r_prefix(ds_name: str) -> str:
+    """The `<prefix>__` before each column of a multi-dataset export, and the
+    per-dataset subset objects' names.
+
+    🔴 It must start with a LETTER: `data$2023_survey__q1` is not R — the parser
+    refuses the whole script before one line runs (a dataset is named after its
+    file by default, so `2023_survey.csv` is the ordinary case), and a wholly
+    non-ASCII name slugified to `""`, giving `__q1`.
+    """
+    s = _slugify(ds_name, max_len=20)
+    if not s:
+        return "ds"
+    if s[0].isdigit():
+        return "x_" + s
+    return s
+
+
+def _score_column_base(domain_name: str) -> str:
+    """THE base name of a variable group's score column, before `_unique_r_name`.
+
+    The CSV's own long-standing form (40 characters, `x_` before a digit), kept
+    so a researcher's code against an earlier export still finds its columns;
+    the one change is a name that slugifies to nothing, which wrote `_score` —
+    not an R name — and now writes `group_score`.
+    """
+    s = _slugify(domain_name, max_len=40) or "group"
+    if s[0].isdigit():
+        s = "x_" + s
+    return s + "_score"
 
 
 # ── Which SPACE a column's CSV cell is written in (#765) ─────────────────────
@@ -457,7 +502,7 @@ def _emit_domain_aggregate_r_lines(
         r_names = members_by_dataset[ds_name]
         if not r_names:
             continue
-        slug = _slugify(ds_name, max_len=20) or "ds"
+        slug = _dataset_r_prefix(ds_name)
         members_str = ", ".join(f'"{n}"' for n in r_names)
         ds_name_escaped = _escape_r_string(ds_name)
         lines.append(f"# {ds_name} subset")
@@ -475,9 +520,7 @@ def _build_r_script(
     project_slug: str,
     qualifying_datasets: list[tuple],
     col_meta: dict[int, dict],
-    domain_metrics: list,
     domain_score_cols: list[dict],
-    domain_members_map,
     domain_members_by_dataset_map,
     n_records: int,
     n_variables: int,
@@ -850,15 +893,34 @@ def _build_r_script(
         r_lines.extend(reverse_lines)
         r_lines.append("")
 
-    # Computed columns
+    # Computed columns — DOCUMENTED, NEVER RE-RUN (#1322).
+    #
+    # 🔴 The CSV carries each computed variable's STORED values — the ones every
+    # analysis in the app reads — and every statistic below reads them from the CSV.
+    # Re-running the formula here cannot reproduce them, and is not a translation
+    # problem: the app decides each CELL's type on its own (missing → NULL, else
+    # `value_numeric`, else a demographic cell parsed as a number, else text —
+    # `services/computed_columns.py::_eval`), while an R column holds ONE type, and
+    # by this point the frame's categorical columns are factors. Measured on the
+    # review's fixture, an executed formula disagreed with the app on most
+    # constructs (ordinal and 0-based arithmetic, nominal codes, all-missing SUM,
+    # ÷0, the other dataset's rows of a multi-dataset frame), HALTED the script on
+    # two (factors with different level sets; a backslash in a string literal), and
+    # every assignment dropped the variable label set above it. So the formula is a
+    # COMMENT, exactly as the reverse-scored section above documents its reflection.
+    # ⚠️ Through `_escape_r_string`: its newline escape and its carriage-return strip
+    # are what keep a formula's string literal from ending the comment and running
+    # its tail as R (`source()` reads a lone CR as a line end too — measured).
     computed_col_lines: list[str] = []
-    computed_col_errors: list[str] = []
+    computed_col_notes: list[str] = []
     computed_cols = [
         (cid, meta) for cid, meta in col_meta.items()
         if meta["col"].source == "computed" and meta["col"].expression
     ]
     if computed_cols:
-        # Topological sort by depends_on_column_ids (Kahn's algorithm)
+        # Topological sort by depends_on_column_ids (Kahn's algorithm) — the
+        # comments read in dependency order, so a chained formula follows the
+        # variable it reads.
         dep_graph: dict[int, set[int]] = {}
         for cc_id, cc_meta in computed_cols:
             cc_col = cc_meta["col"]
@@ -892,91 +954,94 @@ def _build_r_script(
         # Any remaining nodes have cycles — append with warning
         for cid in computed_ids_set - set(sorted_ids):
             sorted_ids.append(cid)
-            computed_col_errors.append(
+            computed_col_notes.append(
                 f"# {col_meta[cid]['r_name']}: circular dependency detected"
             )
 
-        # Build r_names map for all columns in col_meta
-        all_r_names = {cid: meta["r_name"] for cid, meta in col_meta.items()}
-
-        # Generate R code for each computed column in dependency order
         for cc_id in sorted_ids:
             cc_meta = col_meta[cc_id]
-            cc_col = cc_meta["col"]
-            cc_r_name = cc_meta["r_name"]
-            cc_dataset = cc_meta["dataset"]
+            computed_col_lines.append(
+                f"# {cc_meta['r_name']}: {_escape_r_string(cc_meta['col'].expression)}"
+            )
 
-            try:
-                ast = parse_expression(cc_col.expression)
-
-                # Build ColumnInfo list from sibling columns in same dataset
-                sibling_infos = []
-                for other_cid, other_meta in col_meta.items():
-                    if other_cid == cc_id:
-                        continue
-                    if other_meta["dataset"].id != cc_dataset.id:
-                        continue
-                    oc = other_meta["col"]
-                    ct = oc.column_type
-                    sibling_infos.append(CCColumnInfo(
-                        id=oc.id,
-                        code=oc.column_code,
-                        text=oc.column_text,
-                        column_type=ct.value if hasattr(ct, "value") else str(ct),
-                    ))
-
-                result = validate_expression(ast, sibling_infos, self_column_id=cc_id)
-                r_expr = to_r_expression(
-                    result.resolved_ast, all_r_names, df_name="data"
-                )
-                computed_col_lines.append(
-                    f"# {cc_r_name}: {_escape_r_string(cc_col.expression)}"
-                )
-                computed_col_lines.append(f"data${cc_r_name} <- {r_expr}")
-                computed_col_lines.append("")
-
-            except (ExpressionError, Exception) as exc:
-                computed_col_lines.append(f"# {cc_r_name}: COULD NOT TRANSLATE")
-                computed_col_lines.append(
-                    f"# Expression: {_escape_r_string(cc_col.expression)}"
-                )
-                computed_col_lines.append(f"# Error: {_escape_r_string(str(exc))}")
-                computed_col_lines.append("# (values are pre-computed in the CSV)")
-                computed_col_lines.append("")
-                computed_col_errors.append(
-                    f"# {cc_r_name}: computed column formula could not be translated"
-                    f" — {_escape_r_string(str(exc))}"
-                )
+        # #1229's question for a computed variable: the CSV serves the STORED values
+        # (nothing is recomputed for an export), so a variable whose inputs changed
+        # after it was computed can disagree with the columns beside it in this file.
+        # `DatasetColumn.stale` is the column's own flag (`mark_metrics_stale`); the
+        # export read it nowhere until #1322.
+        out_of_date_cc = sorted(
+            _escape_r_string(meta["r_name"])
+            for _cid, meta in computed_cols if meta["col"].stale
+        )
+        if out_of_date_cc:
+            computed_col_notes.append(
+                "# The following computed variable(s) are out of date: a variable they "
+                "are computed from changed after they were computed, so their values in "
+                "this file may not agree with it: " + ", ".join(out_of_date_cc)
+            )
+            computed_col_notes.append(
+                "# Recompute them in Mixed Measures (Data view: the column's menu >"
+                " Recompute) and export again."
+            )
 
     if computed_col_lines:
         toc_sections.append("Computed columns")
         r_lines.append("# ---- Computed columns ----")
-        r_lines.append("# Formulas below reproduce columns already present in the CSV.")
-        r_lines.append("# They are included for documentation and reproducibility.")
+        r_lines.append("# The CSV carries each computed variable's values exactly as Mixed")
+        r_lines.append("# Measures computed them, and every analysis below reads those values.")
+        r_lines.append("# The formulas are listed for documentation only and are NOT re-run here:")
+        r_lines.append("# the app reads each cell by its own type (a coded answer as its number,")
+        r_lines.append("# a blank as missing), and an R column has only one type, so running")
+        r_lines.append("# them in R would change the values.")
         r_lines.extend(computed_col_lines)
+        r_lines.append("")
 
-    # Add computed-column errors to script_notes
-    script_notes.extend(computed_col_errors)
+    # Add computed-column notes (cycles, out-of-date variables) to script_notes
+    script_notes.extend(computed_col_notes)
+
+    # #1371 — the two name maps every later line reads, built ONCE here.
+    # `score_col_by_domain`: a group's score column in the CSV (absent when the
+    # group has no scale score, so there IS no such column). `domain_key_by_id`:
+    # its entry in the `domains` list, for EVERY group with members — the list
+    # used to hold only the scored ones, so `domains$x` for an unscored group was
+    # NULL, or `object 'domains' not found` when none was scored, or — R's `$`
+    # partial-matches a list — ANOTHER group's columns (`domains$well` read
+    # `wellbeing`'s). Keys are unique, so two groups sharing a slug no longer
+    # make two entries of one name.
+    score_col_by_domain: dict[int, str] = {
+        d["domain_id"]: d["r_name"] for d in domain_score_cols if "domain_id" in d
+    }
+    domain_key_by_id: dict[int, str] = {}
+    _domain_keys: set[str] = set()
+    for _did in sorted(all_domain_name_map):
+        if all_domain_members_map.get(_did):
+            domain_key_by_id[_did] = _unique_r_name(
+                _make_r_identifier(all_domain_name_map[_did]), _domain_keys
+            )
 
     # Domain groupings
-    if domain_score_cols and domain_members_map:
+    if domain_key_by_id:
         toc_sections.append("Domain groupings")
         r_lines.append("# ---- Domain groupings ----")
+        if domain_score_cols:
+            # #1313 — the `<group>_score` columns' scoring rule, stated nowhere else in the
+            # file. The script reads the stored scores and computes none, so this is the
+            # reader's only account of why a record's score is NA.
+            r_lines.append(
+                "# Scale scores: a record is scored when it answered at least half of the"
+                " items its own dataset carries; otherwise NA."
+            )
+        else:
+            r_lines.append(
+                "# Domain scores not included: metrics have not been computed"
+                " for this project"
+            )
         r_lines.append("domains <- list(")
         domain_entries = []
-        for dsc in domain_score_cols:
-            metric = next(
-                (m for m in domain_metrics if m.id == dsc["metric_id"]), None
-            )
-            if metric:
-                dom_id = metric.input_source_id
-                member_r_names = domain_members_map.get(dom_id, [])
-                if member_r_names:
-                    members_str = ", ".join(f'"{n}"' for n in member_r_names)
-                    dom_slug = _make_r_identifier(dsc["domain_name"])
-                    domain_entries.append(f"  {dom_slug} = c({members_str})")
-        if domain_entries:
-            r_lines.append(",\n".join(domain_entries))
+        for _did, _key in domain_key_by_id.items():
+            members_str = ", ".join(f'"{n}"' for n in all_domain_members_map[_did])
+            domain_entries.append(f"  {_key} = c({members_str})")
+        r_lines.append(",\n".join(domain_entries))
         r_lines.append(")")
         r_lines.append("")
     elif not domain_score_cols:
@@ -1106,10 +1171,8 @@ def _build_r_script(
         # per-dataset member breakdown.
         r_name_to_domain_id: dict[str, int] = {}
         for did in dom_ids:
-            d_members = all_domain_members_map.get(did)
-            if d_members:
-                d_name = all_domain_name_map.get(did, f"domain_{did}")
-                r_name = f"domains${_make_r_identifier(d_name)}"
+            if did in domain_key_by_id:
+                r_name = f"domains${domain_key_by_id[did]}"
                 target_r_names.append(r_name)
                 r_name_to_domain_id[r_name] = did
             else:
@@ -1267,10 +1330,9 @@ def _build_r_script(
             if not hm_r:
                 continue
         elif hm.input_source_type == "dataset_domain":
-            d_name = all_domain_name_map.get(hm.input_source_id)
-            if not d_name or hm.input_source_id not in all_domain_members_map:
+            if hm.input_source_id not in domain_key_by_id:
                 continue
-            hm_r = f"domains${_make_r_identifier(d_name)}"
+            hm_r = f"domains${domain_key_by_id[hm.input_source_id]}"
         else:
             continue
 
@@ -1370,7 +1432,9 @@ def _build_r_script(
                     )
                     test_lines.append("")
                     continue
-                dom_slug = _make_r_identifier(dom_name)
+                # #1371: the group's unique key, so two groups sharing a slug
+                # get two item frames (#821a's one-object-per-model rule).
+                dom_slug = domain_key_by_id.get(st.target_id) or _make_r_identifier(dom_name)
                 frame = f"{dom_slug}_items"
 
                 needs_psych = True
@@ -1432,11 +1496,9 @@ def _build_r_script(
                 if target_metric.input_source_type == "dataset_column":
                     tm_r = _col_r(target_metric.input_source_id)
                 elif target_metric.input_source_type == "dataset_domain":
-                    d_name = all_domain_name_map.get(target_metric.input_source_id)
-                    if d_name and target_metric.input_source_id in all_domain_members_map:
-                        tm_r = _make_r_identifier(d_name) + "_score"
-                    else:
-                        tm_r = None
+                    # #1371: the CSV's own name for the column, or None when the
+                    # group has no score column in this export.
+                    tm_r = score_col_by_domain.get(target_metric.input_source_id)
                 else:
                     tm_r = None
 
@@ -1502,15 +1564,23 @@ def _build_r_script(
             bonf = pe_cfg.get("bonferroni", False)
 
             var_r_names, skipped = _resolve_ids_to_r(col_ids)
+            unscored_names = []
             for did in dom_ids:
-                d_name = all_domain_name_map.get(did)
-                if d_name:
-                    var_r_names.append(_make_r_identifier(d_name) + "_score")
+                if did in score_col_by_domain:
+                    var_r_names.append(score_col_by_domain[did])
+                elif did in all_domain_name_map:
+                    unscored_names.append(all_domain_name_map[did])
 
             if len(var_r_names) < 2:
                 continue
 
             rc_lines.append(f"# Correlation: {_escape_r_string(pe_name)}")
+            for _uname in unscored_names:
+                rc_lines.append(
+                    f"# Skipped variable group {_escape_r_string(_uname)}: it has no"
+                    " scale score in this export (compute it in Mixed Measures and"
+                    " export again)"
+                )
             vars_str = ", ".join(f'"{v}"' for v in var_r_names)
             rc_lines.append(f"cor_vars <- c({vars_str})")
             rc_lines.append(
@@ -1601,15 +1671,26 @@ def _build_r_script(
                 continue
 
             var_r_names, skipped = _resolve_ids_to_r(col_ids)
+            unscored_names = []
             for did in dom_ids:
-                d_name = all_domain_name_map.get(did)
-                if d_name:
-                    var_r_names.append(_make_r_identifier(d_name) + "_score")
+                if did in score_col_by_domain:
+                    var_r_names.append(score_col_by_domain[did])
+                elif did in all_domain_name_map:
+                    unscored_names.append(all_domain_name_map[did])
 
-            if not var_r_names:
+            if not var_r_names and not unscored_names:
                 continue
 
             rc_lines.append(f"# Comparison: {_escape_r_string(pe_name)}")
+            for _uname in unscored_names:
+                rc_lines.append(
+                    f"# Skipped variable group {_escape_r_string(_uname)}: it has no"
+                    " scale score in this export (compute it in Mixed Measures and"
+                    " export again)"
+                )
+            if not var_r_names:
+                rc_lines.append("")
+                continue
 
             # Subset if exclude_groups
             data_ref = "data"
@@ -2744,7 +2825,7 @@ def export_r_data(
     item_col_ids: list[int] = []
 
     for ds, cols in qualifying_datasets:
-        ds_slug = _slugify(ds.name, max_len=20)
+        ds_slug = _dataset_r_prefix(ds.name)
         for col in cols:
             if col.column_code:
                 base = _make_r_identifier(col.column_code)
@@ -2758,14 +2839,7 @@ def export_r_data(
             else:
                 r_name = base
 
-            # Ensure uniqueness
-            candidate = r_name
-            counter = 2
-            while candidate in used_names:
-                candidate = f"{r_name}_{counter}"
-                counter += 1
-            r_name = candidate
-            used_names.add(r_name)
+            r_name = _unique_r_name(r_name, used_names)
 
             is_demo = col.column_type == ColumnType.DEMOGRAPHIC
             col_meta[col.id] = {
@@ -2788,7 +2862,7 @@ def export_r_data(
     # col_character() read spec so R can't numeric-guess "007" into 7.
     identifier_cols: list[dict] = []
     for ds, _cols in qualifying_datasets:
-        ds_slug = _slugify(ds.name, max_len=20)
+        ds_slug = _dataset_r_prefix(ds.name)
         id_cols = [c for c in ds.columns if c.column_type == ColumnType.IDENTIFIER]
         id_cols.sort(key=lambda c: (c.display_order or 999999, c.sequence_order))
         for col in id_cols:
@@ -2799,13 +2873,7 @@ def export_r_data(
             else:
                 base = _make_r_identifier(col.column_text)
             r_name = f"{ds_slug}__{base}" if is_multi_dataset else base
-            candidate = r_name
-            counter = 2
-            while candidate in used_names:
-                candidate = f"{r_name}_{counter}"
-                counter += 1
-            r_name = candidate
-            used_names.add(r_name)
+            r_name = _unique_r_name(r_name, used_names)
             identifier_cols.append({"r_name": r_name, "col": col})
 
     # ── Step 4: Load domain metrics & scores ─────────────────────────────
@@ -2830,19 +2898,13 @@ def export_r_data(
 
         for m in domain_metrics:
             dname = domain_name_map.get(m.input_source_id, f"domain_{m.input_source_id}")
-            r_name = _slugify(dname, max_len=40) + "_score"
-            if r_name[0].isdigit():
-                r_name = "x_" + r_name
-            candidate = r_name
-            counter = 2
-            while candidate in used_names:
-                candidate = f"{r_name}_{counter}"
-                counter += 1
-            r_name = candidate
-            used_names.add(r_name)
+            r_name = _unique_r_name(_score_column_base(dname), used_names)
 
             domain_score_cols.append({
                 "metric_id": m.id,
+                # #1371: the script finds a group's score column by THIS, never
+                # by re-deriving a name from the group's.
+                "domain_id": m.input_source_id,
                 "r_name": r_name,
                 "domain_name": dname,
                 # #1229: read here, where the metric is in hand, for the script's notes.
@@ -3256,9 +3318,7 @@ def export_r_data(
         project_slug=project_slug,
         qualifying_datasets=qualifying_datasets,
         col_meta=col_meta,
-        domain_metrics=domain_metrics,
         domain_score_cols=domain_score_cols,
-        domain_members_map=domain_members_map,
         domain_members_by_dataset_map=domain_members_by_dataset_map,
         n_records=n_records,
         n_variables=n_variables,

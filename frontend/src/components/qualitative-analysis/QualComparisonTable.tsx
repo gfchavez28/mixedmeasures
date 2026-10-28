@@ -1,8 +1,12 @@
 import { Fragment, useMemo, useState } from 'react'
 import { formatP, getSignificanceStars } from '@/lib/chart-data'
+import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
+import { undefinedComparisonGroups } from '@/lib/qual-comparison'
+import { QualComparisonUndefinedNote } from './QualComparisonUndefinedNote'
 import type {
   DemographicComparisonResponse,
   CodeComparisonEntry,
+  GroupCodeStats,
   StatTestResult,
 } from '@/lib/api'
 
@@ -85,6 +89,8 @@ export default function QualComparisonTable({
       : allEntries),
     [allEntries, hideEmpty],
   )
+  // #1421: groups with no segments in the material compared — named once, here.
+  const undefinedGroups = useMemo(() => undefinedComparisonGroups(data), [data])
   const [sortKey, setSortKey] = useState<SortKey>(is2Group ? 'delta' : 'p')
   const [sortDir, setSortDir] = useState<SortDir>(is2Group ? 'desc' : 'asc')
 
@@ -152,6 +158,7 @@ export default function QualComparisonTable({
           </button>
         </div>
       )}
+      <QualComparisonUndefinedNote groups={undefinedGroups} />
       <div className="overflow-x-auto border rounded-lg">
         <table className="w-full text-xs" style={{ borderCollapse: 'collapse' }}>
           <caption className="sr-only">
@@ -289,16 +296,15 @@ function ComparisonRow({
                 <td className="px-2 py-1.5 border-b border-r text-right tabular-nums">
                   {stats?.count ?? 0}
                 </td>
-                <td className="px-2 py-1.5 border-b border-r text-right tabular-nums">
-                  {stats ? `${(stats.proportion * 100).toFixed(1)}%` : '\u2013'}
-                </td>
+                <ProportionCell stats={stats} />
               </Fragment>
             )
           })}
           <td className="px-2 py-1.5 border-b border-r text-right tabular-nums font-medium">
+            {/* #1421: \u0394 is null only when a group has no share \u2014 the note above says which. */}
             {entry.delta_proportion != null
               ? `${entry.delta_proportion >= 0 ? '+' : ''}${(entry.delta_proportion * 100).toFixed(1)}pp`
-              : '\u2013'
+              : NO_VALUE
             }
           </td>
           <td className={`px-2 py-1.5 border-b border-r text-right tabular-nums ${pColor(p)} ${pBgColor(p)}`}>
@@ -320,9 +326,7 @@ function ComparisonRow({
                 <td className="px-2 py-1.5 border-b border-r text-right tabular-nums">
                   {stats?.count ?? 0}
                 </td>
-                <td className="px-2 py-1.5 border-b border-r text-right tabular-nums">
-                  {stats ? `${(stats.proportion * 100).toFixed(1)}%` : '\u2013'}
-                </td>
+                <ProportionCell stats={stats} />
               </Fragment>
             )
           })}
@@ -341,6 +345,30 @@ function ComparisonRow({
         </>
       )}
     </tr>
+  )
+}
+
+/**
+ * #1421 — a group's share of its segments, or `—` when the server sent none.
+ *
+ * ⚠️ `proportion != null`, never truthiness: a group WITH segments that never used
+ * this code is a real 0.0% and must print as one.
+ */
+function ProportionCell({ stats }: { stats: GroupCodeStats | undefined }) {
+  if (stats?.proportion != null) {
+    return (
+      <td className="px-2 py-1.5 border-b border-r text-right tabular-nums">
+        {`${(stats.proportion * 100).toFixed(1)}%`}
+      </td>
+    )
+  }
+  return (
+    <td
+      className="px-2 py-1.5 border-b border-r text-right tabular-nums text-mm-text-faint"
+      title={stats ? undefinedTooltip(stats.undefined_reason) : undefined}
+    >
+      {stats ? NO_VALUE : '–'}
+    </td>
   )
 }
 

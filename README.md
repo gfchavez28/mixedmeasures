@@ -336,7 +336,10 @@ Being honest about scope:
   merely names them, and only someone who knows the project can tell those apart.
   Quotes pointing into blanked text are removed with it; the researcher's own codes, notes and memos
   are kept and reported for review, because deciding whether a memo quotes the
-  person is reading, not matching. **That is the limit that matters: it cannot
+  person is reading, not matching. What it removed is remembered in the project —
+  by identity, and the person's ID as a one-way code, which is not anonymisation —
+  so merging a colleague's older copy, importing a copy or linking records does not
+  bring them back, and re-using their ID asks first. **That is the limit that matters: it cannot
   find the person's name inside *other* people's turns, or inside free-text
   answers, notes or memos.** Those need someone who knows the project. A full
   backup is taken first and there is no per-participant undo — restoring reverses

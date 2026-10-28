@@ -2,7 +2,7 @@
  * Unit tests for `useCreateCoder` — the #530 shared create-coder chokepoint.
  * Every "Add coder" surface (TopRail menu, Settings identity section, Dashboard
  * switcher) routes through this hook, so its contract is what keeps the three
- * surfaces in agreement: create → invalidate the `['coders']` roster → hand the
+ * surfaces in agreement: create → RESET the `['coders']` roster (#964) → hand the
  * created coder to the caller (who then switches via requestSwitch skipConfirm).
  */
 
@@ -38,8 +38,9 @@ describe('useCreateCoder', () => {
     vi.clearAllMocks()
   })
 
-  it('creates, invalidates the coders roster, and hands the coder to onCreated', async () => {
+  it('creates, RESETS the active roster (never invalidates it — #964), and hands the coder to onCreated', async () => {
     const qc = makeClient()
+    const resetSpy = vi.spyOn(qc, 'resetQueries')
     const invalidateSpy = vi.spyOn(qc, 'invalidateQueries')
     vi.mocked(authApi.createCoder).mockResolvedValue({
       id: 7,
@@ -60,7 +61,8 @@ describe('useCreateCoder', () => {
       ),
     )
     expect(authApi.createCoder).toHaveBeenCalledWith('Blake')
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['coders'] })
+    expect(resetSpy).toHaveBeenCalledWith({ queryKey: ['coders'], exact: true })
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ['coders'] })
     expect(toast.error).not.toHaveBeenCalled()
   })
 

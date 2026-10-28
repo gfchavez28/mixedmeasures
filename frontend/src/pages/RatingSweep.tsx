@@ -7,6 +7,7 @@ import MagnitudeStrip from '@/components/MagnitudeStrip'
 import { Button } from '@/components/ui/button'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { codingApi } from '@/lib/api'
+import { invalidateAfterRating } from '@/lib/coding-cache'
 import type { RatingQueueCodeCount, RatingQueueEntry } from '@/lib/api/coding'
 import { serverDetailMessage } from '@/lib/api/error-utils'
 import { describeMagnitude, isUnrated } from '@/lib/magnitude'
@@ -36,9 +37,13 @@ import { SELECTED_CARD } from '@/lib/selection'
  *   it by index skips the entries that shifted up. One batch is fetched, worked
  *   down, and refetched when exhausted (`services/rating_queue.py`).
  * - **No refetch after each write.** The entry is marked rated locally and the
- *   cursor advances. That is what keeps #881's race off this page entirely:
- *   there is never an in-flight page refetch for a rating to be overwritten by,
- *   and the coder is the only writer of their own queue.
+ *   cursor advances; `invalidateAfterRating` marks the queue stale WITHOUT
+ *   refetching it (#1425). ⚠️ **That does not mean nothing refetches it (#1456)**
+ *   — a refocus once the answer is a minute old, a code edit in the codebook
+ *   slide-out (`invalidateDerivedCounts`), *Load the next batch* and a filter
+ *   change all re-read the queue, and a re-read answer has already dropped what
+ *   this pass rated. So the WALK is a snapshot of the batch the coder asked for,
+ *   and the counts subtract only ratings the current answer has not seen.
  * - **No `useHistory` / Ctrl+Z.** The correction affordance on a SEQUENCE is
  *   positional — *Previous* returns to the passage and shows what was recorded,
  *   so it can be changed or cleared in place. An undo stack over a queue whose
@@ -60,6 +65,9 @@ import { SELECTED_CARD } from '@/lib/selection'
 /** How many entries one fetch brings back. Worked down, then refetched. */
 const BATCH = 50
 
+/** One stable empty walk, so the memos below do not recompute while loading. */
+const NO_ENTRIES: RatingQueueEntry[] = []
+
 /**
  * What this pass recorded for one entry: a rating, or `undefined` for skipped.
  *
@@ -78,7 +86,7 @@ export default function RatingSweep() {
   const [outcomes, setOutcomes] = useState<Record<string, Outcome>>({})
 
   const queryKey = ['rating-queue', projectId, codeFilter] as const
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
+  const { data, isError, error, refetch, isFetching, isStale } = useQuery({
     queryKey,
     queryFn: () => codingApi.getRatingQueue(projectId, {
       codeId: codeFilter ?? undefined,
@@ -86,7 +94,29 @@ export default function RatingSweep() {
     }),
   })
 
-  const entries = useMemo(() => data?.entries ?? [], [data])
+  /**
+   * 🔴 **#1456 — the batch being WALKED is a snapshot, taken when the coder asks
+   * for one** (a filter, or *Load the next batch*), never the query's latest
+   * answer. The server drops what this pass rated, so a re-read moved every
+   * entry after a rated one up by one: `entries[cursor]` landed as many passages
+   * further on as had been rated, and *Previous* addressed a different passage.
+   * A background re-read now updates the COUNTS only.
+   *
+   * Taken while rendering, not in an effect: the snapshot is part of reading the
+   * answer for a filter the coder chose (React's "adjust state when a prop
+   * changes" pattern), and it is guarded so it runs once per filter.
+   *
+   * ⚠️ **Never from a STALE cached answer that is being re-read** — a rating on
+   * a workbench marks this query stale (`invalidateAfterRating`), and a walk
+   * taken from that cache would offer an already-rated passage for the whole
+   * batch, where the old index-walk showed it only until the refetch landed.
+   */
+  const [walk, setWalk] = useState<{ filter: number | null; entries: RatingQueueEntry[] } | null>(null)
+  const walking = walk !== null && walk.filter === codeFilter
+  if (data && !walking && !(isFetching && isStale)) {
+    setWalk({ filter: codeFilter, entries: data.entries })
+  }
+  const entries = walking ? walk.entries : NO_ENTRIES
   const current: RatingQueueEntry | undefined = entries[cursor]
 
   /**
@@ -112,15 +142,30 @@ export default function RatingSweep() {
     setCursor(c => c + 1)
   }, [])
 
+  /**
+   * *Load the next batch* — the walk is replaced when the NEW answer lands, not
+   * when the button is pressed: resetting the cursor first put the OLD batch's
+   * first passage back on screen for the length of the request.
+   */
+  const loadNextBatch = useCallback(() => {
+    void refetch().then(result => {
+      if (result.status !== 'success') return   // the page renders the failure
+      setWalk({ filter: codeFilter, entries: result.data.entries })
+      setCursor(0)
+    })
+  }, [refetch, codeFilter])
+
   const rate = useMutation({
     mutationFn: ({ entry, value }: { entry: RatingQueueEntry; value: number | null }) =>
       commitRating(projectId, entry, value),
     onSuccess: (_res, { entry, value }) => {
       setOutcomes(o => ({ ...o, [entryKey(entry)]: { value, codeId: entry.code_id } }))
-      // A rating moves the participant scores' inputs, so the snapshot beside
-      // them is stale. The marker is the server's; this only makes the client
-      // re-read it rather than showing a fresh-looking table.
-      queryClient.invalidateQueries({ queryKey: ['datasets', projectId] })
+      // #1425 — what a rating moves elsewhere: the rating α, the grid, the
+      // consensus count, the participant table's marker (`dataset-data` — this
+      // line invalidated only the dataset LIST, which no screen reads it from),
+      // and the four workbench lists (all inactive here). The queue is marked,
+      // not refetched; the walk would not move if it were (#1456).
+      invalidateAfterRating(queryClient, projectId, { lists: true })
       advance()
     },
     onError: (err) => {
@@ -179,11 +224,32 @@ export default function RatingSweep() {
    * five entries, contradicting B's own chip.
    */
   const ratedThisSession = [...ratedByCode.values()].reduce((a, b) => a + b, 0)
+  /** What the header's "N rated in this pass" says — the pass, in the filter's scope. */
   const ratedInScope = codeFilter == null
     ? ratedThisSession
     : (ratedByCode.get(codeFilter) ?? 0)
-  const total = Math.max(0, (data?.total ?? 0) - ratedInScope)
-  const exhausted = !isLoading && !current
+  /**
+   * 🔴 **#1456 — subtract only the ratings the server's answer has NOT seen.**
+   * An entry the current answer LISTS was unrated when the server answered, so a
+   * rating given to it since is still inside `total` and `per_code`; an entry it
+   * does not list has already left both. Subtracting the whole pass tally from
+   * an answer read AFTER some of it — every filter change, every next batch,
+   * any refetch — took those ratings off twice ("Nothing waiting to be rated."
+   * over a passage on screen). The answer's entries are in its own scope, so
+   * this is also #979's rule kept by construction.
+   */
+  const unseenByCode = useMemo(() => {
+    const listed = new Set((data?.entries ?? []).map(entryKey))
+    const counts = new Map<number, number>()
+    for (const [key, o] of Object.entries(outcomes)) {
+      if (o && listed.has(key)) counts.set(o.codeId, (counts.get(o.codeId) ?? 0) + 1)
+    }
+    return counts
+  }, [data, outcomes])
+  const unseen = [...unseenByCode.values()].reduce((a, b) => a + b, 0)
+  const total = Math.max(0, (data?.total ?? 0) - unseen)
+  // No walk yet = loading: the first answer, or a stale one being re-read (above).
+  const exhausted = walking && !current
 
   // ⚠️ Ordered and NAMED by the server. Deriving the names from `entries`
   // would label every code outside the current batch with a bare id.
@@ -192,12 +258,12 @@ export default function RatingSweep() {
   // contradiction one level down.
   const perCode = useMemo(
     () => (data?.per_code ?? [])
-      .map(c => ({ ...c, outstanding: Math.max(0, c.outstanding - (ratedByCode.get(c.code_id) ?? 0)) }))
+      .map(c => ({ ...c, outstanding: Math.max(0, c.outstanding - (unseenByCode.get(c.code_id) ?? 0)) }))
       // ⚠️ The SELECTED code keeps its chip at zero — it is what shows which
       // filter is active, and "0" here is a measured count rather than the
       // unanswered-list placeholder the count rule forbids.
       .filter(c => c.outstanding > 0 || c.code_id === codeFilter),
-    [data, ratedByCode, codeFilter],
+    [data, unseenByCode, codeFilter],
   )
 
   /**
@@ -241,7 +307,7 @@ export default function RatingSweep() {
         {/* The count is the honest progress statement: a percentage would need
             a denominator that only means something once the sweep is over. */}
         <p className="text-xs text-mm-text-secondary" aria-live="polite">
-          {isLoading
+          {!walking
             ? 'Loading…'
             : total === 0
               ? 'Nothing waiting to be rated.'
@@ -262,7 +328,7 @@ export default function RatingSweep() {
         />
       )}
 
-      {isLoading && <p className="text-sm text-mm-text-secondary">Loading the queue…</p>}
+      {!walking && <p className="text-sm text-mm-text-secondary">Loading the queue…</p>}
 
       {exhausted && <Exhausted total={total}
                                // What is left OUTSIDE the current filter, so a
@@ -270,7 +336,7 @@ export default function RatingSweep() {
                                // work is instead of reading as "all done".
                                elsewhere={Math.max(0, allTotal - total)}
                                filtered={codeFilter != null}
-                               onRefetch={() => { setCursor(0); void refetch() }}
+                               onRefetch={loadNextBatch}
                                busy={isFetching}
                                // A skip records its key too, so any key means the
                                // coder acted on a passage in this pass.

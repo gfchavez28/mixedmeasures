@@ -103,6 +103,17 @@ export interface LinkableRowsPage {
   link_refusal: string | null
 }
 
+/** `POST /participants`'s body (`schemas/participant.py::ParticipantCreate`). */
+export interface ParticipantCreate {
+  identifier: string
+  display_name?: string
+  role?: string
+  demographics?: string
+  /** #1190 (D12) — the researcher was told the identifier is a withdrawn person's and
+   *  chose to create it anyway. Sent only after that confirmation. */
+  confirm_withdrawn?: boolean
+}
+
 // API functions - Participants
 export const participantsApi = {
   list: (projectId: number) =>
@@ -111,9 +122,17 @@ export const participantsApi = {
     api.get<Participant>(`/projects/${projectId}/participants/${participantId}`).then(res => res.data),
   getDetail: (projectId: number, participantId: number) =>
     api.get<ParticipantDetail>(`/projects/${projectId}/participants/${participantId}`).then(res => res.data),
-  create: (projectId: number, data: { identifier: string; display_name?: string; role?: string; demographics?: string }) =>
+  /**
+   * #1190 (D12) — an identifier that belongs to someone who WITHDREW from this project is
+   * refused with a 409 whose `detail` is `{ error: 'withdrawn_identifier', message }`;
+   * `confirm_withdrawn: true` creates it anyway. Callers go through
+   * `lib/withdrawn-identifier.ts::createConfirmingWithdrawn`, which asks first.
+   */
+  create: (projectId: number, data: ParticipantCreate) =>
     api.post<Participant>(`/projects/${projectId}/participants`, data).then(res => res.data),
-  update: (projectId: number, participantId: number, data: { identifier?: string; display_name?: string; role?: string; demographics?: string }) =>
+  /** #1190 (D12) — a rename to a withdrawn person's ID is refused like a create (the same
+   *  409 body); `confirm_withdrawn: true` renames anyway, after the same ask. */
+  update: (projectId: number, participantId: number, data: { identifier?: string; display_name?: string; role?: string; demographics?: string; confirm_withdrawn?: boolean }) =>
     api.patch<Participant>(`/projects/${projectId}/participants/${participantId}`, data).then(res => res.data),
   delete: (projectId: number, participantId: number) =>
     api.delete(`/projects/${projectId}/participants/${participantId}`).then(res => res.data),
@@ -174,6 +193,19 @@ export interface WithdrawalOutcome {
    *  only unlinked: "about them" and "theirs" are different claims and only a
    *  person reading the document can tell which applied. */
   documents_unlinked: number
+  /** #1320 — turns their words reached by a merge or a split, blanked whole. */
+  combined_turns_blanked: number
+  /** #1320 — combined speakers ("Maria & Sam") renamed, or deleted when unused. */
+  combined_speakers_renamed: number
+  /** #1320 — canvas copies of their quotes rewritten (themes and snapshots),
+   *  snapshots rewritten, and inbox items removed. */
+  canvas_embeds_scrubbed: number
+  canvas_snapshots_rewritten: number
+  canvas_inbox_items_removed: number
+  /** #1320 — stored results of the metrics the withdrawal marked out of date. */
+  computed_results_deleted: number
+  /** #1320 — audit entries whose details were stripped (the entries are kept). */
+  audit_entries_redacted: number
   backup_filename: string
 }
 
@@ -187,7 +219,13 @@ export interface WithdrawalReport {
   conversations: {
     conversation_id: number
     name: string
+    /** Their own turns (their speaker), hidden ones included. */
     segments: number
+    /** #1320 — turns their words reached by a merge or a split: a combined
+     *  speaker or none, so no speaker finds them. REQUIRED (#1123's rule): a
+     *  sentence that reads the report cannot forget them. Codes, quotes and notes
+     *  below count both kinds of turn. */
+    combined_turns: number
     code_applications: number
     excerpts: number
     notes: number
@@ -215,4 +253,11 @@ export interface WithdrawalReport {
     notes: number
   }[]
   total_items: number
+  /**
+   * #1190 (D14) — dataset records linked to NO ONE whose ID column carries this
+   * person's identifier. Counted, never named and never deleted: an unlinked record
+   * with a matching ID is not proven to be theirs. REQUIRED (#1123's rule), so a
+   * sentence that reads the report cannot forget it.
+   */
+  unlinked_records_with_identifier: number
 }

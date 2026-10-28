@@ -98,3 +98,81 @@ describe('QualComparisonTable — unused codes', () => {
     expect(screen.getByText(/1 of 3 codes/)).toBeInTheDocument()
   })
 })
+
+/**
+ * #1421 — a group with no segments in the material compared has no share.
+ *
+ * The server sends `proportion: null` with `undefined_reason: 'no_segments'` (it sent
+ * 0.0, so the table printed "0.0%" beside "(n=0)" and a full-size Δ). The cell reads
+ * `—`, the group is named once with the reason, and a REAL zero — a group with
+ * segments that never used the code — still prints "0.0%".
+ */
+describe('QualComparisonTable — a group with no segments (#1421)', () => {
+  const EMPTY = { count: 0, proportion: null, undefined_reason: 'no_segments' }
+
+  function emptyGroupPayload(groups: string[], byGroup: Record<string, unknown>, totals: Record<string, number>) {
+    return {
+      groups,
+      group_totals: Object.fromEntries(groups.map(g => [g, { total_segments: totals[g], total_word_count: 0 }])),
+      codes: [{
+        code_id: 1, code_name: 'Cost', category_name: null,
+        by_group: byGroup, delta_proportion: null, test: null,
+      }],
+    } as unknown as DemographicComparisonResponse
+  }
+
+  function cellsOf(code: string) {
+    const row = screen.getByText(code).closest('tr')!
+    return Array.from(row.querySelectorAll('td')).map(td => td.textContent)
+  }
+
+  it('prints — for the empty group and names it with the reason', () => {
+    render(<QualComparisonTable data={emptyGroupPayload(
+      ['Interviewed', 'Survey only'],
+      { Interviewed: { count: 1, proportion: 0.25, undefined_reason: null }, 'Survey only': EMPTY },
+      { Interviewed: 4, 'Survey only': 0 },
+    )} />)
+    // [code, category, I count, I %, S count, S %, Δ, p, sig, effect]
+    const cells = cellsOf('Cost')
+    expect(cells[3]).toBe('25.0%')          // control: the group with segments keeps its share
+    expect(cells[4]).toBe('0')              // the COUNT is a real 0 and stays one
+    expect(cells[5]).toBe('—')              // HEAD: "0.0%"
+    expect(cells[5]).not.toBe('0.0%')
+    expect(cells[6]).toBe('—')
+    expect(screen.getByText(/No participant turns from this group in the conversations compared/))
+      .toBeInTheDocument()
+    expect(screen.getByText('Survey only:')).toBeInTheDocument()
+  })
+
+  it('keeps a REAL zero beside an empty group (three groups)', () => {
+    render(<QualComparisonTable data={emptyGroupPayload(
+      ['Interviewed', 'Phone', 'Survey only'],
+      {
+        Interviewed: { count: 1, proportion: 0.25, undefined_reason: null },
+        Phone: { count: 0, proportion: 0, undefined_reason: null },
+        'Survey only': EMPTY,
+      },
+      { Interviewed: 4, Phone: 2, 'Survey only': 0 },
+    )} />)
+    // [code, category, I n, I %, P n, P %, S n, S %, χ², p, sig, effect]
+    const cells = cellsOf('Cost')
+    expect(cells[3]).toBe('25.0%')
+    expect(cells[5]).toBe('0.0%')           // falsy-zero control: a measured 0 is not "—"
+    expect(cells[7]).toBe('—')
+    expect(screen.queryByText('Phone:')).not.toBeInTheDocument()
+    expect(screen.getByText('Survey only:')).toBeInTheDocument()
+  })
+
+  it('says nothing when every group has a share', () => {
+    render(<QualComparisonTable data={emptyGroupPayload(
+      ['Interviewed', 'Phone'],
+      {
+        Interviewed: { count: 1, proportion: 0.25, undefined_reason: null },
+        Phone: { count: 0, proportion: 0, undefined_reason: null },
+      },
+      { Interviewed: 4, Phone: 2 },
+    )} />)
+    expect(screen.queryByText(/No participant turns/)).not.toBeInTheDocument()
+    expect(cellsOf('Cost')[5]).toBe('0.0%')
+  })
+})

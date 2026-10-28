@@ -38,17 +38,24 @@ _TABLES = [
 ]
 
 
+#: The SQL name of the per-row `uuid4()` this revision registers on its own connection.
+_UUID4_SQL = "mm_migration_uuid4"
+
+
 def upgrade() -> None:
     conn = op.get_bind()
+    # #1362: ONE statement per table, not one per row. The per-row loop issued an UPDATE
+    # through SQLAlchemy for every row of nine tables — 38 s of a 1.0 project's 48 s
+    # upgrade at 400k turns, the one revision that outlasted the shell's startup deadline.
+    # The values are the same Python `uuid4()` strings, made per row by a function
+    # registered on this connection only (non-deterministic, so SQLite calls it per row).
+    conn.connection.driver_connection.create_function(
+        _UUID4_SQL, 0, lambda: str(_uuid.uuid4())
+    )
     for table in _TABLES:
         op.add_column(table, sa.Column("uuid", sa.String(length=36), nullable=True))
         # Backfill existing rows so they carry a stable identity for round-trip/merge.
-        rows = conn.execute(sa.text(f"SELECT id FROM {table} WHERE uuid IS NULL")).fetchall()
-        for (rid,) in rows:
-            conn.execute(
-                sa.text(f"UPDATE {table} SET uuid = :u WHERE id = :i"),
-                {"u": str(_uuid.uuid4()), "i": rid},
-            )
+        conn.execute(sa.text(f"UPDATE {table} SET uuid = {_UUID4_SQL}() WHERE uuid IS NULL"))
         # Unique index named to match `Column(..., unique=True, index=True)` (ix_<table>_uuid).
         op.create_index(f"ix_{table}_uuid", table, ["uuid"], unique=True)
 

@@ -19,9 +19,18 @@ import {
   resolveGroupColors,
   LINE_DASH_PATTERNS,
   computeLogDomain,
+  formatScalar,
 } from '@/lib/chart-data'
 import { ciCaveat, ciQualifier } from '@/lib/ci-label'
 import { useChartColors } from '@/lib/theme-context'
+import { undefinedTooltip } from '@/lib/stat-format'
+
+/** #1363 — a cell of the sr-only table: the value, or `—` and why. */
+function lineCellText(value: unknown, reason: unknown): string {
+  return typeof value === 'number'
+    ? formatScalar(value)
+    : `${formatScalar(null)} ${undefinedTooltip(reason as string | null | undefined)}`
+}
 import type {
   LineChartData,
   ChartFormatting,
@@ -37,7 +46,11 @@ const DOT_SHAPES = [
   'triangle',
 ] as const
 
-function CustomDot({ cx, cy, fill, shape, size }: { cx: number; cy: number; fill: string; shape: typeof DOT_SHAPES[number]; size: number }) {
+function CustomDot({ cx, cy, fill, shape, size }: { cx: number | null; cy: number | null; fill: string; shape: typeof DOT_SHAPES[number]; size: number }) {
+  // #1363 — recharts passes `cy = null` for an undefined point (`value: null`). Draw
+  // nothing: a circle without `cy` lands on the SVG's top edge, reading as a value
+  // above the scale, and the other shapes build `NaN` points. The `—` is in the table.
+  if (cx == null || cy == null || !Number.isFinite(cx) || !Number.isFinite(cy)) return null
   const r = size
   switch (shape) {
     case 'square':
@@ -84,7 +97,7 @@ function LineTooltip({ active, payload, label }: RechartsTooltipProps) {
               <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: entry.color || entry.stroke }} />
               <span className="text-mm-text-secondary">{entry.name}:</span>
               <span className="font-medium">
-                {typeof entry.value === 'number' ? entry.value.toFixed(DISPLAY_PRECISION) : entry.value}
+                {lineCellText(entry.value, point[`_undefinedReason_${groupKey}`] ?? point._undefinedReason)}
               </span>
               {n != null && <span className="text-mm-text-faint">(n={n})</span>}
               {ciLower != null && ciUpper != null && (
@@ -138,12 +151,15 @@ export default function LineChartComponent({
       if (!isGrouped) {
         const point = series[0]?.points[i]
         if (point) {
+          // #1363: `null` is a GAP in the line (recharts' default
+          // `connectNulls={false}`), never a point at zero.
           entry.value = point.value
+          entry._undefinedReason = point.undefinedReason
           entry._n = point.n
           entry._ciLower = point.ciLower
           entry._ciUpper = point.ciUpper
           entry._ciMethod = point.ciMethod
-          if (point.ciLower != null && point.ciUpper != null) {
+          if (point.value != null && point.ciLower != null && point.ciUpper != null) {
             entry._ciError = [point.value - point.ciLower, point.ciUpper - point.value]
             entry._band_value = [point.ciLower, point.ciUpper]
           }
@@ -154,11 +170,12 @@ export default function LineChartComponent({
           const point = s.points[i]
           if (point) {
             entry[gv] = point.value
+            entry[`_undefinedReason_${gv}`] = point.undefinedReason
             entry[`_n_${gv}`] = point.n
             entry[`_ciLower_${gv}`] = point.ciLower
             entry[`_ciUpper_${gv}`] = point.ciUpper
             entry[`_ciMethod_${gv}`] = point.ciMethod
-            if (point.ciLower != null && point.ciUpper != null) {
+            if (point.value != null && point.ciLower != null && point.ciUpper != null) {
               entry[`_ciError_${gv}`] = [point.value - point.ciLower, point.ciUpper - point.value]
               entry[`_band_${gv}`] = [point.ciLower, point.ciUpper]
             }
@@ -175,7 +192,7 @@ export default function LineChartComponent({
     const values: number[] = []
     for (const s of series) {
       for (const p of s.points) {
-        if (p.value > 0) values.push(p.value)
+        if (p.value != null && p.value > 0) values.push(p.value)
       }
     }
     return computeLogDomain(values)
@@ -186,7 +203,7 @@ export default function LineChartComponent({
     let count = 0
     for (const s of series) {
       for (const p of s.points) {
-        if (p.value <= 0) count++
+        if (p.value != null && p.value <= 0) count++ // #1363: undefined is not "≤ 0"
       }
     }
     return count
@@ -346,8 +363,8 @@ export default function LineChartComponent({
             <tr key={i}>
               <td>{d.label as string}</td>
               {isGrouped
-                ? groupValues.map(gv => <td key={gv}>{(d[gv] as number | undefined)?.toFixed(DISPLAY_PRECISION) ?? '-'}</td>)
-                : <td>{(d.value as number | undefined)?.toFixed(DISPLAY_PRECISION) ?? '-'}</td>
+                ? groupValues.map(gv => <td key={gv}>{lineCellText(d[gv], d[`_undefinedReason_${gv}`])}</td>)
+                : <td>{lineCellText(d.value, d._undefinedReason)}</td>
               }
             </tr>
           ))}

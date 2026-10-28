@@ -1,6 +1,7 @@
 import { Link } from 'react-router'
 import { TriangleAlert } from 'lucide-react'
 import type { ParticipantLinkReport } from '@/lib/api'
+import { skippedWithdrawn, withdrawnLinkSentence } from '@/lib/link-by-column-copy'
 
 /**
  * #414: what participant linking did at import time. `compact` is the inline
@@ -47,6 +48,9 @@ export default function ParticipantLinkNote({
   if (report.skipped_conflict > 0) {
     skippedParts.push(`${report.skipped_conflict.toLocaleString()} whose participant is already linked to another record`)
   }
+  // #1190 — its own sentence, because "link them by hand" is the wrong advice for a
+  // record whose ID is a withdrawn person's. Counted, never named.
+  const withdrawn = skippedWithdrawn(report)
   // #963 — `!== false`, not truthiness: `undefined` means the participant list
   // never answered, and suppressing the callout then is the unsafe direction.
   const pollution = hadParticipants !== false && report.created > 0 && report.matched === 0
@@ -65,6 +69,9 @@ export default function ParticipantLinkNote({
       </div>
       {skippedParts.length > 0 && (
         <div>Not linked: {skippedParts.join(' · ')}. These records stay unlinked — you can link them by hand on the Participants page.</div>
+      )}
+      {withdrawn > 0 && (
+        <div>{withdrawnLinkSentence(withdrawn)}</div>
       )}
       {pollution && (
         <div className="flex items-start gap-1.5 text-amber-700 dark:text-amber-300">

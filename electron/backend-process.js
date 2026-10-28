@@ -145,17 +145,69 @@ function buildSpawnEnv({ port, userData, baseEnv = {}, encryptionKeyHex = null, 
  * the backend process has already exited (so a crash-on-startup surfaces as a
  * fast, clear failure instead of hanging until the timeout).
  *
- * The timeout budget must cover a cold first launch: the lifespan startup runs
- * Alembic migrations before uvicorn serves /health, so a fresh DB on a slow
- * disk can take several seconds.
+ * The lifespan runs Alembic migrations before uvicorn serves /health. Outside an
+ * update the budget is `timeoutMs` (a cold first launch on a slow disk takes several
+ * seconds); during one it is the update's own (#1362) — pass `deadline` from
+ * `createStartupDeadline`, which the backend's MM-PHASE lines move. A rejection
+ * carries `phase`, so the caller knows which deadline it was.
  */
-function waitForHealth(port, { timeoutMs = 60_000, intervalMs = 300, isExited = () => false } = {}) {
+/** How long the startup waits outside an update, and how long an update gets (#1362). */
+const STARTUP_TIMEOUT_MS = 60_000
+const MIGRATION_TIMEOUT_MS = 30 * 60_000
+
+/**
+ * #1362 — the startup deadline, which an UPDATE of the database replaces with its own.
+ *
+ * The lifespan migrates before `/health` can answer. A 1.0 project of 400k turns took
+ * 69 s to update on SQLCipher (measured, fast desktop), so a fixed 60 s killed a healthy
+ * update — and on Windows the kill undid it, so every launch repeated it. The backend
+ * now says `MM-PHASE: migrating` before it starts and `migrated` when it has committed
+ * (`backend/app/startup_errors.py`); in between the deadline is `migrationMs` from the
+ * announcement, then `startupMs` again for the rest of startup. A hung update still
+ * ends: the ceiling is finite, and `phase()` says which deadline expired.
+ *
+ * The clock is MONOTONIC (the review's D1): a wall-clock change can never fire or stretch
+ * the deadline, and where the OS's monotonic clock pauses in sleep, a laptop closed during
+ * an update does not spend its 30 minutes asleep. Whether each OS's clock pauses is not
+ * measured here; with the wall clock every OS counted the sleep.
+ */
+function createStartupDeadline({
+  now = () => performance.now(),
+  startupMs = STARTUP_TIMEOUT_MS,
+  migrationMs = MIGRATION_TIMEOUT_MS,
+} = {}) {
+  let phase = 'starting'
+  let until = now() + startupMs
+  return {
+    onPhase(next) {
+      if (next === 'migrating' && phase !== 'migrating') {
+        phase = 'migrating'
+        until = now() + migrationMs
+      } else if (next === 'migrated' && phase === 'migrating') {
+        phase = 'starting'
+        until = now() + startupMs
+      }
+    },
+    expired: () => now() > until,
+    phase: () => phase,
+    limitMs: () => (phase === 'migrating' ? migrationMs : startupMs),
+  }
+}
+
+function waitForHealth(port, { timeoutMs = 60_000, intervalMs = 300, isExited = () => false, deadline = null } = {}) {
   const url = `http://127.0.0.1:${port}/health`
-  const deadline = Date.now() + timeoutMs
+  const clock = deadline || createStartupDeadline({ startupMs: timeoutMs })
   return new Promise((resolve, reject) => {
     const attempt = () => {
       if (isExited()) return reject(new Error('Backend process exited before it became healthy'))
-      if (Date.now() > deadline) return reject(new Error('Backend did not become healthy within ' + timeoutMs + 'ms'))
+      if (clock.expired()) {
+        // `phase` rides the error, so the caller can tell an update that ran out of time
+        // (stop it hard, then say it was undone) from an engine that never answered.
+        return reject(Object.assign(
+          new Error('Backend did not become healthy within ' + clock.limitMs() + 'ms'),
+          { phase: clock.phase() },
+        ))
+      }
       const req = http.get(url, (res) => {
         res.resume() // drain
         if (res.statusCode === 200) resolve()
@@ -172,7 +224,9 @@ function waitForHealth(port, { timeoutMs = 60_000, intervalMs = 300, isExited = 
  * Terminate the backend subprocess.
  * - POSIX: SIGTERM first so the FastAPI lifespan shutdown runs (it writes the
  *   shutdown .mmbackup — confirmed in P2), then a hard SIGKILL after a grace
- *   period if it hasn't exited.
+ *   period if it hasn't exited. EXCEPT during an update of the database (`hard`,
+ *   #1362): SIGKILL at once, because a lifespan blocked in a migration does not act on
+ *   SIGTERM until the migration ends.
  * - Windows: no SIGTERM; taskkill the whole process tree (/T) forcefully (/F).
  *   NOTE: this is a hard kill, so the graceful shutdown backup does NOT run on
  *   Windows (packaging plan gotcha — the automatic backup is the mitigation; since
@@ -197,9 +251,19 @@ function waitForHealth(port, { timeoutMs = 60_000, intervalMs = 300, isExited = 
  */
 function stopBackend(
   child,
-  { platform, graceMs = 5_000, spawnSync, setTimeoutFn = setTimeout, log = () => {} } = {},
+  { platform, graceMs = 5_000, spawnSync, setTimeoutFn = setTimeout, log = () => {}, hard = false } = {},
 ) {
   if (!child || child.exitCode !== null || child.killed) return
+  // #1362: during an UPDATE, stop at once on every platform. A lifespan blocked in a
+  // migration does not act on SIGTERM until the migration ends (measured: 53 s more,
+  // then a shutdown backup), and Electron does not wait for it (#1142) — so the engine
+  // would finish unseen while a relaunch found the database locked. The update is one
+  // transaction (#1312), so a hard stop undoes it (measured: SIGKILL part-way through
+  // left the database at its old revision, `quick_check` ok, schema unchanged).
+  if (hard && platform !== 'win32') {
+    child.kill('SIGKILL')
+    return
+  }
   if (platform === 'win32') {
     try {
       // `timeout` bounds a wedged taskkill so quit can never hang forever;
@@ -245,8 +309,27 @@ function spawnEngine(spawn, exe, options) {
   }
 }
 
+/** The splash's line while the backend updates the database (#1362). */
+const SPLASH_UPDATING_TEXT = 'Updating your data for this version. A large project can take '
+  + 'several minutes. Keep Mixed Measures open until it finishes.'
+
+/**
+ * The splash page for a startup phase. Pure, so it is tested without Electron: the page
+ * has no script (its CSP is `default-src 'none'`), so main.js reloads it with this text.
+ * Only the one `class="sub"` line changes; a page without it is returned unchanged.
+ */
+function splashHtmlFor(html, phase) {
+  if (phase !== 'migrating') return html
+  return html.replace(/(<div class="sub">)[^<]*(<\/div>)/, `$1${SPLASH_UPDATING_TEXT}$2`)
+}
+
 module.exports = {
   DB_FILE_NAME,
+  STARTUP_TIMEOUT_MS,
+  MIGRATION_TIMEOUT_MS,
+  SPLASH_UPDATING_TEXT,
+  createStartupDeadline,
+  splashHtmlFor,
   freePort,
   portFree,
   resolveAppPort,

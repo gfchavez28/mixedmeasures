@@ -1,4 +1,5 @@
 import api from './client'
+import type { TextEditAnswer, TextEditPlan } from './segments'
 
 export interface DocumentListItem {
   id: number
@@ -170,8 +171,22 @@ export const documentsApi = {
   remove: (projectId: number, documentId: number) =>
     api.delete(`/projects/${projectId}/documents/${documentId}`).then(res => res.data),
 
-  updateSegment: (projectId: number, documentId: number, segmentId: number, data: { text: string }) =>
-    api.patch(`/projects/${projectId}/documents/${documentId}/segments/${segmentId}`, data).then(res => res.data),
+  /** A TEXT edit carries the paragraph's quotes (#1319) — see `segmentsApi.updateSegment`. */
+  updateSegment: (
+    projectId: number,
+    documentId: number,
+    segmentId: number,
+    data: { text: string } & TextEditAnswer,
+  ) =>
+    api.patch<{ id: number; text: string; word_count: number; quote_rebase: TextEditPlan }>(
+      `/projects/${projectId}/documents/${documentId}/segments/${segmentId}`, data,
+    ).then(res => res.data),
+
+  /** #1319 — what saving `text` would do to the paragraph's quotes. Writes nothing. */
+  previewSegmentEdit: (projectId: number, documentId: number, segmentId: number, text: string) =>
+    api.post<TextEditPlan>(
+      `/projects/${projectId}/documents/${documentId}/segments/${segmentId}/edit-preview`, { text },
+    ).then(res => res.data),
 
   createNote: (projectId: number, documentId: number, data: { segment_id: number; content: string }) =>
     api.post<DocumentNote>(`/projects/${projectId}/documents/${documentId}/notes`, data).then(res => res.data),

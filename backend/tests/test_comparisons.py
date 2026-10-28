@@ -154,7 +154,51 @@ def test_kruskal_wallis(mtcars_session):
     # Service rounds p to 6 decimals: round(2.566217e-06, 6) → 0.000003
     assert test["p"] == pytest.approx(2.566217e-06, abs=1e-06)
     assert test["effect_size_type"] == "epsilon_squared"
-    assert test["effect_size"] == pytest.approx(0.766, abs=0.01)
+    # #1327: Tomczak & Tomczak's (2014) E²_R = H/(n−1), from base R 4.3.3's
+    # kruskal.test: 25.746156 / 31 = 0.830521. η²_H would be 0.8188 and the old
+    # (H−k+1)/(n−1) 0.7660 — the tolerance must separate all three, so 1e-4.
+    assert test["effect_size"] == pytest.approx(0.8305, abs=1e-4)
+
+
+def _rank_eta_squared(groups: list[list[float]]) -> float:
+    """The independent oracle: one-way η² of the RANKS (tie-averaged). With a
+    tie-corrected H this equals H/(n−1) exactly — checked in base R on four data
+    sets (mtcars ×2, iris, a tie-free case) to 1e-15 — and it is computed here by
+    a path that never forms H."""
+    from scipy.stats import rankdata
+    flat = [v for g in groups for v in g]
+    ranks = rankdata(flat)
+    grand = ranks.mean()
+    out, i = 0.0, 0
+    for g in groups:
+        r = ranks[i:i + len(g)]
+        i += len(g)
+        out += len(g) * (r.mean() - grand) ** 2
+    return float(out / ((ranks - grand) ** 2).sum())
+
+
+KW_CASES = [
+    # (name, groups, the value R gives for H/(n−1))
+    # H < k − 1: the old formula went NEGATIVE and was clamped to 0.0, η²_H too.
+    ("small H", [[1, 5, 4], [2, 6, 8], [3, 7, 9]], 0.233333),
+    # n − k = 1: old 0.2333, η²_H 0.70, E²_R 0.90.
+    ("n minus k is one", [[1], [2], [3, 4]], 0.9),
+    # one value per group: η²_H divides by zero; E²_R is 1.0 (all variance between).
+    ("one value per group", [[1], [2], [3]], 1.0),
+    # heavy ties
+    ("ties", [[1, 1, 2, 2], [2, 3, 3, 3], [1, 3, 3, 4]], None),
+]
+
+
+@pytest.mark.parametrize("name,groups,r_value", KW_CASES, ids=[c[0] for c in KW_CASES])
+def test_kruskal_epsilon_squared_is_the_rank_eta_squared(name, groups, r_value):
+    from app.services.comparisons import _run_kruskal_wallis
+    names = [f"g{i}" for i in range(len(groups))]
+    res = _run_kruskal_wallis(dict(zip(names, [list(map(float, g)) for g in groups])), names)
+    assert res["effect_size"] == pytest.approx(_rank_eta_squared(groups), abs=1e-4)
+    if r_value is not None:
+        assert res["effect_size"] == pytest.approx(r_value, abs=1e-4)
+    assert 0.0 <= res["effect_size"] <= 1.0
 
 
 def test_effect_size_ci(mtcars_session):

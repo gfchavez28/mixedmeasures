@@ -96,12 +96,16 @@ from ..models import (
 from ..models.audit import AuditEntry
 from ..models.user import User
 from ..auth import (
-    CODER_TYPE_CONSENSUS, CODER_TYPE_MACHINE, normalize_coder_type, unique_username,
+    CODER_TYPE_CONSENSUS, CODER_TYPE_MACHINE, SYSTEM_CODER_TYPES, normalize_coder_type,
+    unique_username,
 )
 from . import machine_coder
 from . import material_config
 from ..config import get_backup_dir
-from ..services.backup import APP_VERSION, STAGING_SUFFIX
+from ..services.backup import APP_VERSION, STAGING_SUFFIX, _version_tuple
+from ..services.computed_columns import (  # #1368 D4
+    QUOTED_ANSWER_RULE_VERSION, compares_a_quoted_answer,
+)
 from ..services.coding_layers import CONSENSUS_ORIGIN, code_usage_count_expr, non_consensus_filter
 from ..services.canvas import (
     EMBED_NODE_TYPES,
@@ -198,6 +202,13 @@ logger = logging.getLogger(__name__)
 # alone, and every consumer reads whichever shape it is handed.
 CURRENT_FORMAT_VERSION = 7
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
+
+#: #1321 — every value `import_project` acts on. The mode decides whether the file's
+#: identity is KEPT (overwrite · merge · copy_for_coding) or RE-MINTED (new), so an
+#: unknown string must be refused rather than fall into `else`: it imported as a project
+#: with a FRESH project_uuid and the file's PRESERVED entity uuids, and every later import
+#: of the file — a coding copy included — then died on the unique index as a 500.
+IMPORT_MODES: tuple[str, ...] = ("new", "overwrite", "merge", "copy_for_coding")
 
 
 class MergeDivergenceError(ValueError):
@@ -391,6 +402,92 @@ def _serialize_row(obj, columns: list[str]) -> dict:
         else:
             data[col] = val
     return data
+
+
+def _refuse_withdrawn_in_file(data: dict, removed, import_mode: str) -> None:
+    """#1190 — a file that holds a withdrawn person, where skipping cannot be enough.
+
+    - Any mode but a merge: the file's rows are INSERTED, so her turns would arrive
+      with their words and her speaker with her name. Refused (fail closed, the
+      withdrawal's own posture); a copy made after the withdrawal imports.
+    - A merge: a turn spoken by her that the withdrawal never blanked — a source the
+      copy added. The merge would insert it with her words.
+    Counts only in the sentence, never a name.
+    """
+    from . import tombstones as _tomb
+    if not removed:
+        return
+    hers = {
+        p["_original_id"] for p in data.get("participants", [])
+        if removed.withdrawn_participant(p.get("uuid"), p.get("identifier"))
+    }
+    if import_mode != "merge":
+        # ⚠️ The blanked-turn arm is NOT redundant with `hers` (r3's M13): a copy whose
+        # holder deleted her participant row — an ordinary participant delete, which
+        # only orphans — still carries her turns with their words and her speaker
+        # with her name, and then nothing else in the file names her.
+        from .withdrawal_redaction import BLANKED_SEGMENT_TEXT
+        held = len(hers) + sum(
+            1 for r in data.get("dataset_rows", [])
+            if removed.has(_tomb.DATASET_ROW, r.get("uuid"))
+        ) + sum(
+            1 for sg in data.get("segments", [])
+            if removed.has(_tomb.SEGMENT_BLANKED, sg.get("uuid"))
+            and sg.get("text") != BLANKED_SEGMENT_TEXT
+        )
+        # (A speaker the withdrawal DELETED — an orphan combined "Maria & Sam" — needs no
+        # arm: it exists only through merges of her turns, so a file holding it holds
+        # those turns unblanked, which the arm above counts.)
+        if held:
+            raise ValueError(
+                "This file holds data of a participant who withdrew from this project, "
+                "so it cannot be imported here. Import a copy exported after the "
+                "withdrawal."
+            )
+        return
+    her_speakers = {
+        sp["_original_id"] for sp in data.get("speakers", [])
+        if sp.get("participant_id") in hers
+    }
+    # …and by her TURNS, for a copy that no longer links her speaker to her (its
+    # holder deleted her participant row): the speaker of a turn the withdrawal
+    # blanked, except a MERGE RESULT, whose speaker may be another person's or a
+    # combined one (#1320's history walk reached it through her words, not her voice).
+    merge_results = {
+        sg.get("merged_into_id") for sg in data.get("segments", []) if sg.get("merged_into_id")
+    }
+    her_speakers |= {
+        sg.get("speaker_id") for sg in data.get("segments", [])
+        if sg.get("speaker_id") is not None
+        and sg.get("_original_id") not in merge_results
+        and removed.has(_tomb.SEGMENT_BLANKED, sg.get("uuid"))
+    }
+    unseen = sum(
+        1 for sg in data.get("segments", [])
+        if sg.get("speaker_id") in her_speakers
+        and not removed.has(_tomb.SEGMENT_BLANKED, sg.get("uuid"))
+    )
+    if unseen:
+        raise ValueError(
+            f"This copy holds {unseen} turn(s) spoken by a participant who withdrew from "
+            "this project, in a source this project does not have. Merging would add "
+            "their words. Delete that source from the copy and export it again."
+        )
+
+
+def _export_tombstones(db: Session, project_uuid: str | None) -> list[dict]:
+    """#1190 — the project's removal tombstones, as the file carries them."""
+    from ..models.removal_tombstone import RemovalTombstone
+    if not project_uuid:
+        return []
+    return [
+        {"entity_type": t, "entity_uuid": u, "identifier_hash": h, "reason": r}
+        for t, u, h, r in db.query(
+            RemovalTombstone.entity_type, RemovalTombstone.entity_uuid,
+            RemovalTombstone.identifier_hash, RemovalTombstone.reason,
+        ).filter(RemovalTombstone.project_uuid == project_uuid)
+        .order_by(RemovalTombstone.id)
+    ]
 
 
 def _serialize_all(objects, columns: list[str]) -> list[dict]:
@@ -850,6 +947,9 @@ def _attach_entity_rows(zf: zipfile.ZipFile, data: dict, file_version: int) -> N
 CODER_PORTABLE_FIELDS: tuple[str, ...] = (
     "username", "display_color", "coder_type", "archived", "machine_provenance",
     "created_at",
+    # #1352 / #1246 — WHO the coder is, minted on the install that created them. Never
+    # fresh-stamped by any import mode (a person is the same person in every copy).
+    "uuid",
 )
 
 #: The fields that belong to the install. Never written into a file, and never read
@@ -911,6 +1011,35 @@ def coder_match_refusal(item: dict, local: User) -> str | None:
     ):
         return CODER_MISMATCH_CONFIGURATION
     return None
+
+
+def _file_coder_uuid(item: dict) -> str | None:
+    """A file coder's identity, or None — read tolerantly: SQLite enforces no length,
+    so anything but a short string is treated as no identity, never as one."""
+    value = item.get("uuid")
+    return value if isinstance(value, str) and 0 < len(value) <= 36 else None
+
+
+def coder_by_identity(db: Session, item: dict) -> User | None:
+    """The local coder this file coder IS (#1352): the same `users.uuid`, and a coder it
+    may land on (`coder_match_refusal` — one predicate, as for a name). None when the
+    file carries no identity (an older build's file), when no local coder holds it, or
+    when the holder is of another kind or configuration (a hand edit or a reconfigured
+    model: then the identity is NOT trusted and the name rules decide)."""
+    file_uuid = _file_coder_uuid(item)
+    if file_uuid is None:
+        return None
+    local = db.query(User).filter(User.uuid == file_uuid).first()
+    if local is None or coder_match_refusal(item, local) is not None:
+        return None
+    return local
+
+
+#: Import modes that keep the PROJECT's identity for a colleague to code and merge back.
+#: In a coding copy the file's coders are, by the mode's meaning, other people: none of
+#: them lands on a local coder by NAME (#1352 — every install's first coder is
+#: "Researcher", so the lead's codings landed on the colleague's own coder).
+_NEVER_LAND_BY_NAME_MODES = frozenset({"copy_for_coding"})
 
 
 def _coder_mismatch_sentence(item: dict, local: User, reason: str) -> str:
@@ -1381,6 +1510,10 @@ def export_project(
             _serialize_row(quote_board_config, cols[QuoteBoardConfig])
             if quote_board_config else None
         ),
+        # #1190 — what a withdrawal removed travels with every copy, so a copy made
+        # from THIS one can refuse the person too. No format bump: an older build
+        # ignores the key, which is that build's own status quo (row 46's rule).
+        "tombstones": _export_tombstones(db, project.project_uuid),
     }
 
     # ── Build manifest ──────────────────────────────────────────────
@@ -2211,9 +2344,23 @@ def _validate_merge_code_decisions(
                 )
 
 
+def _predates_uuid_spine(data: dict) -> bool:
+    """A file exported before the J3-2-0 entity uuids (v1.0.x): `project_uuid` present,
+    entity uuids absent, and no format bump to tell them apart. ONE predicate, two askers:
+    the merge (#449 d) and the coding copy (#1321) — imported preserving identity, such a
+    file's entities take FRESH uuids from the column defaults, so the copy keeps the
+    project's identity and none of its sources', and its merge back reconciles every code
+    as divergent and fails (measured: a 500)."""
+    return any(
+        any(not item.get("uuid") for item in data.get(key, []))
+        for key in ("codes", "segments", "conversations", "documents", "observations")
+    )
+
+
 def _assert_merge_compatible(
     db: Session, data: dict, code_mapping: dict | None = None,
     target_project_id: int | None = None,
+    blanked_segment_uuids: set | None = None,
 ) -> None:
     """Track J · J3-2c gate (+ J3-2b reconcile): refuse a merge whose source diverged
     from the target, EXCEPT for divergent codes the caller has supplied a reconcile
@@ -2240,13 +2387,12 @@ def _assert_merge_compatible(
     # the version gate can't catch it) would skip every match and fall to the insert path,
     # colliding on e.g. ix_codes_project_numeric mid-write AFTER the safety export. Refuse
     # early (before any write) with an actionable message instead.
-    for _spine_key in ("codes", "segments", "conversations", "documents", "observations"):
-        if any(not _item.get("uuid") for _item in data.get(_spine_key, [])):
-            raise ValueError(
-                "This file was exported by a version of Mixed Measures that predates merge "
-                "support, so its sources can't be matched for merging. Ask your colleague to "
-                "re-export the project from an updated copy, then merge that file."
-            )
+    if _predates_uuid_spine(data):
+        raise ValueError(
+            "This file was exported by a version of Mixed Measures that predates merge "
+            "support, so its sources can't be matched for merging. Ask your colleague to "
+            "re-export the project from an updated copy, then merge that file."
+        )
 
     # ── Codebook gate (DJ3-1a frozen shared codebook + J3-2b reconcile) ──
     file_codes = [c for c in data.get("codes", []) if c.get("uuid")]
@@ -2453,7 +2599,14 @@ def _assert_merge_compatible(
         # accept exactly the differences that break a quote.
         file_text = file_seg_text.get(parent_uuid)
         if file_text:
-            changed = sum(1 for u, t in local_rows if file_text.get(u, "") != (t or ""))
+            # #1190 — a turn a WITHDRAWAL blanked differs from every older copy by
+            # design. Compared, it refused every merge of every copy made before the
+            # withdrawal, forever; exempt, the import drops new quotes of it instead.
+            _blanked = blanked_segment_uuids or set()
+            changed = sum(
+                1 for u, t in local_rows
+                if u not in _blanked and file_text.get(u, "") != (t or "")
+            )
             if changed:
                 text_diverged.append(
                     (getattr(local_parent, "name", "?"), changed, len(local_set))
@@ -2553,6 +2706,10 @@ def _merge_preview_block(
                 # The stored column, RAW: `machine_coder.parse_stored_provenance` is
                 # the one parser, on this side as on a local coder's.
                 "machine_provenance": c.get("machine_provenance"),
+                # #1352 — the coder's identity, so the preview proposes the coder the
+                # import will land on. An older block has none, and neither has the
+                # `project.json` beside it (the field is as new as the block key).
+                "uuid": c.get("uuid"),
             }
             for c in coders
         ],
@@ -2662,19 +2819,28 @@ def _fill_block_provenance(zf: zipfile.ZipFile, block: dict) -> None:
         c["machine_provenance"] = stored.get(c.get("_original_id"))
 
 
-def _file_coder_names(coders) -> frozenset[str]:
-    """Every username in a file's coder roster — the names a suffix must not take
-    (#1071). Each coder passes the set WITHOUT its own name: a coder may of course
-    be created under the name it arrived with."""
+def _file_coder_names(db: Session, coders) -> frozenset[str]:
+    """The usernames in a file's coder roster that a suffix must not take (#1071). Each
+    coder passes the set WITHOUT its own name: a coder may of course be created under
+    the name it arrived with.
+
+    #1352 — a coder resolved by IDENTITY is never looked up by name, so its name is not
+    reserved: the lead's coder comes back from a coding copy as "Researcher (2)", and
+    reserving that made the colleague "Researcher (3)" on the lead's install."""
     return frozenset(
-        c.get("username") for c in coders if isinstance(c.get("username"), str)
+        c.get("username") for c in coders
+        if isinstance(c.get("username"), str) and coder_by_identity(db, c) is None
     )
 
 
 def build_merge_coder_preview(db: Session, file_path: Path) -> list[dict]:
     """Track J · J3-2 (D8): read-only preview of an incoming merge file's coders, each
-    with its local name-match candidate + application counts, so the confirm UI can
-    map/override before committing. System coders (Unattributed/Consensus) are excluded —
+    with its local match candidate + application counts, so the confirm UI can
+    map/override before committing. #1352: the candidate is the SAME coder by identity
+    (`basis: "identity"`, pre-selected) before a same-name one (`basis: "name"`, which
+    the confirm step leaves unanswered); `create_username` is the name *Add as new
+    coder* writes. Also validate's `file_coders` for a coding copy (#1321), where a
+    name-only candidate is NOT where the coder lands — the copy lands nobody by name. System coders (Unattributed/Consensus) are excluded —
     they own data but aren't selectable people. ``local_app_count`` is the local coder's
     total applications (global; on the common single-project install that equals the
     project's count) and stays a LIVE query — it describes this install, not the file.
@@ -2701,12 +2867,20 @@ def build_merge_coder_preview(db: Session, file_path: Path) -> list[dict]:
     previews: list[dict] = []
     # #1071 — the import reserves every file coder's name before suffixing any; the
     # preview must too, or `new_username` names a coder the import does not create.
-    file_coder_names = _file_coder_names(inputs["coders"])
+    file_coder_names = _file_coder_names(db, inputs["coders"])
     for c in inputs["coders"]:
         if c.get("coder_type") in SYSTEM_CODER_TYPES:
             continue
         name = c.get("username")
-        local = db.query(User).filter(User.username == name).first() if name else None
+        # #1352 — WHO first: a coder who came from this install (or an earlier merge of
+        # this one's file) is that coder, whatever name the copy gave them. Only then
+        # the NAME, which is a PROPOSAL the researcher must answer (#1193's rule).
+        same = coder_by_identity(db, c)
+        if same is not None:
+            local, match_basis = same, "identity"
+        else:
+            local = db.query(User).filter(User.username == name).first() if name else None
+            match_basis = "name"
         local_match = None
         name_in_use = None
         if local is not None:
@@ -2719,6 +2893,9 @@ def build_merge_coder_preview(db: Session, file_path: Path) -> list[dict]:
                     "local_app_count": db.query(CodeApplication)
                     .filter(CodeApplication.user_id == local.id)
                     .count(),
+                    # "identity" — the same coder (`users.uuid`); "name" — only a coder
+                    # with this name, which the confirm step never answers for them.
+                    "basis": match_basis,
                 }
             else:
                 name_in_use = {
@@ -2756,6 +2933,12 @@ def build_merge_coder_preview(db: Session, file_path: Path) -> list[dict]:
             # The file coder's configuration as a dict, for the screen to name it —
             # `None` for a person and for an unrecorded model alike.
             "machine_provenance": file_provenance,
+            # #1246 (F3) — the name *Add as new coder* writes when it is not renamed:
+            # the helper the import calls, with the same reservation, so a taken name
+            # is SAID ("joins as Yuki (2)") rather than discovered on the Done step.
+            "create_username": unique_username(
+                db, (name or "Coder").strip() or "Coder", file_coder_names - {name},
+            ),
         })
     return previews
 
@@ -3331,6 +3514,46 @@ def _file_entity_id(item: dict):
     return item.get("_original_id", item.get("id"))
 
 
+def _mark_quoted_answer_columns_stale(
+    db: Session, column_ids: set[int], file_app_version: str | None,
+) -> None:
+    """#1368 D4 — a computed column of the shape `[col] == "text"` from an older file.
+
+    Since `QUOTED_ANSWER_RULE_VERSION` the evaluator compares a quoted text with the
+    cell's ANSWER; a file written by an earlier version carries the values ITS
+    evaluator stored, copied verbatim (`[q1] == "Agree"`: FALSE on every row of a
+    labelled column). So the column arrives marked out of date and Recompute replaces
+    them — the same mark migration `b5d1f7a3c9e2` makes in a database. It over-marks
+    by design (D4): a text column's values do not move.
+
+    ⚠️ ``column_ids`` is what the import WROTE (#714) — the columns it inserted, and a
+    matched column that received cells from the file — never ``remap``.
+    ⚠️ The version is compared as NUMBERS (`backup._version_tuple`: "1.5.10" is later
+    than "1.5.8", which a string comparison denies), and a missing or unreadable one
+    reads as earlier, so the doubt marks.
+    """
+    if not column_ids:
+        return
+    if _version_tuple(file_app_version or "") >= _version_tuple(QUOTED_ANSWER_RULE_VERSION):
+        return
+    marked = [
+        col_id
+        for col_id, expression in (
+            db.query(DatasetColumn.id, DatasetColumn.expression)
+            .filter(
+                DatasetColumn.id.in_(sorted(column_ids)),
+                DatasetColumn.source == "computed",
+                DatasetColumn.expression.isnot(None),
+            )
+        )
+        if compares_a_quoted_answer(expression)
+    ]
+    if marked:
+        db.query(DatasetColumn).filter(DatasetColumn.id.in_(marked)).update(
+            {"stale": True}, synchronize_session="fetch",
+        )
+
+
 def _preflight_import_refusals(db: Session, data: dict, coder_mapping: dict | None) -> None:
     """Every refusal an import can make from the FILE and the caller's coder decisions —
     raised BEFORE anything is written (#1150 a).
@@ -3366,6 +3589,22 @@ def _preflight_import_refusals(db: Session, data: dict, coder_mapping: dict | No
                 "it from the coders' own codings — so the file has been edited by "
                 "hand. Export the project again, or remove that coder from the file."
             )
+
+    # #1352: one identity is one coder. No export writes two file coders with the same
+    # `uuid` (it is the `users` row's unique key), so two are a hand edit — and the
+    # second would land on the row the first just created or matched.
+    seen_identities: dict[str, str] = {}
+    for item in data.get("coders", []):
+        ident = _file_coder_uuid(item)
+        if ident is None:
+            continue
+        if ident in seen_identities:
+            raise ValueError(
+                f"This file lists “{seen_identities[ident]}” and “{item.get('username') or 'a coder'}” "
+                "as the same coder, which no export does, so the file has been edited by "
+                "hand. Export the project again."
+            )
+        seen_identities[ident] = item.get("username") or "a coder"
 
     # A decision to MATCH a file coder onto a local one (the merge's confirm screen):
     # the local coder must still exist, and #1034 — be of the same kind and, for a
@@ -3504,10 +3743,12 @@ def import_project(
     sources INTO `target_project_id` (matched by project_uuid). Refuses divergent
     segmentation/codebook (raises MergeDivergenceError BEFORE any write).
 
-    `coder_mapping` (merge only): {file_coder_original_id(str) -> {"action": "match"|"create",
-    "target_user_id"?: int, "new_username"?: str, "unarchive"?: bool}}. Decides how each
-    incoming coder maps to a local roster coder (D8 confirm). When omitted/absent for a
-    coder, falls back to the legacy silent name-match.
+    `coder_mapping` (any mode; sent by the merge's confirm step and, with at most one
+    entry, by a coding copy's "which of these is you" — #1352 D2): {file_coder_original_id
+    (str) -> {"action": "match"|"create", "target_user_id"?: int, "new_username"?: str,
+    "unarchive"?: bool}}. Decides how each incoming coder maps to a local roster coder.
+    A coder with no entry takes the no-answer rule — identity first, then the mode's name
+    rule (see the coder loop, a2).
     `code_mapping` (merge only, J3-2b): {file_code_uuid(str) -> {"action": "collapse"|"link"|
     "new", "target_code_id"?: int, "combined_label"?: str}}. Reconciles each DIVERGENT code
     (uuid not local): collapse → remap its codings onto an existing local code (no new code);
@@ -3533,6 +3774,13 @@ def import_project(
     Returns (new_project_id, project_name).
     Wraps everything in the caller's transaction — caller commits or rolls back.
     """
+    if import_mode not in IMPORT_MODES:
+        # In the SERVICE, not the router: `import_project` has callers besides the
+        # endpoint (Duplicate, the seed scripts), and a router check is not a check on
+        # the operation (#589).
+        raise ValueError(
+            f"Unknown import mode {import_mode!r}. This file was not imported."
+        )
     if report is not None:
         report.setdefault("sources_matched", 0)
         report.setdefault("applications_added", 0)
@@ -3592,6 +3840,31 @@ def import_project(
         # #1150 (a): every refusal the file or the coder decisions can earn, BEFORE the
         # mode branch below writes the safety copy (merge, overwrite) or anything else.
         _preflight_import_refusals(db, data, coder_mapping)
+
+        # #1190 — what a withdrawal removed, by this install AND by whoever made the
+        # file, under the FILE's identity. Consulted in EVERY mode: an old copy brings
+        # a withdrawn person back as surely through "new" as through "merge".
+        from . import tombstones as _tomb
+        file_project_uuid = (data.get("project") or {}).get("project_uuid")
+        removed = _tomb.union(
+            _tomb.load(db, file_project_uuid), _tomb.from_file(data.get("tombstones")),
+        )
+        withdrawn_skipped = {"participants": 0, "dataset_rows": 0, "excerpts": 0,
+                             "notes": 0, "speakers": 0, "memos": 0, "code_applications": 0}
+        # The FILE ids (`_original_id`) of what a merge skipped, per kind — every child
+        # loop below asks these, never "did my parent fail to remap?", which a
+        # malformed file answers too. `dataset_values` holds only her answers' ids
+        # (small), and is NOT `remap["dataset_values"]` (#994's partial map).
+        skipped_file_ids: dict[str, set] = {
+            k: set() for k in (*withdrawn_skipped, "dataset_values")
+        }
+        _refuse_withdrawn_in_file(data, removed, import_mode)
+        # Only a merge SKIPS: its target already holds the redacted project, and a
+        # matched row keeps the target's fields. Every other mode inserts the file's
+        # own rows — her words, her speaker's name, canvas copies — so it refuses.
+        carried = removed   # every mode stores them under the project it produces
+        if import_mode != "merge":
+            removed = _tomb.Tombstones()
 
         # #1225: every document and recording is read IN FULL into a staging folder now —
         # before the safety copy (a damaged member is refused having written nothing) and
@@ -3683,6 +3956,7 @@ def import_project(
             # EXCEPT divergent codes the caller reconciled via code_mapping.
             _assert_merge_compatible(
                 db, data, code_mapping=code_mapping, target_project_id=target.id,
+                blanked_segment_uuids=removed.uuids.get(_tomb.SEGMENT_BLANKED, set()),
             )
             _safety_export_before_overwrite(
                 db, target, docs_dir, media_dir,
@@ -3730,9 +4004,11 @@ def import_project(
             # can be merged back later. Creates a new project; refuse if this identity
             # already exists locally — you should MERGE the file into it, not import a
             # second copy.
-            if not incoming_uuid:
+            if not incoming_uuid or _predates_uuid_spine(data):
                 raise ValueError(
-                    "This file has no stable identity; import it as a new project instead."
+                    "This file was exported by a version of Mixed Measures that predates "
+                    "merging, so a copy coded from it could not be merged back. Import it as "
+                    "an independent project, or ask for a new export from an updated copy."
                 )
             clash = db.query(Project).filter(Project.project_uuid == incoming_uuid).first()
             if clash is not None:
@@ -3743,7 +4019,12 @@ def import_project(
             project_name = pdata["name"]
             existing = db.query(Project).filter(Project.name == project_name).first()
             if existing:
-                project_name = f"{project_name} (coding copy)"
+                # #1321 — "(imported)", as a new import says: this is the dialog's DEFAULT
+                # *Import* now (D1), for a colleague's copy and for your own project moved
+                # to another computer alike, so "(coding copy)" named one use of it. Only
+                # a same-name project here adds it (one that shares the IDENTITY was
+                # refused above).
+                project_name = f"{project_name} (imported)"
             project_uuid_override = incoming_uuid
         else:
             # import_mode == "new": always a NEW project with a FRESH stable identity —
@@ -3772,10 +4053,13 @@ def import_project(
 
         # ── a2. Coders (Track J · J1/J3-2): map each incoming coder to a local roster
         #     coder so the code_applications user_id remap below preserves attribution.
-        #     A merge can carry an explicit `coder_mapping` (the D8 confirm UI's
-        #     decisions): "match" onto a chosen local coder, or "create" a new one
-        #     (suffix-on-collision). With no decision for a coder — and for every
-        #     non-merge import — fall back to the legacy silent name-match.
+        #     A caller can send an explicit `coder_mapping`: "match" onto a chosen local
+        #     coder, or "create" a new one (suffix-on-collision) — the merge's confirm
+        #     step answers every coder, a coding copy's import dialog at most one ("which
+        #     of these is you", #1352 D2). A coder with no decision takes the NO-ANSWER
+        #     rule: WHO first (`coder_by_identity`), then the name — never in a coding
+        #     copy, and in a merge only when the file carries no identity (D5); `new` and
+        #     `overwrite` keep the name rule (D6).
         #
         # 🔴 #1071 — every name in the FILE is reserved before any coder is suffixed.
         # A coder whose name is refused (#1034) is created under a suffix, and the
@@ -3784,7 +4068,52 @@ def import_project(
         # a model became one coder, or the insert died on the per-coder unique index.
         # `_file_coder_names` is shared with the merge preview, so the name the
         # confirm screen shows is the name the import writes.
-        file_coder_names = _file_coder_names(data.get("coders", []))
+        file_coder_names = _file_coder_names(db, data.get("coders", []))
+
+        def _create_coder(item: dict, overrides: dict) -> User:
+            """Insert a file coder as a NEW local coder, keeping its identity (#1352).
+
+            🔴 Not through `_add`: `User` carries a `uuid` column now, and `_add` would
+            uuid-MATCH it on a merge (an explicit *create* turned silently into a match)
+            and FRESH-STAMP it on a new import (a person re-minted on every copy). The
+            identity is kept unless a local coder already holds it — an explicit
+            "these are different people" over an identity match (a cloned database) —
+            and then the new coder gets one of its own.
+
+            ⚠️ A file with NO identity (an older build's) passes `uuid=None`, and the
+            column default mints one: SQLAlchemy fills an explicit None from a Python
+            default (measured, 2.0.49). A separate mint for that arm survived its mutant
+            — redundant, so it is gone (#941); the outcome is pinned by
+            `test_an_older_builds_file_has_no_identity_and_the_copy_mints_one`."""
+            file_uuid = _file_coder_uuid(item)
+            held = (
+                file_uuid is not None
+                and db.query(User.id).filter(User.uuid == file_uuid).first() is not None
+            )
+            obj = _build_entity(
+                User, _portable_coder_item(item),
+                {**overrides, "uuid": str(uuid.uuid4()) if held else file_uuid},
+            )
+            db.add(obj)
+            db.flush()
+            remap["coders"][item["_original_id"]] = obj.id
+            inserted_ids.setdefault("coders", set()).add(obj.id)
+            return obj
+
+        # 🔴 #1352 — a local coder whose identity is IN THE FILE is that file coder, so
+        # never a DIFFERENT file coder's by name. A colleague's copy holds the lead
+        # (recognised by identity) and the colleague, who is often also "Researcher", so
+        # in `new` / `overwrite` (D6's name rule) both landed on the lead — two people one
+        # coder, and where both had coded one passage with one code the per-coder unique
+        # index refused the import (a 500). Whatever the caller decided for the coder
+        # whose identity it is (D7's explicit create included): the namesake is still
+        # someone else. Computed before the loop — the file's order is not the order
+        # that matters.
+        claimed_coder_ids: set[int] = {
+            same.id for same in (coder_by_identity(db, c) for c in data.get("coders", []))
+            if same is not None
+        }
+
         # #1039 (d)'s consensus-coder refusal and #1034's decision refusals run in
         # `_preflight_import_refusals`, before anything is written (#1150 a).
         for item in data.get("coders", []):
@@ -3814,27 +4143,62 @@ def import_project(
                     report["coders_matched"] += 1
             elif decision and decision.get("action") == "create":
                 base = (decision.get("new_username") or name or "Coder").strip() or "Coder"
-                _add(
-                    User, _portable_coder_item(item),
+                _create_coder(
+                    item,
                     {
                         "username": unique_username(db, base, reserved),
                         "password_hash": None,
                         "is_admin": False,
                         "coder_type": normalize_coder_type(item.get("coder_type")),
                     },
-                    "coders",
                 )
                 if report is not None:
                     report["coders_created"] += 1
             else:
+                # 🔴 #1352 — WHO before WHAT NAME. A coder who came from this install, or
+                # who an earlier import created here, IS that coder: the lead's coder
+                # comes back from a coding copy, and a repeat merge finds the coder the
+                # first one created (#1246) — whatever name the copy gave them.
+                same = coder_by_identity(db, item)
+                if same is not None:
+                    remap["coders"][oid] = same.id
+                    if report is not None:
+                        report["coders_matched"] += 1
+                    continue
                 existing_coder = (
                     db.query(User).filter(User.username == name).first() if name else None
                 )
                 # 🔴 #1034: the silent name-match lands only on a coder of the SAME kind
-                # — and, for a machine, the same configuration. Every non-merge import
-                # (new, overwrite, coding copy) takes this path with no decision at all.
+                # — and, for a machine, the same configuration. A coder with no decision
+                # reaches it in every mode. Below, a coding copy drops the match, and a
+                # merge drops it between two KNOWN identities (D5); `new`/`overwrite`
+                # keep it (D6).
                 name_taken = existing_coder is not None
                 if existing_coder is not None and coder_match_refusal(item, existing_coder):
+                    existing_coder = None
+                # 🔴 #1352 — another file coder already IS this local coder (above).
+                if existing_coder is not None and existing_coder.id in claimed_coder_ids:
+                    existing_coder = None
+                # 🔴 #1352 — a CODING COPY lands nobody by name: its coders are, by the
+                # mode's meaning, other people than the one importing it, and every
+                # install's first coder is "Researcher". A system bucket ("Unattributed")
+                # is not a person and keeps its rule.
+                if (
+                    existing_coder is not None
+                    and import_mode in _NEVER_LAND_BY_NAME_MODES
+                    and normalize_coder_type(item.get("coder_type")) not in SYSTEM_CODER_TYPES
+                ):
+                    existing_coder = None
+                # 🔴 #1352 (D3) — a merge with no decision for this coder: two KNOWN and
+                # DIFFERENT identities are two coders. Only a file with no identity (an
+                # older build's) is still name-matched, as before.
+                if (
+                    existing_coder is not None
+                    and import_mode == "merge"
+                    and _file_coder_uuid(item) is not None
+                    and existing_coder.uuid is not None
+                    and existing_coder.uuid != _file_coder_uuid(item)
+                ):
                     existing_coder = None
                 if existing_coder:
                     remap["coders"][oid] = existing_coder.id
@@ -3864,15 +4228,38 @@ def import_project(
                     }
                     if name_taken:
                         overrides["username"] = unique_username(db, name, reserved)
-                    _add(User, _portable_coder_item(item), overrides, "coders")
+                    _create_coder(item, overrides)
                     if report is not None:
                         report["coders_created"] += 1
 
         # ── b–e. Simple FK-to-project entities ─────────────────────
         for item in data.get("participants", []):
+            # By the uuid the withdrawal removed, or by her identifier — unless the
+            # researcher reinstated THIS participant under it (D12).
+            if removed.withdrawn_participant(item.get("uuid"), item.get("identifier")):
+                skipped_file_ids["participants"].add(item["_original_id"])
+                withdrawn_skipped["participants"] += 1
+                continue
+            if import_mode == "merge" and item.get("uuid"):
+                # #1190 — a person deleted here and created again (by hand, a link, a
+                # conversation import) holds the identifier under a NEW uuid. The
+                # identifier is unique per project and is what linking matches people
+                # on, so it is the same person: match, never insert (it was a 500).
+                if _merge_uuid_match(db, Participant, item["uuid"], pid).first() is None:
+                    same = db.query(Participant).filter(
+                        Participant.project_id == pid,
+                        Participant.identifier == item.get("identifier"),
+                    ).first()
+                    if same is not None:
+                        remap["participants"][item["_original_id"]] = same.id
+                        continue
             _add(Participant, item, {"project_id": pid}, "participants")
 
         for item in data.get("speakers", []):
+            if removed.has(_tomb.SPEAKER, item.get("uuid")):
+                skipped_file_ids["speakers"].add(item["_original_id"])
+                withdrawn_skipped["speakers"] += 1
+                continue
             _add(Speaker, item, {
                 "project_id": pid,
                 "participant_id": _remap_id(remap, "participants", item.get("participant_id")),
@@ -4335,8 +4722,38 @@ def import_project(
                 ).all()
             }
 
+        # #1190 D13 — the people each MATCHED (pre-existing) dataset already holds a
+        # record for. A record deleted here comes back from an older copy (plain deletes
+        # have no tombstone, D15) still linked to its person; if that person is linked to
+        # ANOTHER record of the dataset now, `uq_dataset_rows_dataset_participant` made
+        # the merge a bare 500. Bounded by the target's rows in those datasets, which
+        # `managed_row_by_participant` above already reads for the managed kind.
+        occupied_links: set[tuple[int, int]] = set()
+        if import_mode == "merge" and row_items:
+            _matched_datasets = set(remap["datasets"].values()) - inserted_ids.get(
+                "datasets", set())
+            if _matched_datasets:
+                occupied_links = {
+                    (d, p) for d, p in db.execute(
+                        sa_select(DatasetRow.dataset_id, DatasetRow.participant_id)
+                        .where(
+                            DatasetRow.dataset_id.in_(_matched_datasets),
+                            DatasetRow.participant_id.isnot(None),
+                        )
+                    )
+                }
+        records_reinserted_unlinked = 0
+
         for item in row_items:
             incoming_uuid = item.get("uuid")
+            if removed.has(_tomb.DATASET_ROW, incoming_uuid) or (
+                item.get("participant_id") in skipped_file_ids["participants"]
+            ):
+                # #1190 — her record, by its own identity or by whose it is (a row the
+                # colleague made for her after the copy has a new uuid).
+                skipped_file_ids["dataset_rows"].add(item["_original_id"])
+                withdrawn_skipped["dataset_rows"] += 1
+                continue
             new_dataset_id = _remap_id(remap, "datasets", item.get("dataset_id"))
             new_participant_id = _remap_id(remap, "participants", item.get("participant_id"))
             if import_mode == "merge" and incoming_uuid in matched_row_ids:
@@ -4354,6 +4771,14 @@ def import_project(
                 # A participant this merge INSERTED has no row here yet, so the file's
                 # row is inserted for them. It cannot collide: the file's own index
                 # allows one row per participant, so at most one reaches this branch.
+            if import_mode == "merge" and new_participant_id is not None:
+                if (new_dataset_id, new_participant_id) in occupied_links:
+                    # D13 — re-inserted UNLINKED, and said: which of the two records is
+                    # the person's is the researcher's call, never this merge's.
+                    new_participant_id = None
+                    records_reinserted_unlinked += 1
+                else:
+                    occupied_links.add((new_dataset_id, new_participant_id))
             obj = _build_entity(DatasetRow, item, {
                 "dataset_id": new_dataset_id,
                 "participant_id": new_participant_id,
@@ -4436,6 +4861,11 @@ def import_project(
                 pending_values.clear()
 
         for item in value_items:
+            if item.get("row_id") in skipped_file_ids["dataset_rows"]:
+                # #1190 — a withdrawn person's answer. Its id is kept so the codings,
+                # quotes and notes on it are skipped BY NAME below.
+                skipped_file_ids["dataset_values"].add(item["_original_id"])
+                continue
             if item.get("column_id") in skipped_column_ids:
                 # #921 — the column was not imported (a matched managed dataset owns
                 # its own), so its cells have nowhere to land. Dropping them is the
@@ -4602,12 +5032,62 @@ def import_project(
             db.flush()
             realign_undeclared_numbers(db, column_ids=inserted_value_columns)
 
+        # 🔴 #1368 D4 — a computed column of the shape `[col] == "text"` that an OLDER
+        # version computed holds that version's values; it arrives marked out of date.
+        # The columns this import WROTE (#714): those it inserted, and a matched one
+        # that received cells from the file. The version is the MANIFEST's — the only
+        # place a file states it (the format version above does not move for this).
+        db.flush()
+        _mark_quoted_answer_columns_stale(
+            db,
+            set(inserted_ids.get("dataset_columns", set())) | inserted_value_columns,
+            manifest.get("app_version"),
+        )
+
         # ── p. Excerpts ────────────────────────────────────────────
+        # #1190 — a quote she withdrew, a NEW quote of a turn the withdrawal blanked
+        # (the colleague quoted her after the copy was made: its offsets point into
+        # words this project no longer has), or a quote of an answer of hers.
+        _blanked_file_seg_ids = {
+            sg["_original_id"] for sg in data.get("segments", [])
+            if removed.has(_tomb.SEGMENT_BLANKED, sg.get("uuid"))
+        } if removed.uuids.get(_tomb.SEGMENT_BLANKED) else set()
         for item in data.get("excerpts", []):
+            _seg = _remap_id(remap, "segments", item.get("segment_id"))
+            _val = _remap_id(remap, "dataset_values", item.get("dataset_value_id"))
+            if (
+                removed.has(_tomb.EXCERPT, item.get("uuid"))
+                or item.get("segment_id") in _blanked_file_seg_ids
+                or item.get("dataset_value_id") in skipped_file_ids["dataset_values"]
+            ):
+                skipped_file_ids["excerpts"].add(item["_original_id"])
+                withdrawn_skipped["excerpts"] += 1
+                continue
+            if import_mode == "merge" and _seg is not None and (
+                _merge_uuid_match(db, Excerpt, item.get("uuid"), pid).first() is None
+                if item.get("uuid") else True
+            ):
+                # #1190 — the same quote, deleted here and made again under a new uuid:
+                # the shape's unique index says it is ONE quote, so it is a duplicate
+                # (it was an IntegrityError, a 500), as a coding is.
+                _same = db.query(Excerpt.id).filter(
+                    Excerpt.segment_id == _seg,
+                    Excerpt.start_offset.is_(None) if item.get("start_offset") is None
+                    else Excerpt.start_offset == item.get("start_offset"),
+                    Excerpt.end_offset.is_(None) if item.get("end_offset") is None
+                    else Excerpt.end_offset == item.get("end_offset"),
+                    Excerpt.start_time.is_(None) if item.get("start_time") is None
+                    else Excerpt.start_time == item.get("start_time"),
+                    Excerpt.end_time.is_(None) if item.get("end_time") is None
+                    else Excerpt.end_time == item.get("end_time"),
+                ).first()
+                if _same is not None:
+                    remap["excerpts"][item["_original_id"]] = _same[0]
+                    continue
             _add(Excerpt, item, {
                 "project_id": pid,
-                "segment_id": _remap_id(remap, "segments", item.get("segment_id")),
-                "dataset_value_id": _remap_id(remap, "dataset_values", item.get("dataset_value_id")),
+                "segment_id": _seg,
+                "dataset_value_id": _val,
             }, "excerpts")
 
         # #687: a pre-v5 archive carries UTF-16 offsets. Repair AFTER the excerpts
@@ -4793,6 +5273,11 @@ def import_project(
         for item in data.get("code_applications", []):
             seg_id = _remap_id(remap, "segments", item.get("segment_id"))
             dv_id = _remap_id(remap, "dataset_values", item.get("dataset_value_id"))
+            if item.get("dataset_value_id") in skipped_file_ids["dataset_values"]:
+                # #1190 — a coding of a withdrawn person's answer: the withdrawal deletes
+                # those with the answer, so it is one of her items not brought back.
+                withdrawn_skipped["code_applications"] += 1
+                continue
             code_id = _remap_id(remap, "codes", item.get("code_id"))
             # Track J · J1: remap through the coders table so attribution survives (raw
             # user IDs are meaningless across instances; the coders section maps old->new).
@@ -4819,11 +5304,18 @@ def import_project(
 
         # ── r. Notes ───────────────────────────────────────────────
         for item in data.get("notes", []):
+            _note_val = _remap_id(remap, "dataset_values", item.get("dataset_value_id"))
+            if removed.has(_tomb.NOTE, item.get("uuid")) or (
+                item.get("dataset_value_id") in skipped_file_ids["dataset_values"]
+            ):
+                skipped_file_ids["notes"].add(item["_original_id"])
+                withdrawn_skipped["notes"] += 1
+                continue
             # Same verbatim-copy rule as segments above — every Note parent remaps.
             _add(Note, item, {
                 "conversation_id": _remap_id(remap, "conversations", item.get("conversation_id")),
                 "segment_id": _remap_id(remap, "segments", item.get("segment_id")),
-                "dataset_value_id": _remap_id(remap, "dataset_values", item.get("dataset_value_id")),
+                "dataset_value_id": _note_val,
                 "document_id": _remap_id(remap, "documents", item.get("document_id")),
                 "observation_id": _remap_id(remap, "observations", item.get("observation_id")),
                 "excerpt_id": _remap_id(remap, "excerpts", item.get("excerpt_id")),
@@ -4853,6 +5345,19 @@ def import_project(
                 deferred_memos.append(item)
                 continue
             entity_id = item.get("entity_id")
+            if entity_type == "dataset_row" and entity_id in skipped_file_ids["dataset_rows"]:
+                # #1190 — a memo the copy holds on a withdrawn person's record. Her
+                # record is not brought back, so the memo would land on nothing
+                # (`entity_id or 0` below). A memo the target already holds is
+                # matched by uuid and kept, as the withdrawal keeps it (reported).
+                if import_mode == "merge" and item.get("uuid") and _merge_uuid_match(
+                    db, Memo, item["uuid"], pid,
+                ).first() is not None:
+                    _add(Memo, item, {"project_id": pid}, "memos")
+                    continue
+                skipped_file_ids["memos"].add(item["_original_id"])
+                withdrawn_skipped["memos"] += 1
+                continue
             remap_table = MEMO_ENTITY_REMAP.get(entity_type)
             if remap_table and entity_id is not None:
                 entity_id = _remap_id(remap, remap_table, entity_id, f"memo entity_type={entity_type}")
@@ -5222,6 +5727,18 @@ def import_project(
         if data.get("canvas_themes") or pending_remap_count:
             db.flush()
 
+        # ── #1315: the R&C keys an older saver wrote on every tab ──
+        # A file from v1.4.0–1.5.7 carries Descriptives charts with `rc_view` /
+        # `compare_by`, which the canvas reads as markers (refused, or drawn as a
+        # group comparison), in each material AND each embed's own copy. Startup
+        # repairs what is already here; this repairs what an import brings in.
+        # AFTER the canvas remap above, which rewrites each theme's content from
+        # the file. 🔴 `inserted_ids`, never `remap` (#714): only rows this import
+        # wrote — a merge's target keeps its own (a merge blanks both today).
+        material_config.normalise_rc_keys(
+            db, scope=material_config.RcRepairScope.imported(pid, inserted_ids),
+        )
+
         # ── bb. ScratchpadEntries ──────────────────────────────────
         for item in data.get("scratchpad_entries", []):
             rid = item.get("resolved_into_id")
@@ -5357,6 +5874,20 @@ def import_project(
                         owner.media_offset_seconds = 0.0
                         owner.media_is_vbr = None
             db.flush()
+
+        # #1190 — carry every tombstone (this install's and the file's) under the
+        # identity the imported project now has, and say what was not brought back.
+        _result_uuid = db.query(Project.project_uuid).filter(Project.id == pid).scalar()
+        if _result_uuid and carried:
+            _tomb.write(db, _result_uuid, carried)
+        # Merge-only, like every count here: no other mode skips (each refuses a file
+        # holding her, `_refuse_withdrawn_in_file`), so `import_report` carries none.
+        _people = withdrawn_skipped["participants"]
+        _items = sum(v for k, v in withdrawn_skipped.items() if k != "participants")
+        if report is not None:
+            report["withdrawn_participants_skipped"] = _people
+            report["withdrawn_items_skipped"] = _items
+            report["records_reinserted_unlinked"] = records_reinserted_unlinked
 
         # #1225, phase 3: the staged tree lands when — and only if — the caller's
         # transaction commits; a rollback discards it. An overwrite also sets aside the

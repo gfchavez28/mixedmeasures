@@ -180,7 +180,7 @@ from ..services.computed_columns import (
     parse as parse_expression,
     validate as validate_expression,
     to_r_expression,
-    ColumnInfo,
+    column_info,
     evaluate_computed_column,
 )
 from ..services.audit import log_action
@@ -2973,17 +2973,15 @@ async def preview_computed_column(
         .filter(DatasetColumn.dataset_id == dataset_id)
         .all()
     )
-    col_infos = [
-        ColumnInfo(
-            id=c.id, code=c.column_code, text=c.column_text,
-            column_type=c.column_type.value if hasattr(c.column_type, 'value') else str(c.column_type),
-        )
-        for c in existing_cols
-    ]
+    col_infos = [column_info(c) for c in existing_cols]
     try:
         result = validate_expression(ast, col_infos)
     except ComputedExpressionError as e:
         return {"valid": False, "error": str(e), "warnings": [], "preview_rows": []}
+    # The SAVE evaluates with each column's missing rules
+    # (`evaluate_computed_column`); the preview must judge a cell the same way,
+    # or a declared code previews as a number and saves as missing.
+    preview_missing_rules = {ci.id: ci.missing_rules for ci in col_infos}
 
     from ..services.computed_columns import evaluate as eval_expr
 
@@ -3019,13 +3017,15 @@ async def preview_computed_column(
     # rows while `evaluate_computed_column` (no per-row catch) 400s the save.
     # Two surfaces, two answers, and the one the researcher sees first was the
     # reassuring one. The rows still render — a blank cell is honest — but the
-    # reason now rides the `warnings` channel the panel already displays, so
-    # preview and save agree that something is wrong.
+    # reason now rides the `warnings` channel, so preview and save agree that
+    # something is wrong. ⚠️ The dialog showed that channel only as a COUNT,
+    # "(1 warning)", until #1368, so this sentence reached nobody; it now lists
+    # each sentence inside `#formula-status` (`ColumnFormDialog.tsx`).
     eval_error: str | None = None
     for rid in row_ids:
         rd = row_data.get(rid, {})
         try:
-            vt, vn = eval_expr(result.resolved_ast, rd)
+            vt, vn = eval_expr(result.resolved_ast, rd, preview_missing_rules)
         except ComputedExpressionError as e:
             vt, vn = None, None
             if eval_error is None:
@@ -3091,15 +3091,7 @@ async def create_computed_column(
         .filter(DatasetColumn.dataset_id == dataset_id)
         .all()
     )
-    col_infos = [
-        ColumnInfo(
-            id=c.id,
-            code=c.column_code,
-            text=c.column_text,
-            column_type=c.column_type.value if hasattr(c.column_type, 'value') else str(c.column_type),
-        )
-        for c in existing_cols
-    ]
+    col_infos = [column_info(c) for c in existing_cols]
     try:
         result = validate_expression(ast, col_infos)
     except ComputedExpressionError as e:
@@ -3204,13 +3196,7 @@ async def update_computed_column(
         .filter(DatasetColumn.dataset_id == dataset_id, DatasetColumn.id != column_id)
         .all()
     )
-    col_infos = [
-        ColumnInfo(
-            id=c.id, code=c.column_code, text=c.column_text,
-            column_type=c.column_type.value if hasattr(c.column_type, 'value') else str(c.column_type),
-        )
-        for c in sibling_cols
-    ]
+    col_infos = [column_info(c) for c in sibling_cols]
     try:
         result = validate_expression(ast, col_infos, self_column_id=column_id)
     except ComputedExpressionError as e:

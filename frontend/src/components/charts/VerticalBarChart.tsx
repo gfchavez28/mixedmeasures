@@ -21,9 +21,11 @@ import {
   resolveColorPalette,
   resolveGroupColors,
   computeLogDomain,
+  undefinedGroupsNote,
 } from '@/lib/chart-data'
 import type { ChartColorPalette } from '@/lib/chart-data'
 import { useChartColors } from '@/lib/theme-context'
+import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
 import type {
   BarDatum,
   GroupedFrequencySection,
@@ -72,6 +74,10 @@ function VBarTooltip({ active, payload }: RechartsTooltipProps) {
   return (
     <div className="bg-mm-surface border rounded shadow-xs px-3 py-2 text-xs max-w-xs">
       <div className="font-medium mb-1 text-mm-text">{(d._fullLabel as string) || (d.label as string)}</div>
+      {/* #1363: a scalar row whose statistic is undefined carries `value: null`. */}
+      {d.value === null && (
+        <div className="text-mm-text-muted">{NO_VALUE} {undefinedTooltip(d._undefinedReason as string | null | undefined)}</div>
+      )}
       {payload.filter((e: RechartsPayloadEntry) => !String(e.dataKey).startsWith('_')).map((entry: RechartsPayloadEntry) => (
         <div key={entry.name} className="flex items-center gap-1.5">
           <span className="w-2 h-2 rounded-sm flex-shrink-0" style={{ backgroundColor: entry.fill || entry.color }} />
@@ -100,7 +106,12 @@ function GroupedVBarTooltip({ active, payload, label }: RechartsTooltipProps) {
             <span className="w-2 h-2 rounded-sm flex-shrink-0" style={{ backgroundColor: entry.fill || entry.color }} />
             <span>
               <span className="font-medium">{entry.name}: </span>
-              {typeof entry.value === 'number' ? entry.value.toFixed(DISPLAY_PRECISION) : entry.value}
+              {/* #1363: an undefined group reads `—` and why, never a blank or a 0. */}
+              {typeof entry.value === 'number'
+                ? entry.value.toFixed(DISPLAY_PRECISION)
+                : entry.value == null
+                  ? `${NO_VALUE} ${undefinedTooltip(d[`_undefinedReason_${entry.dataKey}`] as string | null | undefined)}`
+                  : entry.value}
               {n != null && <span className="text-mm-text-faint ml-1">(n={n})</span>}
             </span>
           </div>
@@ -167,7 +178,19 @@ function renderXTick(
 ) {
   const { x, y, payload } = props as { x: number; y: number; payload: { value: string } }
   const lines = wrapLabel(payload.value, 20, 2)
-  const fullLabel = (opts?.chartData?.find((d) => d.label === payload.value)?._fullLabel as string) || payload.value
+  const row = opts?.chartData?.find((d) => d.label === payload.value)
+  const baseLabel = (row?._fullLabel as string) || payload.value
+  // #1363: a scalar row with an undefined statistic draws no bar and so gets no
+  // data label; it marks itself above its tick instead. `=== null` on purpose:
+  // grouped rows have no `value` key at all (undefined), and are not this case.
+  const isUndefined = row != null && row.value === null
+  // …and a grouped row lists the groups it has no value for.
+  const undefinedGroups = (row?._undefinedGroups as { group: string; reason: string | null }[] | undefined) ?? []
+  const fullLabel = isUndefined
+    ? `${baseLabel}: ${undefinedTooltip(row._undefinedReason as string | null | undefined)}`
+    : undefinedGroups.length > 0
+      ? `${baseLabel} — ${undefinedGroups.map(g => `${g.group}: ${undefinedTooltip(g.reason)}`).join('; ')}`
+      : baseLabel
 
   let nLine: React.ReactNode = null
   if (opts?.showVariableN && opts.showVariableN !== 'off' && opts.chartData) {
@@ -186,6 +209,11 @@ function renderXTick(
   return (
     <g transform={`translate(${x},${y})`}>
       <title>{fullLabel}</title>
+      {(isUndefined || undefinedGroups.length > 0) && (
+        <text data-undefined-statistic="" x={0} y={-10} textAnchor="middle" fill={colors.textMuted} style={{ fontSize: fmt.dataLabelFontSize }}>
+          {isUndefined ? NO_VALUE : undefinedGroups.map(g => `${g.group} ${NO_VALUE}`).join(' · ')}
+        </text>
+      )}
       {lines.map((line: string, i: number) => (
         <text key={i} x={0} y={10 + i * (fmt.axisFontSize + 2)} textAnchor="end" transform="rotate(-35)" fill={colors.text} style={{ fontSize: fmt.axisFontSize }}>
           {line}
@@ -255,13 +283,15 @@ export default function VerticalBarChart({
     const chartData = frequencyData.map(d => ({
       label: d.label,
       _fullLabel: d.label,
+      // #1412: `d.value` is null when nobody answered — `renderXTick` marks it.
       value: display === 'count' ? (d.count ?? 0) : d.value,
+      _undefinedReason: d.undefinedReason,
       n: d.n,
       _suffix: display === 'count' ? '' : '%',
       // #522: one series, one colour — the palette's first hue, so the palette
       // picker still chooses WHICH colour without reintroducing six of them.
       fill: histogram ? histogramFill : (barColors[d.label] || '#3b82f6'),
-      _ciError: showCI && d.ciLower != null && d.ciUpper != null
+      _ciError: showCI && d.value != null && d.ciLower != null && d.ciUpper != null
         ? [d.value - d.ciLower, d.ciUpper - d.value]
         : undefined,
     }))
@@ -269,7 +299,13 @@ export default function VerticalBarChart({
     const dataLabel = makeVerticalDataLabel(fmt, display === 'count' ? '' : '%', colors)
 
     return (
-      <ChartFigure label="Vertical bar chart">
+      // #1408: a histogram is captioned as one, with its bin count — this branch
+      // is the only one that renders `histogram`.
+      <ChartFigure
+        label={histogram ? 'Histogram' : 'Vertical bar chart'}
+        count={histogram ? chartData.length : undefined}
+        countNoun="bins"
+      >
         <ResponsiveContainer width="100%" height={360}>
           {/* #522: `barCategoryGap={0}` AND no `barSize` — BOTH are needed, and
               measurement is what settled the order. A code read blamed recharts'
@@ -333,16 +369,18 @@ export default function VerticalBarChart({
       label: d.label,
       _fullLabel: d.fullLabel || d.label,
       value: d.value,
+      _undefinedReason: d.undefinedReason,
       n: d.n,
       _suffix: suffix,
       fill: d.color || '#3b82f6',
-      _ciError: showCI && d.ciLower != null && d.ciUpper != null
+      _ciError: showCI && d.value != null && d.ciLower != null && d.ciUpper != null
         ? [d.value - d.ciLower, d.ciUpper - d.value]
         : undefined,
     }))
-    const chartData = isLog ? allData.filter(d => d.value > 0) : allData
+    // #1363: an undefined row stays on the axis (marked) and is not a value "≤ 0".
+    const chartData = isLog ? allData.filter(d => d.value == null || d.value > 0) : allData
     const logExcluded = allData.length - chartData.length
-    const yDomain = buildYDomain(false, chartData.map(d => d.value))
+    const yDomain = buildYDomain(false, chartData.flatMap(d => (d.value == null ? [] : [d.value])))
     const dataLabel = makeVerticalDataLabel(fmt, suffix, colors)
 
     return (
@@ -398,9 +436,16 @@ export default function VerticalBarChart({
         label: section.metricName,
         _fullLabel: section.metricFullLabel || section.metricName,
       }
+      const undefinedGroups: { group: string; reason: string | null }[] = []
+      entry._undefinedGroups = undefinedGroups
       for (const g of section.groups) {
         entry[g.groupValue] = g.value
+        entry[`_undefinedReason_${g.groupValue}`] = g.undefinedReason
         entry[`_n_${g.groupValue}`] = g.n
+        if (g.value == null) { // #1363: no bar, no interval, no axis pull
+          undefinedGroups.push({ group: g.groupValue, reason: g.undefinedReason ?? null })
+          continue
+        }
         if (showCI && g.ciLower != null && g.ciUpper != null) {
           entry[`_ciError_${g.groupValue}`] = [g.value - g.ciLower, g.ciUpper - g.value]
         }
@@ -409,7 +454,7 @@ export default function VerticalBarChart({
       }
       return entry
     })
-    const logExcludedScalar = isLog ? groupedScalarData.reduce((acc, s) => acc + s.groups.filter(g => g.value <= 0).length, 0) : 0
+    const logExcludedScalar = isLog ? groupedScalarData.reduce((acc, s) => acc + s.groups.filter(g => g.value != null && g.value <= 0).length, 0) : 0
     const yDomain = buildYDomain(false, isLog ? allValues : undefined)
 
     return (
@@ -475,15 +520,31 @@ export default function VerticalBarChart({
       const entry: ChartDataRow = { label, _fullLabel: label }
       for (const g of groupedFrequencyData.groups) {
         const bar = g.bars.find(b => b.label === label)
-        entry[g.groupValue] = display === 'count' ? (bar?.count ?? 0) : (bar?.value ?? 0)
+        // #1412: a group with no result here, or nobody answering, draws NO
+        // bar (null); a group with answers that chose none of this is a real 0.
+        entry[g.groupValue] = bar == null && g.bars.length === 0
+          ? null
+          : display === 'count' ? (bar?.count ?? 0) : (g.undefinedStatistic ? null : (bar?.value ?? 0))
+        entry[`_undefinedReason_${g.groupValue}`] = g.undefinedReason
         entry[`_n_${g.groupValue}`] = bar?.n
       }
       return entry
     })
     const yDomain = buildYDomain(display !== 'count')
+    // #1412 — the groups nobody answered, said once in text above the bars
+    // (a per-tick mark would repeat on every category and sit on another
+    // group's bar — #1430).
+    const undefinedNote = display === 'count' ? null : undefinedGroupsNote(
+      groupedFrequencyData.groups
+        .filter(g => g.undefinedStatistic)
+        .map(g => ({ group: g.groupValue, reason: g.undefinedReason })),
+    )
 
     return (
       <ChartFigure label="Vertical grouped frequency bar chart">
+        {undefinedNote && (
+          <div data-undefined-statistic="" className="text-xs text-mm-text-muted mb-1">{undefinedNote}</div>
+        )}
         <ResponsiveContainer width="100%" height={360}>
           <BarChart data={chartData} margin={{ top: topMargin, right: 20, bottom: 80, left: 20 }}>
             <CartesianGrid stroke={colors.grid} vertical={false} />

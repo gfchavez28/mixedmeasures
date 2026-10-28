@@ -1,5 +1,52 @@
 import api from './client'
 
+// ── Text edits and their quotes (#1319) ──────────────────────────────────────
+// Mirrors `schemas/segment.py::TextEditPlanResponse`. Offsets are CODE POINTS
+// (#687) and every quote carries its own words, so a client never slices.
+
+/** What a text edit does to one char-range quote — the planner's four outcomes:
+ *  followed automatically, or one of the three D5 shows before saving. */
+export type TextEditOutcome = 'silent' | 'edge' | 'straddle' | 'gone'
+
+export interface TextEditQuote {
+  excerpt_id: number
+  outcome: TextEditOutcome
+  old_start: number
+  old_end: number
+  new_start: number | null
+  new_end: number | null
+  old_text: string
+  new_text: string | null
+  has_note: boolean
+  /** Apply report only: this edit deleted the quote. */
+  removed: boolean
+  /** Apply report only: the request placed it (`excerpt_offsets`). */
+  explicit: boolean
+}
+
+/** The preview's plan, or what an apply did. `text` is the text as STORED. */
+export interface TextEditPlan {
+  text: string
+  quotes: TextEditQuote[]
+  needs_confirmation: boolean
+  /** Excerpt-id groups that would share one span if every flagged quote were kept. */
+  collisions: number[][]
+  /** The changed stretch was too long to follow word by word. */
+  capped: boolean
+}
+
+export interface ExcerptOffsetsPayload {
+  excerpt_id: number
+  start_offset: number
+  end_offset: number
+}
+
+/** The request's answer for the quotes a text edit cannot follow on its own. */
+export interface TextEditAnswer {
+  remove_excerpt_ids?: number[]
+  excerpt_offsets?: ExcerptOffsetsPayload[]
+}
+
 // Segment types
 export interface SegmentNoteInfo {
   id: number
@@ -90,8 +137,22 @@ export const segmentsApi = {
     api.post<{ restored_segments: Segment[]; restored_count: number }>(
       `/conversations/${conversationId}/segments/${segmentId}/unmerge`
     ).then(res => res.data),
-  updateSegment: (conversationId: number, segmentId: number, data: { text?: string; speaker_id?: number }) =>
-    api.patch<Segment>(`/conversations/${conversationId}/segments/${segmentId}`, data).then(res => res.data),
+  /** A TEXT edit carries the turn's quotes (#1319): send the answer the preview's
+   *  dialog produced, or the server refuses (409) an edit that moves a quote it was
+   *  not told about. `quote_rebase` is null for a speaker-only change. */
+  updateSegment: (
+    conversationId: number,
+    segmentId: number,
+    data: { text?: string; speaker_id?: number } & TextEditAnswer,
+  ) =>
+    api.patch<Segment & { quote_rebase: TextEditPlan | null }>(
+      `/conversations/${conversationId}/segments/${segmentId}`, data,
+    ).then(res => res.data),
+  /** #1319 — what saving `text` would do to the turn's quotes. Writes nothing. */
+  previewTextEdit: (conversationId: number, segmentId: number, text: string) =>
+    api.post<TextEditPlan>(
+      `/conversations/${conversationId}/segments/${segmentId}/edit-preview`, { text },
+    ).then(res => res.data),
   split: (conversationId: number, ranges: { segment_id: number; start_offset: number; end_offset: number }[]) =>
     api.post<{ new_segments: Segment[]; deleted_segment_ids: number[] ; quote_notes_stayed?: number }>(
       `/conversations/${conversationId}/segments/split`,

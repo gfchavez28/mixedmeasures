@@ -5,8 +5,6 @@ passed in. Heavy dependencies (python-docx, pdfminer.six) are lazy-imported.
 """
 import logging
 import re
-import html
-import zipfile
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -33,7 +31,11 @@ class ExtractedDocument:
     paragraphs: list[ExtractedParagraph] = field(default_factory=list)
     images: list[ExtractedImage] = field(default_factory=list)
     page_count: int | None = None
-    extraction_warning: str | None = None
+    # Each is a sentence the import screen shows as written; `segment_document`
+    # prepends them all, in order, on the preview AND the real import (#382,
+    # #1318). A list because one document can owe the researcher more than one
+    # (parts not imported, and tracked changes accepted).
+    extraction_warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -52,15 +54,16 @@ class SegmentationPreview:
     warnings: list[str] = field(default_factory=list)
 
 
-def _strip_html(text: str) -> str:
-    """Strip HTML-like tags and decode entities as defense-in-depth."""
-    cleaned = re.sub(r'<[^>]+>', '', text)
-    return html.unescape(cleaned)
-
-
 def _clean_text(text: str) -> str:
-    """Clean extracted text: strip HTML, normalize whitespace."""
-    text = _strip_html(text)
+    """Clean extracted text: normalize non-breaking spaces, trim.
+
+    \u26a0\ufe0f The text is kept VERBATIM otherwise (#1317). This used to strip anything
+    between `<` and `>` and decode HTML entities "as defense-in-depth", which
+    deleted participants' words \u2014 "I scored <5 on one and >9 on the other" lost
+    "<5 on one and >", and transcription marks such as `<laughs>` vanished \u2014
+    while defending nothing: no surface renders document text as HTML (React
+    escapes it, and the canvas HTML export escapes `& < >`).
+    """
     text = text.replace('\u00a0', ' ')
     text = text.strip()
     return text
@@ -316,46 +319,429 @@ def _heading_level_from_size(font_size: float, body_size: float) -> int | None:
 # Extraction
 # ---------------------------------------------------------------------------
 
-def _scan_docx_inline_images(para, doc, images, position_after_paragraph) -> None:
-    """Append any inline PNG/JPEG images embedded in a DOCX paragraph's runs.
+# ---------------------------------------------------------------------------
+# DOCX: ONE walk of the body (#1318)
+# ---------------------------------------------------------------------------
+#
+# 🔴 `_docx_body_walk` is the one reader of a Word document's text and
+# pictures. Never read `doc.paragraphs`, `para.text`, `para.runs` or
+# `doc.tables`: they see only the body's DIRECT `w:p` children and each
+# paragraph's DIRECT `w:r | w:hyperlink`, so everything Word WRAPS — a tracked
+# insertion, a content control, a simple field, a smart tag, a text box — was
+# dropped without a word (rule: the internal design notes).
+#
+# The walk parses nothing new: every element it reads is the tree python-docx
+# already built (`resolve_entities=False`), and lxml's 256-level depth limit
+# bounds its recursion.
 
-    #403: this runs for *every* paragraph including text-less ones. Word (and
-    python-docx's ``add_picture``) commonly place an image in its own paragraph
-    with no text, so the old gating on paragraph text dropped the common case.
-    Same family as #382 (tables): the DOCX path under-extracted vs the PDF path.
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+_M = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
+_A_BLIP = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
+_R_EMBED = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+
+_W_P, _W_TBL, _W_SDT, _W_SDT_CONTENT = _W + "p", _W + "tbl", _W + "sdt", _W + "sdtContent"
+_W_R, _W_T, _W_VAL = _W + "r", _W + "t", _W + "val"
+_MC_ALTERNATE_CONTENT = _MC + "AlternateContent"
+_W_TXBX_CONTENT = _W + "txbxContent"
+
+# D15: tracked changes are imported AS IF ALL WERE ACCEPTED — inserted and
+# moved-TO text kept, deleted and moved-FROM text left out (a move writes the
+# same words at both ends, so keeping both doubles them).
+_TRACKED_KEPT = frozenset({_W + "ins", _W + "moveTo"})
+_TRACKED_LEFT_OUT = frozenset({_W + "del", _W + "moveFrom"})
+# Inline wrappers whose children are ordinary paragraph content. python-docx
+# read `w:hyperlink` itself; the others it never opened.
+_INLINE_WRAPPERS = frozenset({_W + t for t in ("hyperlink", "smartTag", "customXml", "dir", "bdo")})
+_EQUATIONS = frozenset({_M + "oMath", _M + "oMathPara"})
+
+
+@dataclass
+class DocxCounts:
+    """What the walk met and did NOT import, plus the tracked changes it
+    accepted (#1318). `_docx_warnings` turns these into the import's sentences.
+    A table is counted when it holds something (text or a picture); one that
+    is empty loses nothing."""
+    tables: int = 0
+    comments: int = 0
+    footnotes: int = 0
+    endnotes: int = 0
+    equations: int = 0
+    embedded_documents: int = 0            # `w:altChunk`
+    headers_with_text: int = 0             # visible text OUTSIDE fields only
+    footers_with_text: int = 0
+    tracked_changes: int = 0
+
+
+@dataclass
+class _ParagraphContent:
+    pieces: list[str] = field(default_factory=list)
+    blips: list = field(default_factory=list)     # `a:blip`, in document order
+    boxes: list = field(default_factory=list)     # `w:txbxContent`, emitted AFTER the paragraph
+
+
+def _sdt_is_skipped(sdt) -> bool:
+    """A content control showing its PLACEHOLDER ("Click or tap here to enter
+    text.") holds no one's words, and a Table of Contents control holds a copy
+    of the headings — neither is imported."""
+    pr = sdt.find(_W + "sdtPr")
+    if pr is None:
+        return False
+    if pr.find(_W + "showingPlcHdr") is not None:
+        return True
+    gallery = pr.find(f"{_W}docPartObj/{_W}docPartGallery")
+    return gallery is not None and (gallery.get(_W_VAL) or "").lower() == "table of contents"
+
+
+def _first_branch(alternate_content):
+    """`mc:AlternateContent` carries the SAME content more than once (a modern
+    `mc:Choice` and a VML `mc:Fallback`); only the first branch is read, or a
+    text box is imported twice."""
+    return next(iter(alternate_content), None)
+
+
+def _page_break_before(p) -> bool:
+    """`w:pPr/w:pageBreakBefore`, read as python-docx's `page_break_before`
+    did (an absent `w:val` means on)."""
+    ppr = p.find(_W + "pPr")
+    el = ppr.find(_W + "pageBreakBefore") if ppr is not None else None
+    return el is not None and el.get(_W_VAL) in (None, "1", "true", "on")
+
+
+def _paragraph_style_id(p) -> str | None:
+    ppr = p.find(_W + "pPr")
+    style = ppr.find(_W + "pStyle") if ppr is not None else None
+    return style.get(_W_VAL) if style is not None else None
+
+
+class _DocxWalk:
+    """One pass over a container of block-level content, in document order.
+
+    `fields_visible=False` is the header/footer probe's setting: a footer
+    holding only a PAGE field has no text of its own to report.
     """
-    for run in para.runs:
-        if run._element is None:
+
+    def __init__(self, doc, *, fields_visible: bool = True):
+        self.doc = doc
+        self.fields_visible = fields_visible
+        self.paragraphs: list[ExtractedParagraph] = []
+        self.images: list[ExtractedImage] = []
+        self.counts = DocxCounts()
+        # Complex-field state, document-wide (a bare TOC field's result spans
+        # paragraphs): one entry per open field, "instr" until its `separate`,
+        # then "result".
+        self._fields: list[str] = []
+        # Style id -> heading level. `para.style` costs ~1 ms (python-docx
+        # searches every style per call): 26 s on 20,000 paragraphs, against the
+        # client's 30 s timeout. Cached, the same answer costs one lookup per
+        # distinct style.
+        self._heading_by_style: dict[str | None, int | None] = {}
+
+    # -- block level ----------------------------------------------------------
+
+    def blocks(self, container) -> None:
+        for child in container:
+            tag = child.tag
+            if tag == _W_P:
+                self.paragraph(child)
+            elif tag == _W_TBL:
+                if _table_holds_content(self.doc, child):
+                    self.counts.tables += 1
+            elif tag == _W_SDT:
+                if not _sdt_is_skipped(child):
+                    content = child.find(_W_SDT_CONTENT)
+                    if content is not None:
+                        self.blocks(content)
+            elif tag == _W + "customXml":
+                self.blocks(child)
+            elif tag == _MC_ALTERNATE_CONTENT:
+                branch = _first_branch(child)
+                if branch is not None:
+                    self.blocks(branch)
+            elif tag == _W + "altChunk":
+                self.counts.embedded_documents += 1
+
+    def paragraph(self, p) -> None:
+        content = self.paragraph_content(p)
+        text = _clean_text("".join(content.pieces))
+        if text:
+            self.paragraphs.append(ExtractedParagraph(
+                text=text,
+                heading_level=self._heading_level(p),
+                page_break_before=_page_break_before(p),
+            ))
+        # #403: pictures count on EVERY paragraph, including text-less ones
+        # (Word puts a picture in its own paragraph). Position after the last
+        # kept paragraph, clamped like the PDF path so an image preceding any
+        # text maps to 0 rather than a negative index.
+        position = max(0, len(self.paragraphs) - 1)
+        for blip in content.blips:
+            self._add_image(blip, position)
+        # A text box is its own block content, imported once, AFTER the
+        # paragraph that anchors it — never spliced into that paragraph's text.
+        for box in content.boxes:
+            self.blocks(box)
+
+    def paragraph_content(self, p) -> _ParagraphContent:
+        content = _ParagraphContent()
+        self._inline(p, content)
+        # A field instruction never spans a paragraph mark in Word's output:
+        # close one left open here, or a malformed `begin` hides the rest of
+        # the document.
+        if "instr" in self._fields:
+            del self._fields[self._fields.index("instr"):]
+        return content
+
+    # -- paragraph content ----------------------------------------------------
+
+    def _inline(self, el, content: _ParagraphContent) -> None:
+        for child in el:
+            tag = child.tag
+            if tag == _W_R:
+                self._run(child, content)
+            elif tag in _TRACKED_KEPT:
+                self.counts.tracked_changes += 1
+                self._inline(child, content)
+            elif tag in _TRACKED_LEFT_OUT:
+                self.counts.tracked_changes += 1
+            elif tag in _INLINE_WRAPPERS:
+                self._inline(child, content)
+            elif tag == _W + "fldSimple":
+                # A simple field's children ARE its result.
+                if self.fields_visible:
+                    self._inline(child, content)
+            elif tag == _W_SDT:
+                if not _sdt_is_skipped(child):
+                    inner = child.find(_W_SDT_CONTENT)
+                    if inner is not None:
+                        self._inline(inner, content)
+            elif tag == _MC_ALTERNATE_CONTENT:
+                branch = _first_branch(child)
+                if branch is not None:
+                    self._inline(branch, content)
+            elif tag in _EQUATIONS:
+                self.counts.equations += 1
+
+    def _visible(self) -> bool:
+        if self.fields_visible:
+            return "instr" not in self._fields
+        return not self._fields
+
+    def _run(self, r, content: _ParagraphContent) -> None:
+        """A run's content, mapped as python-docx's `Run.text` mapped it: `w:t`
+        as written · `w:tab`/`w:ptab` -> tab · a line break and `w:cr` -> newline
+        · a page or column break -> nothing · `w:noBreakHyphen` -> "-"; a soft
+        hyphen and a symbol are dropped."""
+        for child in r:
+            tag = child.tag
+            if tag == _W + "fldChar":
+                kind = child.get(_W + "fldCharType")
+                if kind == "begin":
+                    self._fields.append("instr")
+                elif kind == "separate" and self._fields:
+                    self._fields[-1] = "result"
+                elif kind == "end" and self._fields:
+                    self._fields.pop()
+                continue
+            if not self._visible():
+                continue
+            if tag == _W_T:
+                content.pieces.append(child.text or "")
+            elif tag == _W + "tab" or tag == _W + "ptab":
+                content.pieces.append("\t")
+            elif tag == _W + "br":
+                kind = child.get(_W + "type") or "textWrapping"
+                content.pieces.append("\n" if kind == "textWrapping" else "")
+            elif tag == _W + "cr":
+                content.pieces.append("\n")
+            elif tag == _W + "noBreakHyphen":
+                content.pieces.append("-")
+            elif tag == _W + "ruby":
+                # The base text only; `w:rt` is the pronunciation guide above it.
+                base = child.find(_W + "rubyBase")
+                if base is not None:
+                    self._inline(base, content)
+            elif tag == _W + "footnoteReference":
+                self.counts.footnotes += 1
+            elif tag == _W + "endnoteReference":
+                self.counts.endnotes += 1
+            elif tag == _W + "drawing" or tag == _W + "pict":
+                self._graphic(child, content)
+            elif tag == _MC_ALTERNATE_CONTENT:
+                branch = _first_branch(child)
+                if branch is not None:
+                    self._run(branch, content)
+
+    def _graphic(self, el, content: _ParagraphContent) -> None:
+        """Pictures and text boxes inside a drawing, in document order. The
+        descent STOPS at a text box: a picture inside one belongs to the box's
+        own paragraph, which the walk reaches as block content — a descendant
+        search (`.//w:drawing`) found it once per enclosing drawing."""
+        for child in el:
+            tag = child.tag
+            if tag == _W_TXBX_CONTENT:
+                content.boxes.append(child)
+            elif tag == _A_BLIP:
+                content.blips.append(child)
+            elif tag == _MC_ALTERNATE_CONTENT:
+                branch = _first_branch(child)
+                if branch is not None:
+                    self._graphic(branch, content)
+            else:
+                self._graphic(child, content)
+
+    # -- what a paragraph carries ---------------------------------------------
+
+    def _heading_level(self, p) -> int | None:
+        style_id = _paragraph_style_id(p)
+        if style_id in self._heading_by_style:
+            return self._heading_by_style[style_id]
+        from docx.enum.style import WD_STYLE_TYPE
+        style = self.doc.part.get_style(style_id, WD_STYLE_TYPE.PARAGRAPH)
+        name = (style.name or "").lower() if style else ""
+        level = next((n for n in range(1, 7) if name == f"heading {n}"), None)
+        self._heading_by_style[style_id] = level
+        return level
+
+    def _add_image(self, blip, position: int) -> None:
+        r_id = blip.get(_R_EMBED)
+        if not r_id:
+            return
+        try:
+            image_part = self.doc.part.related_parts.get(r_id)
+            if not image_part:
+                return
+            ct = (image_part.content_type or "").lower()
+            if "png" in ct:
+                fmt = "png"
+            elif "jpeg" in ct or "jpg" in ct:
+                fmt = "jpeg"
+            else:
+                return  # Skip non-PNG/JPEG (e.g. SVG)
+            self.images.append(ExtractedImage(
+                data=image_part.blob,
+                format=fmt,
+                position_after_paragraph=position,
+            ))
+        except Exception:
+            logger.debug("Skipping unreadable DOCX image", exc_info=True)
+
+
+def _has_visible_text(doc, element, *, fields_visible: bool) -> bool:
+    """Does any paragraph anywhere under `element` hold text the walk would
+    read? A probe with its own field state, so it never disturbs the body's."""
+    probe = _DocxWalk(doc, fields_visible=fields_visible)
+    return any(
+        _clean_text("".join(probe.paragraph_content(p).pieces))
+        for p in element.iter(_W_P)
+    )
+
+
+def _table_holds_content(doc, tbl) -> bool:
+    return (
+        _has_visible_text(doc, tbl, fields_visible=True)
+        or next(tbl.iter(_W + "drawing"), None) is not None
+    )
+
+
+def _count_outside_the_body(doc, counts: DocxCounts) -> None:
+    """Comments, headers and footers live in parts of their own, which
+    python-docx has already parsed. Footnotes and endnotes arrive as unparsed
+    blobs, so the walk counts their reference marks in the body instead."""
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+
+    seen: set[int] = set()
+    for rel in doc.part.rels.values():
+        if rel.is_external or rel.reltype not in (RT.COMMENTS, RT.HEADER, RT.FOOTER):
             continue
-        for drawing in run._element.findall(
-            './/{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing'
-        ):
-            for blip in drawing.findall(
-                './/{http://schemas.openxmlformats.org/drawingml/2006/main}blip'
-            ):
-                r_id = blip.get(
-                    '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed'
-                )
-                if not r_id:
-                    continue
-                try:
-                    image_part = doc.part.related_parts.get(r_id)
-                    if not image_part:
-                        continue
-                    ct = (image_part.content_type or "").lower()
-                    if "png" in ct:
-                        fmt = "png"
-                    elif "jpeg" in ct or "jpg" in ct:
-                        fmt = "jpeg"
-                    else:
-                        continue  # Skip non-PNG/JPEG (e.g. SVG)
-                    images.append(ExtractedImage(
-                        data=image_part.blob,
-                        format=fmt,
-                        position_after_paragraph=position_after_paragraph,
-                    ))
-                except Exception:
-                    logger.debug("Skipping unreadable DOCX image", exc_info=True)
+        part = rel.target_part
+        element = getattr(part, "element", None)   # a blob-only part has none
+        if element is None or id(part) in seen:
+            continue
+        seen.add(id(part))
+        if rel.reltype == RT.COMMENTS:
+            counts.comments += len(element.findall(_W + "comment"))
+        elif _has_visible_text(doc, element, fields_visible=False):
+            if rel.reltype == RT.HEADER:
+                counts.headers_with_text += 1
+            else:
+                counts.footers_with_text += 1
+
+
+def _docx_body_walk(doc) -> tuple[list[ExtractedParagraph], list[ExtractedImage], DocxCounts]:
+    """The paragraphs, the pictures and the counts of what was not imported."""
+    walk = _DocxWalk(doc)
+    try:
+        walk.blocks(doc.element.body)
+    except (ValueError, KeyError, AttributeError, TypeError) as e:
+        if not walk.paragraphs:
+            raise ValueError(
+                "This Word document could not be processed. "
+                "The file may use an unsupported format or contain unexpected structure."
+            )
+        logger.warning(
+            "Partial DOCX extraction (recovered %d paragraphs): %s", len(walk.paragraphs), e
+        )
+
+    # Guarded so a malformed header or comments part never breaks an
+    # otherwise-successful extraction.
+    try:
+        _count_outside_the_body(doc, walk.counts)
+    except Exception:
+        logger.debug("Counting the parts outside the body failed", exc_info=True)
+
+    return walk.paragraphs, walk.images, walk.counts
+
+
+def _counted(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def _and_list(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+TRACKED_CHANGES_WARNING = (
+    "This document has tracked changes. It was imported as if all of them were "
+    "accepted: inserted text kept, deleted text left out. To import another "
+    "version, accept or reject the changes in your word processor and import again."
+)
+
+
+def _docx_warnings(counts: DocxCounts) -> list[str]:
+    """The sentences the import screen shows for a Word document (D13–D15)."""
+    left_out = [
+        _counted(n, one, many)
+        for n, one, many in (
+            (counts.tables, "table", "tables"),
+            (counts.comments, "comment", "comments"),
+            (counts.footnotes, "footnote", "footnotes"),
+            (counts.endnotes, "endnote", "endnotes"),
+            (counts.equations, "equation", "equations"),
+            (counts.embedded_documents, "embedded document", "embedded documents"),
+        )
+        if n
+    ]
+    places = []
+    if counts.headers_with_text:
+        places.append("header" if counts.headers_with_text == 1 else "headers")
+    if counts.footers_with_text:
+        places.append("footer" if counts.footers_with_text == 1 else "footers")
+    if places:
+        left_out.append("the text in its " + " and ".join(places))
+
+    warnings: list[str] = []
+    if left_out:
+        how = "move them into the main text"
+        if counts.tables:
+            how += " (convert tables to text)"
+        warnings.append(
+            f"Some of this document was not imported: {_and_list(left_out)}. "
+            f"Only the main text is imported. To code any of these, {how} and import again."
+        )
+    if counts.tracked_changes:
+        warnings.append(TRACKED_CHANGES_WARNING)
+    return warnings
 
 
 def extract_text_from_docx(file_bytes: bytes) -> ExtractedDocument:
@@ -365,78 +751,26 @@ def extract_text_from_docx(file_bytes: bytes) -> ExtractedDocument:
 
     try:
         doc = docx.Document(BytesIO(file_bytes))
-    except (zipfile.BadZipFile, KeyError, ValueError):
+    except Exception:
+        # #1372 — every way an uploaded file can fail to OPEN is the same answer
+        # to the researcher, so this is the PDF arm's catch-all, not a list. A
+        # list was how this answered 500: python-docx parses EVERY XML part as
+        # it opens (content types, relationships, styles, headers, comments), so
+        # lxml's XMLSyntaxError — a damaged part, an undeclared namespace prefix,
+        # or a well-formed part deeper than libxml2's 256 levels — escapes
+        # `(BadZipFile, KeyError, ValueError)`, and so do three that are not XML
+        # at all: a member compressed by a method `zipfile` cannot read
+        # (NotImplementedError), one flagged encrypted (RuntimeError), and a
+        # damaged compressed stream (zlib.error). All MEASURED.
+        logger.warning("DOCX could not be opened", exc_info=True)
         raise ValueError(
             "This file could not be read as a Word document. "
             "It may be corrupt or in an unsupported format."
         )
 
-    paragraphs: list[ExtractedParagraph] = []
-    images: list[ExtractedImage] = []
-
-    try:
-        for i, para in enumerate(doc.paragraphs):
-            text = _clean_text(para.text)
-
-            if text:
-                heading_level = None
-                style_name = (para.style.name or "").lower() if para.style else ""
-                for level in range(1, 7):
-                    if style_name == f"heading {level}":
-                        heading_level = level
-                        break
-
-                page_break_before = False
-                if para.paragraph_format and para.paragraph_format.page_break_before:
-                    page_break_before = True
-
-                paragraphs.append(ExtractedParagraph(
-                    text=text,
-                    heading_level=heading_level,
-                    page_break_before=page_break_before,
-                ))
-
-            # #403: scan inline images on EVERY paragraph, including text-less
-            # ones (Word puts images in their own paragraph). Position after the
-            # last kept paragraph; clamp like the PDF path (line ~510) so an
-            # image preceding any text maps to 0 rather than a negative index.
-            _scan_docx_inline_images(
-                para, doc, images, max(0, len(paragraphs) - 1)
-            )
-    except (ValueError, KeyError, AttributeError, TypeError) as e:
-        if not paragraphs:
-            raise ValueError(
-                "This Word document could not be processed. "
-                "The file may use an unsupported format or contain unexpected structure."
-            )
-        logger.warning("Partial DOCX extraction (recovered %d paragraphs): %s", len(paragraphs), e)
-
-    # #382: python-docx's paragraph iterator skips tables entirely, so table
-    # content is silently dropped on import. Detect tables-with-content and
-    # surface a warning (the frontend already renders import warnings). Guarded
-    # so a malformed table never breaks an otherwise-successful extraction.
-    table_warning: str | None = None
-    try:
-        tables_with_content = [
-            t for t in doc.tables
-            if any(
-                cell.text and cell.text.strip()
-                for row in t.rows for cell in row.cells
-            )
-        ]
-        if tables_with_content:
-            n = len(tables_with_content)
-            table_warning = (
-                f"{n} table{'s' if n != 1 else ''} in this document "
-                f"{'were' if n != 1 else 'was'} not imported — table content "
-                "is not yet supported. Convert tables to text before importing "
-                "if you need to code them."
-            )
-    except Exception:
-        logger.debug("Table detection failed during DOCX extraction", exc_info=True)
-
+    paragraphs, images, counts = _docx_body_walk(doc)
     return ExtractedDocument(
-        paragraphs=paragraphs, images=images, extraction_warning=table_warning
+        paragraphs=paragraphs, images=images, extraction_warnings=_docx_warnings(counts)
     )
 
 
@@ -640,7 +974,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> ExtractedDocument:
         paragraphs=paragraphs,
         images=images,
         page_count=page_count,
-        extraction_warning=warning,
+        extraction_warnings=[warning] if warning else [],
     )
 
 
@@ -657,8 +991,6 @@ def extract_text_from_txt(file_bytes: bytes) -> ExtractedDocument:
         text = file_bytes.decode("utf-8-sig")
     except UnicodeDecodeError:
         text = file_bytes.decode("latin-1")
-
-    text = _strip_html(text)
 
     paragraphs: list[ExtractedParagraph] = []
     for chunk in re.split(r'\n\s*\n', text):
@@ -770,12 +1102,11 @@ def segment_document(
         seg.sequence_order = i
         seg.word_count = len(seg.text.split())
 
-    # #382: surface extraction-time warnings (DOCX dropped tables, PDF scanned
-    # image) on BOTH preview and the real import path. Previously only
-    # preview_segmentation prepended this, so the warning was silently lost on
-    # actual import.
-    if doc.extraction_warning:
-        warnings.insert(0, doc.extraction_warning)
+    # #382: surface extraction-time warnings (DOCX parts not imported and
+    # tracked changes accepted, #1318; PDF scanned image) on BOTH preview and
+    # the real import path. Previously only preview_segmentation prepended
+    # them, so the warning was silently lost on actual import.
+    warnings[:0] = doc.extraction_warnings
 
     return segments, warnings
 
@@ -897,8 +1228,8 @@ def preview_segmentation(
     max_segments: int = 10,
 ) -> SegmentationPreview:
     """Preview segmentation without persisting. Returns first N segments + total count."""
-    # extraction_warning is now prepended inside segment_document (#382), so the
-    # preview no longer adds it here (would double-count).
+    # extraction_warnings are prepended inside segment_document (#382), so the
+    # preview does not add them here (it would double-count).
     segments, warnings = segment_document(doc, mode)
 
     return SegmentationPreview(

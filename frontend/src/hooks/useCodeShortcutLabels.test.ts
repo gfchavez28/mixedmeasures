@@ -115,7 +115,10 @@ describe('useCodeShortcutLabels', () => {
       expect(labels([{ id: 5, numeric_id: 12, category_id: null }]).has(5)).toBe(false)
     })
 
-    it('QUIRK: a universal code that also has a category_id is still labeled by numeric_id (not chorded)', () => {
+    // Not a quirk (2026-10-20): buildShortcutCategories skips universal codes
+    // whatever their category, and the resolver takes 0/1 by numeric_id, so the
+    // label names the key that fires.
+    it('a universal code that also has a category_id is labeled by numeric_id (not chorded), as the resolver keys it', () => {
       const m = labels([{ id: 1, numeric_id: 0, is_universal: true, category_id: 100 }])
       expect(m.get(1)).toBe('0')
     })

@@ -108,11 +108,14 @@ const CODES = [
 /** #963 Tier 3 — the grid takes a REQUIRED Retry landing; the page passes its
  *  active tab. A detached ref here is what a real mount never has, so the
  *  landing itself is asserted in the load-state suite rather than this one. */
+/** The client the last `renderGrid` mounted (#1337: what an act here invalidates). */
+let lastClient: QueryClient | null = null
 function renderGrid(currentUserId: number | null = 1, opts: { clientRetry?: boolean | number } = {}) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: opts.clientRetry ?? false, retryDelay: 0 } },
   })
   const landing = { current: null as HTMLElement | null }
+  lastClient = qc
   return render(
     <QueryClientProvider client={qc}>
       <ReconciliationGrid
@@ -210,6 +213,17 @@ describe('ReconciliationGrid', () => {
     fireEvent.click(screen.getByText('Negative'))
     expect(await screen.findByText('Code as Bob?')).toBeInTheDocument()
     expect(navigateMock).not.toHaveBeenCalled() // navigation happens only after confirm
+  })
+
+  it('#1337 — Recompute consensus refreshes what the consensus LAYER feeds, not only this grid', async () => {
+    renderGrid()
+    await waitFor(() => screen.getByRole('grid', { name: /reconciliation/i }))
+    const qc = lastClient!
+    qc.setQueryData(['code-frequencies', 42, { layer_scope: 'consensus' }], 1)
+    qc.setQueryData(['canvas-qual-chart', 42, 1, {}], 1)
+    fireEvent.click(screen.getByRole('button', { name: /recompute consensus/i }))
+    await waitFor(() => expect(qc.getQueryState(['code-frequencies', 42, { layer_scope: 'consensus' }])?.isInvalidated).toBe(true))
+    expect(qc.getQueryState(['canvas-qual-chart', 42, 1, {}])?.isInvalidated).toBe(true)
   })
 
   it('shows the recompute control and the stale-layer note', async () => {

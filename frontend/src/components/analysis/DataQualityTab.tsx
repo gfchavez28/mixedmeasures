@@ -6,7 +6,7 @@ import {
   Info,
   CircleCheck,
 } from 'lucide-react'
-import { dataQualityApi } from '@/lib/api'
+import { dataQualityApi, serverDetailMessage } from '@/lib/api'
 import type { MissingSummaryResponse, MissingPatternsResponse, McarTestResponse } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import {
@@ -196,7 +196,13 @@ export function DataQualityContent(props: DataQualityContentProps) {
       <div className="flex flex-col items-center justify-center py-16 text-red-500 dark:text-red-400">
         <TriangleAlert className="w-8 h-8 mb-2 opacity-60" />
         <p className="text-sm font-medium">Failed to load missing data summary</p>
-        <p className="text-xs text-mm-text-faint mt-1">Try adjusting your variable selection or check the server logs.</p>
+        {/* #1268 — the endpoint's refusals are sentences (a 400 naming what is wrong
+            with the selection), so show one when it came; otherwise say the step that
+            re-asks — a new selection is a new query. It said "check the server logs",
+            and a desktop user has no log to open. */}
+        <p className="text-xs text-mm-text-faint mt-1">
+          {serverDetailMessage(dqSummaryError) ?? 'Change the variable selection to try again.'}
+        </p>
       </div>
     )
   }

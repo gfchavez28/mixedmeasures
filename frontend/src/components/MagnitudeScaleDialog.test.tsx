@@ -249,13 +249,24 @@ describe('MagnitudeScaleDialog — the cache follows the save (#1112)', () => {
     await waitFor(() => expect(scaleOf(qc, ['codes', 42], 5)?.magnitude_scale).toBeNull())
   })
 
-  it('refreshes the other two caches that carry a scale: the Ratings queue and the codebook tree', async () => {
+  it('refreshes the other caches that carry a scale: the Ratings queue and the codebook tree', async () => {
     setMagnitudeScale.mockResolvedValue({})
     const { invalidate } = seeded(SCALED)
     fireEvent.click(save())
-    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['rating-queue', 42] }))
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['rating-queue', 42], refetchType: 'none' }))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['codebook-tree', 42] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['codes', 42] })
+  })
+
+  it('🔴 #1425 — and what a scale moves that a rating moves: the rating α and the grid', async () => {
+    // One α row per SCALED code (`irr.py`), and *Ratings differ* compares against the
+    // step — so declaring, changing or clearing a scale moves both (5 min / 60 s).
+    setMagnitudeScale.mockResolvedValue({})
+    const { invalidate } = seeded(SCALED)
+    fireEvent.click(save())
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['irr', 42] }))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reconciliation', 42] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['dataset-data', 42] })
   })
 })
 

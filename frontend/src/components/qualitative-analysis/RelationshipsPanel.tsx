@@ -314,6 +314,15 @@ export function RelationshipsSidebar({ qa, demoFilters, setSrAnnouncement }: Rel
 
 // ── Content ──────────────────────────────────────────────────────────────────
 
+/** What the demographic comparison counts, said on the screen (2026-10-19). The
+ *  backend joins segments to participants through each speaker, so only
+ *  conversations count: open-text sources are accepted and ignored (#1297) and
+ *  participant-linked documents are not counted (#1298). Change this sentence in
+ *  the same edit that changes either. */
+export const COMPARISON_SCOPE_SENTENCE =
+  "Counts codings in conversations only, through each speaker's participant link. " +
+  'Documents, open-text answers and observations are not included.'
+
 export interface RelationshipsContentProps {
   pid: number
   qa: QualitativeAnalysisState & QualitativeAnalysisActions
@@ -401,6 +410,7 @@ export function RelationshipsContent(props: RelationshipsContentProps) {
           </div>
         ) : (
           <div>
+            <p className="text-xs text-mm-text-muted mb-3">{COMPARISON_SCOPE_SENTENCE}</p>
             {qa.groupBy && comparisonData && (
               <div className="flex items-center justify-end mb-4">
                 <Button variant="outline" size="sm" onClick={handleComparisonExport} className="h-7 text-xs">

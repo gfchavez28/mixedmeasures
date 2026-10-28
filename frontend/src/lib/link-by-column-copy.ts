@@ -18,6 +18,27 @@ function records(count: number) {
   return `${n(count)} ${plural(count, 'record', 'records')}`
 }
 
+/**
+ * #1190 — records whose ID belongs to a participant who WITHDREW from this project. The
+ * server never links them and never creates a participant for them (the withdrawal's
+ * tombstone). `?? 0`: a server that predates the field sends none.
+ */
+export function skippedWithdrawn(plan: ParticipantLinkReport): number {
+  return plan.skipped_withdrawn ?? 0
+}
+
+/** The past-tense sentence after a link or an import (`components/ParticipantLinkNote`). */
+export function withdrawnLinkSentence(count: number): string {
+  return `${records(count)} ${plural(count, 'carries', 'carry')} the ID of a participant who `
+    + `withdrew from this project, so ${plural(count, 'it was', 'they were')} not linked and no `
+    + 'participant was created.'
+}
+
+/** Every record the plan leaves unlinked, for a reason the sentences name. */
+function staying(plan: ParticipantLinkReport): number {
+  return plan.skipped_duplicate + plan.skipped_missing + plan.skipped_conflict + skippedWithdrawn(plan)
+}
+
 /** The confirmation's main sentence. Only for a plan that links something. */
 export function linkPreviewSentence(plan: ParticipantLinkReport, columnLabel: string): string {
   const from = `the IDs in “${columnLabel}”`
@@ -46,9 +67,13 @@ export function linkPreviewDetails(plan: ParticipantLinkReport): string[] {
   if (plan.skipped_conflict > 0) {
     reasons.push(`${n(plan.skipped_conflict)} whose participant is already linked to another record`)
   }
+  // #1190 — counted, never named: the ID is the withdrawn person's.
+  const withdrawn = skippedWithdrawn(plan)
+  if (withdrawn > 0) {
+    reasons.push(`${n(withdrawn)} with the ID of a participant who withdrew from this project (no participant is created for ${plural(withdrawn, 'it', 'them')})`)
+  }
   if (reasons.length > 0) {
-    const stay = plan.skipped_duplicate + plan.skipped_missing + plan.skipped_conflict
-    out.push(`${records(stay)} will stay unlinked: ${reasons.join('; ')}.`)
+    out.push(`${records(staying(plan))} will stay unlinked: ${reasons.join('; ')}.`)
   }
   if (plan.already_linked > 0) {
     out.push(`${records(plan.already_linked)} ${plural(plan.already_linked, 'is', 'are')} already linked and will not change.`)
@@ -61,9 +86,12 @@ export function linkPreviewDetails(plan: ParticipantLinkReport): string[] {
 
 /** Why there is nothing to confirm. */
 export function linkNothingToDoSentence(plan: ParticipantLinkReport): string {
-  const stay = plan.skipped_duplicate + plan.skipped_missing + plan.skipped_conflict
+  const stay = staying(plan)
   if (stay === 0) return 'Every record is already linked to a participant — there is nothing to link.'
-  return `No record can be linked: ${records(stay)} ${plural(stay, 'has', 'have')} a blank, duplicated or already-linked ID.`
+  // #1190 — a withdrawn person's ID is a reason too, or "every record is already
+  // linked" / "a blank or duplicated ID" would be said of records that are neither.
+  const withdrawn = skippedWithdrawn(plan) > 0 ? ', or the ID of a participant who withdrew' : ''
+  return `No record can be linked: ${records(stay)} ${plural(stay, 'has', 'have')} a blank, duplicated or already-linked ID${withdrawn}.`
 }
 
 /**

@@ -8,6 +8,7 @@ import os
 os.environ["MM_DATABASE_PATH"] = ":memory:"
 
 import json
+import re
 import pytest
 
 from app.services.computed_columns import (
@@ -495,12 +496,37 @@ class TestRTranslator:
         assert r == 'ifelse((df$emp_type == "Hourly"), df$rate, df$salary)'
 
     def test_mean(self):
+        # #1322 D4: a row with no value is NULL in the evaluator; bare rowMeans
+        # gives NaN there, so the line maps it to NA. Run in R by
+        # test_computed_columns_r_translation.py.
         r = self._translate("MEAN([A], [B], [C])")
-        assert r == "rowMeans(cbind(df$a, df$b, df$c), na.rm = TRUE)"
+        assert r == (
+            "ifelse(rowSums(!is.na(cbind(df$a, df$b, df$c))) == 0, NA, "
+            "rowMeans(cbind(df$a, df$b, df$c), na.rm = TRUE))"
+        )
 
     def test_sum(self):
+        # #1322 D4: bare rowSums gives 0 on an all-missing row; the app gives NULL.
         r = self._translate("SUM([A], [B])")
-        assert r == "rowSums(cbind(df$a, df$b), na.rm = TRUE)"
+        assert r == (
+            "ifelse(rowSums(!is.na(cbind(df$a, df$b))) == 0, NA, "
+            "rowSums(cbind(df$a, df$b), na.rm = TRUE))"
+        )
+
+    def test_division_guards_the_divisor(self):
+        # #1322 D4: a zero divisor is NULL in the evaluator, ±Inf/NaN in R. The
+        # guard wraps the DIVISOR so the result keeps the dividend's length —
+        # `ifelse(b == 0, NA, a / b)` would collapse `[A] / 2` to one value.
+        assert self._translate("[A] / [B]") == "(df$a / ifelse(df$b == 0, NA, df$b))"
+        assert self._translate("[A] / 2") == "(df$a / ifelse(2 == 0, NA, 2))"
+
+    def test_string_literal_is_escaped(self):
+        # #1322 D4: a backslash written bare into R is a parse error
+        # ("'\d' is an unrecognized escape"); a newline would split the line.
+        r = self._translate('IF([type] == "C:\\d", 1, 0)')
+        assert r == 'ifelse((df$emp_type == "C:\\\\d"), 1, 0)'
+        r = self._translate('IF([type] == "a\nb", 1, 0)')
+        assert r == 'ifelse((df$emp_type == "a\\nb"), 1, 0)'
 
     def test_min(self):
         r = self._translate("MIN([A], [B])")
@@ -546,7 +572,10 @@ class TestRTranslator:
         ast = parse("MEAN([A], [B], [C])")
         result = validate(ast, _COLS)
         r = to_r_expression(result.resolved_ast, self._r_names, df_name="mydf")
-        assert r == "rowMeans(cbind(mydf$a, mydf$b, mydf$c), na.rm = TRUE)"
+        assert r == (
+            "ifelse(rowSums(!is.na(cbind(mydf$a, mydf$b, mydf$c))) == 0, NA, "
+            "rowMeans(cbind(mydf$a, mydf$b, mydf$c), na.rm = TRUE))"
+        )
 
 
 # ── DB Integration Tests ─────────────────────────────────────────────────────
@@ -1040,9 +1069,7 @@ def _call_build_r_script(db, project, dataset, cols):
         project_slug="r_export_test",
         qualifying_datasets=[(dataset, cols)],
         col_meta=col_meta,
-        domain_metrics=[],
         domain_score_cols=[],
-        domain_members_map={},
         domain_members_by_dataset_map={},
         n_records=3,
         n_variables=len(cols),
@@ -1084,10 +1111,18 @@ class TestRExportScript:
         assert "#   - Packages" in script
         assert "#   - Read data" in script
 
-    def test_computed_column_formula_with_data_prefix(self, db_session):
+    def test_computed_column_formula_is_a_comment_never_an_assignment(self, db_session):
+        """#1322 (D3), inverted from `…_with_data_prefix`, which pinned the
+        DEFECT: the script re-ran each formula over the factored frame and
+        overwrote the CSV's correct values. The formula is documentation now —
+        a comment — and nothing in the script assigns the column."""
         project, dataset, cols, *_ = _setup_r_export_project(db_session)
         script = _call_build_r_script(db_session, project, dataset, cols)
-        assert "data$total <- (data$score_a + data$score_b)" in script
+        assert "# total: [score_a] + [score_b]" in script.splitlines()
+        assert re.search(r"(?m)^\s*data\$total\s*<-", script) is None, (
+            "the script assigns the computed column — it must read the CSV's value"
+        )
+        assert "data$total <- (data$score_a + data$score_b)" not in script
 
     def test_computed_column_in_variable_labels(self, db_session):
         project, dataset, cols, *_ = _setup_r_export_project(db_session)
@@ -1163,7 +1198,7 @@ class TestRExportScript:
         script = _build_r_script(
             db=db_session, project=project, project_slug="empty",
             qualifying_datasets=[(dataset, [col])], col_meta=col_meta,
-            domain_metrics=[], domain_score_cols=[], domain_members_map={},
+            domain_score_cols=[],
             domain_members_by_dataset_map={},
             n_records=0, n_variables=1, skipped_datasets=[],
             is_multi_dataset=False, equiv_groups=[], used_names={"x"},
@@ -1186,8 +1221,10 @@ class TestRExportScript:
 # ordinal/Likert cell whose label was a typo and never got mapped) used to raise
 # ExpressionError inside MEAN/SUM/MIN/MAX/COUNT_VALID, which propagated as an
 # unhandled 500 from create/update/recompute. Now such cells are treated as
-# missing and skipped — matching the R translation's rowMeans(..., na.rm = TRUE).
-# (Recreated here — original prediction test lived in /tmp.)
+# missing and skipped. ⚠️ That is the evaluator's own rule: R reproduces it for
+# NO text cell, and the R export no longer re-runs formulas at all (#1322 — it
+# writes these stored values). (Recreated here — original prediction test lived
+# in /tmp.)
 
 
 class TestAggregateTextCellSkipping:

@@ -6,6 +6,7 @@ import json
 import re
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse, FileResponse
@@ -59,7 +60,7 @@ from ..services.canvas import (
     restore_snapshot,
     delete_snapshot,
 )
-from ..services.canvas_export import export_canvas_docx
+from ..services.canvas_export import ChartTable, export_canvas_docx
 from ..services.audit import log_action
 from ..config import get_media_dir
 from .helpers import _get_project_or_404, sanitize_content_disposition
@@ -106,7 +107,9 @@ def _pending_item_labels(db: Session, items) -> dict[tuple[str, int], str]:
     """
     from ..models.materials import Material
     from ..models.memo import Memo
-    from ..models.excerpt import Excerpt
+    from ..models.excerpt import Excerpt, excerpt_text_from
+    from ..models.segment import Segment
+    from ..models.dataset import DatasetValue
 
     by_type: dict[str, list[int]] = {}
     for pi in items:
@@ -127,14 +130,24 @@ def _pending_item_labels(db: Session, items) -> dict[tuple[str, int], str]:
         if title and title.strip():
             labels[("memo", memo_id)] = title.strip()
 
-    for exc_id, text in db.query(Excerpt.id, Excerpt.excerpt_text).filter(
+    # #1316: an excerpt has no text COLUMN — its text is derived from its segment
+    # (or its dataset value) by `excerpt_text_from`, the helper the excerpt API
+    # uses too. This queried `Excerpt.excerpt_text`, a response-schema field, so
+    # every canvas with a quote in its inbox 500'd on open, save, duplicate and
+    # snapshot restore. Still ONE grouped query for the type.
+    for exc_id, start, end, segment_text, value_text in db.query(
+        Excerpt.id, Excerpt.start_offset, Excerpt.end_offset,
+        Segment.text, DatasetValue.value_text,
+    ).outerjoin(Segment, Excerpt.segment_id == Segment.id).outerjoin(
+        DatasetValue, Excerpt.dataset_value_id == DatasetValue.id
+    ).filter(
         Excerpt.id.in_(by_type.get("excerpt", []))
     ).all() if by_type.get("excerpt") else []:
         # An excerpt has no name — its TEXT is its identity, so a short prefix
         # is what tells two of them apart. A clip's text is often empty (its
         # label is the excerpt), which is why the empty case falls back to the
         # id rather than rendering a blank row.
-        snippet = (text or "").strip()
+        snippet = excerpt_text_from(segment_text, start, end, value_text).strip()
         if snippet:
             labels[("excerpt", exc_id)] = snippet[:80] + ("…" if len(snippet) > 80 else "")
 
@@ -792,6 +805,54 @@ def _decode_chart_images(raw: dict[str, str]) -> dict[int, bytes]:
     return out
 
 
+# Chart-table limits (#1406 D5). MEASURED (python-docx 1.2.0): ~0.1 ms per cell
+# rendered, so the total bounds the document build at ~2 s on this event-loop
+# endpoint. A table over a limit is never truncated — a truncated table would
+# read as complete — it is replaced by a sentence saying why it is missing.
+_MAX_TABLE_ROWS = 2000
+_MAX_TABLE_COLS = 100
+_MAX_TABLE_CELL_CHARS = 2000
+_MAX_TABLE_TOTAL_CELLS = 20000
+
+
+def _decode_chart_tables(raw: dict[str, Any]) -> dict[int, ChartTable]:
+    """Validate the chart tables the client shaped (#1406 D5). Drops a malformed
+    entry (that chart then reads "Chart data unavailable"), pads a short row with
+    blanks as the Markdown table shows it, and marks a table over a size limit
+    ``too_large``. Never raises on bad client input."""
+    out: dict[int, ChartTable] = {}
+    total = 0
+    for key, value in list(raw.items())[:_MAX_CHART_COUNT]:
+        try:
+            material_id = int(key)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        headers, rows = value.get("headers"), value.get("rows")
+        if not isinstance(headers, list) or not headers or not isinstance(rows, list):
+            continue
+        width = len(headers)
+        cells = width * (len(rows) + 1)
+        if len(rows) > _MAX_TABLE_ROWS or width > _MAX_TABLE_COLS or total + cells > _MAX_TABLE_TOTAL_CELLS:
+            out[material_id] = ChartTable(headers=[], rows=[], too_large=True)
+            continue
+        if not all(isinstance(h, str) for h in headers) or not all(
+            isinstance(r, list) and len(r) <= width and all(isinstance(c, str) for c in r) for r in rows
+        ):
+            continue  # a non-string cell, or a value with no column to sit under
+        if any(len(c) > _MAX_TABLE_CELL_CHARS for c in headers) or any(
+            len(c) > _MAX_TABLE_CELL_CHARS for r in rows for c in r
+        ):
+            out[material_id] = ChartTable(headers=[], rows=[], too_large=True)
+            continue
+        total += cells
+        out[material_id] = ChartTable(
+            headers=list(headers), rows=[r + [""] * (width - len(r)) for r in rows],
+        )
+    return out
+
+
 @router.post("/{canvas_id}/export-docx")
 async def export_canvas_docx_endpoint(
     project_id: int,
@@ -806,7 +867,8 @@ async def export_canvas_docx_endpoint(
         raise HTTPException(status_code=404, detail="Canvas not found")
 
     chart_images = _decode_chart_images(body.chart_images) if body else None
-    buf = export_canvas_docx(db, canvas, project_id, chart_images)
+    chart_tables = _decode_chart_tables(body.chart_tables) if body else None
+    buf = export_canvas_docx(canvas, project_id, chart_images, chart_tables)
     filename = sanitize_content_disposition(canvas.name) + ".docx"
 
     log_action(

@@ -577,7 +577,7 @@ def refresh_theme_content(db: Session, theme: CanvasTheme) -> dict:
             excerpt_id = attrs.get("excerptId")
             if excerpt_id is None:
                 return
-            from ..models.excerpt import Excerpt
+            from ..models.excerpt import Excerpt, excerpt_text_from
             from ..models.segment import Segment
             exc = db.query(Excerpt).filter(Excerpt.id == excerpt_id).first()
             if not exc:
@@ -585,9 +585,8 @@ def refresh_theme_content(db: Session, theme: CanvasTheme) -> dict:
             if exc.segment_id:
                 seg = db.query(Segment).filter(Segment.id == exc.segment_id).first()
                 if seg:
-                    text = seg.text or ""
-                    if exc.start_offset is not None and exc.end_offset is not None:
-                        text = text[exc.start_offset:exc.end_offset]
+                    # #1319: the one place an excerpt's text is decided.
+                    text = excerpt_text_from(seg.text, exc.start_offset, exc.end_offset, None)
                     if attrs.get("displayText") != text:
                         attrs["displayText"] = text
                         updated = True

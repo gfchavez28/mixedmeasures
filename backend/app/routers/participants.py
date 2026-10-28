@@ -35,8 +35,10 @@ from ..schemas.participant import (
     UnlinkDatasetRowRequest,
     WithdrawalReportResponse,
 )
+from ..services.tombstones import reinstate_if_withdrawn, withdrawn_identifier_refusal
 from ..services.withdrawal_report import build_withdrawal_report
 from ..services.withdrawal_redaction import apply_withdrawal
+from ..services.canvas_embed_scrub import CanvasScrubError
 from ..services.backup import DatabaseBusyError, create_backup
 from ..config import get_documents_dir, get_media_dir, get_backup_dir, get_settings
 from ..auth import get_current_user
@@ -432,6 +434,14 @@ async def create_participant(
             status_code=409,
             detail=f"Participant with identifier '{data.identifier}' already exists in this project",
         )
+    # #1190 D12 — a withdrawn identifier is not re-created by one click (the grid's
+    # create is one). After the duplicate check: a live participant holding it is
+    # someone the researcher already reinstated, and that is the 409 above.
+    refusal = withdrawn_identifier_refusal(
+        db, project_id, data.identifier, confirmed=data.confirm_withdrawn,
+    )
+    if refusal is not None:
+        raise HTTPException(status_code=409, detail=refusal)
 
     participant = Participant(
         project_id=project_id,
@@ -442,6 +452,7 @@ async def create_participant(
     )
     db.add(participant)
     db.flush()
+    reinstated = reinstate_if_withdrawn(db, project_id, participant)
 
     log_action(
         db,
@@ -450,7 +461,8 @@ async def create_participant(
         entity_id=participant.id,
         user_id=user.id,
         project_id=project_id,
-        details={"identifier": participant.identifier},
+        details={"identifier": participant.identifier,
+                 **({"reinstated_withdrawn_identifier": True} if reinstated else {})},
     )
     db.commit()
     db.refresh(participant)
@@ -499,9 +511,13 @@ async def update_participant(
         raise HTTPException(status_code=404, detail="Participant not found")
 
     update_data = data.model_dump(exclude_unset=True)
+    confirm_withdrawn = bool(update_data.pop("confirm_withdrawn", False))
+    renamed = (
+        "identifier" in update_data and update_data["identifier"] != participant.identifier
+    )
 
     # Check identifier uniqueness if changing
-    if "identifier" in update_data and update_data["identifier"] != participant.identifier:
+    if renamed:
         existing = (
             db.query(Participant)
             .filter(
@@ -516,6 +532,14 @@ async def update_participant(
                 status_code=409,
                 detail=f"Participant with identifier '{update_data['identifier']}' already exists",
             )
+        # #1190 D12 — a rename TO a withdrawn identifier is the create's question:
+        # carried by another participant, the identifier would make every later merge
+        # skip them and every coding copy of the project refuse.
+        refusal = withdrawn_identifier_refusal(
+            db, participant.project_id, update_data["identifier"], confirmed=confirm_withdrawn,
+        )
+        if refusal is not None:
+            raise HTTPException(status_code=409, detail=refusal)
 
     # Track if role is being manually changed (clear auto-fill provenance)
     role_changed = "role" in update_data and update_data["role"] != participant.role
@@ -525,6 +549,9 @@ async def update_participant(
 
     if role_changed:
         participant.role_auto_filled_from = None
+
+    if renamed and reinstate_if_withdrawn(db, participant.project_id, participant):
+        update_data["reinstated_withdrawn_identifier"] = True  # the audit row says so
 
     # Propagate name changes to linked speakers
     if "display_name" in update_data or "identifier" in update_data:
@@ -883,7 +910,26 @@ def withdraw_participant(
             ),
         )
 
-    outcome = apply_withdrawal(db, participant)
+    # #1320 — FAIL CLOSED. The redaction reaches canvas copies, snapshots, the
+    # audit trail and stored results; one it cannot read raises rather than being
+    # skipped, and the whole removal is rolled back — a withdrawal reported as done
+    # while a copy kept the words is the failure that matters. The backup above
+    # stays: it is a copy of the project as it was, which is what it was taken for.
+    try:
+        outcome = apply_withdrawal(db, participant)
+    except Exception as exc:  # noqa: BLE001 - every failure rolls back, then is said
+        db.rollback()
+        logger.error("Withdrawal failed and was rolled back: %s", exc)
+        reason = str(exc) if isinstance(exc, CanvasScrubError) else ""
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Could not finish removing this participant, so nothing was changed. "
+                + (f"{reason} " if reason else "")
+                + f"The backup taken first, {backup_info.filename}, is in Settings › "
+                "Backup & Data."
+            ),
+        )
 
     log_action(
         db,

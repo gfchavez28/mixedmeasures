@@ -214,8 +214,16 @@ export const canvasApi = {
     api.delete(`${base(projectId)}/${canvasId}/snapshots/${snapshotId}`).then(r => r.data),
 
   // Export. Optionally POSTs rasterized chart images (materialId → PNG data URL)
-  // so charts embed as images; the backend falls back to data tables otherwise.
-  exportDocx: async (projectId: number, canvasId: number, chartPngs?: Map<number, string>, filename = 'canvas') => {
+  // so charts embed as images, and the client's own data tables (materialId →
+  // headers + rows, `canvas-export.ts::docxChartTables`) for a chart with no
+  // image — the server derives no chart table of its own (#1406 D5).
+  exportDocx: async (
+    projectId: number,
+    canvasId: number,
+    chartPngs?: Map<number, string>,
+    chartTables?: Map<number, { headers: string[]; rows: string[][] }>,
+    filename = 'canvas',
+  ) => {
     const chart_images: Record<string, string> = {}
     if (chartPngs) {
       for (const [mid, dataUrl] of chartPngs) {
@@ -223,9 +231,13 @@ export const canvasApi = {
         chart_images[String(mid)] = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
       }
     }
+    const chart_tables: Record<string, { headers: string[]; rows: string[][] }> = {}
+    if (chartTables) {
+      for (const [mid, table] of chartTables) chart_tables[String(mid)] = table
+    }
     const { data } = await api.post<Blob>(
       `${base(projectId)}/${canvasId}/export-docx`,
-      { chart_images },
+      { chart_images, chart_tables },
       {
         responseType: 'blob',
         // #833 — the project-scale export budget, not the 30 s client default.

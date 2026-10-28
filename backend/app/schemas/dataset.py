@@ -241,6 +241,11 @@ class ParticipantLinkReport(BaseModel):
     skipped_duplicate: int  # rows whose value appeared on >1 row (DEC-4: none link)
     skipped_conflict: int   # participant already linked to another row in dataset
     already_linked: int     # rows that had a link before this run (never touched)
+    # #1190 — rows whose identifier names a WITHDRAWN participant: never linked,
+    # and no participant is re-created for them. A duplicated withdrawn identifier's
+    # rows count HERE (not in `skipped_duplicate`), and it is never one of the
+    # `duplicate_values` examples — a link preview never names a withdrawn person.
+    skipped_withdrawn: int = 0
     duplicate_values: list[str] = Field(default_factory=list)  # examples, capped
 
 

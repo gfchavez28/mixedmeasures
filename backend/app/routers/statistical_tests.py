@@ -126,14 +126,21 @@ async def list_tests(
     )
 
 
-@router.post("/", response_model=StatisticalTestResponse, status_code=201)
+@router.post("", response_model=StatisticalTestResponse, status_code=201)
 async def create_test(
     project_id: int,
     body: StatisticalTestCreate,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Create a new statistical test."""
+    """Create a new statistical test.
+
+    🔴 **Declared `@router.post("")`, never `"/"`** (the `dataset.py::create_dataset`
+    precedent). It was `"/"`, a third exception to the router-root rule that no
+    rule named, and worked only because the client sent the slash. The sibling
+    GET root is one of the two tolerated legacy `"/"` roots and keeps its slash;
+    `tests/test_router_roots.py` fails on any other.
+    """
     _get_project_or_404(db, project_id, user.id)
 
     # Validate type/target compatibility

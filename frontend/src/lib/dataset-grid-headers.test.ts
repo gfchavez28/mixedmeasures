@@ -19,11 +19,11 @@ import { stripComments } from './strip-comments'
  * two files. A render test over today's columns cannot see that; a scan fails
  * the moment a bare `<th` appears.
  *
- * ⚠️ Deliberately NOT asserted here: `aria-rowcount` / `aria-rowindex`. Measured
- * 2026-08-17 — this grid renders all 120 rows, it is not virtualised, so the DOM
- * holds the whole set and a screen reader counts it correctly unaided. Those
- * attributes belong where the DOM does NOT hold the set (#751's virtualised
- * listbox). Adding them here would be cargo-culting the shape of that fix.
+ * ⚠️ Not asserted here: `aria-rowcount` / `aria-rowindex`. When this was written
+ * (2026-08-17) the grid rendered every row, so a reader counted the set unaided.
+ * #800 then made it render one PAGE of 200, so the DOM no longer holds the set,
+ * and the table declares both while it is paged (10-19 row 19) — pinned in
+ * `pages/dataset-grid-row-positions.test.tsx`, not in this scan.
  */
 
 const SRC = join(__dirname, '..')

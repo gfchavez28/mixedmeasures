@@ -735,6 +735,18 @@ export default function AnalysisView() {
     prevCompTestType.current = currentType
   }, [comparisonData?.rows])
 
+  // #1315 — the R&C sub-view a save is ON, or null on Descriptives / Data
+  // Quality. ONE derivation feeds the config's R&C keys below AND the row's
+  // `source_tab` / `material_type` in `handleAddToMaterials`, so the three can
+  // never disagree — the backend repair (`material_config.normalise_rc_keys`)
+  // trusts a row only when `source_tab` and `material_type` agree. Any view but
+  // `comparisons` is a correlation, as the material type has always said.
+  const rcSubView: 'correlations' | 'comparisons' | null = activeTab !== 'rc'
+    ? null
+    : rcView === 'comparisons' ? 'comparisons' : 'correlations'
+  const savingCorrelations = rcSubView === 'correlations'
+  const savingComparisons = rcSubView === 'comparisons'
+
   // Build chart config for saving — useCallback so save/saveAs/unsaved detection share one reference
   const buildCurrentChartConfig = useCallback(() => ({
     title: chartTitle,
@@ -779,39 +791,49 @@ export default function AnalysisView() {
     cross_tab_display: crossTabDisplay !== 'count' ? crossTabDisplay : undefined,
     // R&C tab params
     /**
-     * #831 — written UNCONDITIONALLY, unlike every other default-omitted key
-     * here, and that is the fix.
+     * 🔴 #1315 — each R&C key is written ONLY on its own sub-view: the
+     * correlation keys on the correlations view, the comparison keys on the
+     * comparisons view, `rc_view` and `sig_levels` on both, and NONE on
+     * Descriptives or Data Quality. The URL keeps the researcher's R&C setup
+     * across a tab switch on purpose, and this literal used to copy it into
+     * every save: a Descriptives chart carried `rc_view: 'correlations'` and
+     * was refused on the canvas, or — after a visit to Comparisons —
+     * `rc_view: 'comparisons'` plus `compare_by` and was DRAWN as a group
+     * comparison under its own title.
      *
-     * Omitting it for the default `'correlations'` made a Pearson correlation
-     * material's config **indistinguishable from a descriptives config**, so a
-     * correlation embedded on a canvas fell through to the quantitative metric
-     * branch and drew a plausible, silent, wrong figure (#817's mechanism, on
-     * the half its fix could not reach). The saver KNEW — three lines below it
-     * writes `source_tab: 'correlations'` and `material_type:
-     * 'correlation_matrix'` — but the config, which is what the canvas reads,
-     * threw the answer away.
+     * `rc_view` is the canvas's R&C marker (`inline-chart-params.ts::
+     * quantChartKind`). #831 made it unconditional so a default-Pearson
+     * correlation could be told from a descriptives chart — right for the
+     * two R&C views, wrong for the other tabs.
      *
-     * ⚠️ Safe precisely because `buildCurrentChartConfig` has exactly ONE
-     * caller (`handleAddToMaterials`), so the default-omissions here are
-     * stored-JSON brevity and nothing reads them as URL state.
+     * ⚠️ Inline ternaries, one key per line, on purpose: two backend tests
+     * read this literal — `test_material_config_keys.py` (every key
+     * classified, `^ {4}key:`) and `test_material_rc_key_repair.py` (each
+     * line below opens with its sub-view's gate, against
+     * `services/material_config.py`'s R&C key lists). A spread or a nested
+     * object would hide keys from both.
+     *
+     * ⚠️ Safe because `buildCurrentChartConfig` has exactly ONE caller
+     * (`handleAddToMaterials`), so the default-omissions here are stored-JSON
+     * brevity and nothing reads them as URL state.
      */
-    rc_view: rcView,
-    corr_type: corrType !== 'pearson' ? corrType : undefined,
-    sig_levels: sigLevels,
-    bonferroni: bonferroniOn || undefined,
-    cell_format: corrCellFormat !== 'r_stars' ? corrCellFormat : undefined,
-    corr_colors: corrColors !== 'diverging_blue_red' ? corrColors : undefined,
-    compare_by: compareBy || undefined,
-    compare_by_2: compareBy2 || undefined,
-    test_type: testType !== 'auto' ? testType : undefined,
-    nonparametric: nonparametric,
-    post_hoc_expanded: postHocExpanded,
-    rc_chart_type: rcChartType !== 'comparison_table' ? rcChartType : undefined,
-    exclude_groups: excludeGroups.length > 0 ? excludeGroups : undefined,
-    rc_palette: rcPalette !== 'default' ? rcPalette : undefined,
-    show_scatter: showScatter || undefined,
-    show_reg_line: showRegLine,
-    show_jitter: showJitter || undefined,
+    rc_view: rcSubView ?? undefined,
+    corr_type: savingCorrelations && corrType !== 'pearson' ? corrType : undefined,
+    sig_levels: rcSubView ? sigLevels : undefined,
+    bonferroni: savingCorrelations && bonferroniOn ? true : undefined,
+    cell_format: savingCorrelations && corrCellFormat !== 'r_stars' ? corrCellFormat : undefined,
+    corr_colors: savingCorrelations && corrColors !== 'diverging_blue_red' ? corrColors : undefined,
+    compare_by: savingComparisons ? compareBy || undefined : undefined,
+    compare_by_2: savingComparisons ? compareBy2 || undefined : undefined,
+    test_type: savingComparisons && testType !== 'auto' ? testType : undefined,
+    nonparametric: savingComparisons ? nonparametric : undefined,
+    post_hoc_expanded: savingComparisons ? postHocExpanded : undefined,
+    rc_chart_type: savingComparisons && rcChartType !== 'comparison_table' ? rcChartType : undefined,
+    exclude_groups: savingComparisons && excludeGroups.length > 0 ? excludeGroups : undefined,
+    rc_palette: savingComparisons && rcPalette !== 'default' ? rcPalette : undefined,
+    show_scatter: savingCorrelations && showScatter ? true : undefined,
+    show_reg_line: savingCorrelations ? showRegLine : undefined,
+    show_jitter: savingCorrelations && showJitter ? true : undefined,
   }), [
     chartTitle, chartSubtitle, chartFootnote, sortOrder, display, scaling,
     showChartN, showGroupN, showVariableN, showCI,
@@ -821,7 +843,8 @@ export default function AnalysisView() {
     proportionMode, proportionOperator, proportionThreshold, proportionValues,
     divergingMode, divergingCenter, showErrorBand, lineStyle, lineOverlay, axisTransform,
     crossTabColumnId, crossTabDisplay,
-    rcView, corrType, sigLevels, bonferroniOn, corrCellFormat, corrColors, compareBy, compareBy2, testType, nonparametric, postHocExpanded, rcChartType, showScatter, showRegLine, showJitter,
+    rcSubView, savingCorrelations, savingComparisons,
+    corrType, sigLevels, bonferroniOn, corrCellFormat, corrColors, compareBy, compareBy2, testType, nonparametric, postHocExpanded, rcChartType, showScatter, showRegLine, showJitter,
     excludeGroups, rcPalette,
   ])
 
@@ -1212,13 +1235,12 @@ export default function AnalysisView() {
       column_ids: selected_columns,
       domain_ids: selected_domains,
     }
+    // #1315 — `rcSubView` is the SAME derivation the config's R&C keys read.
     let materialType: string
-    if (activeTab === 'rc') {
-      if (rcView === 'comparisons') {
-        materialType = rcChartType === 'comparison_table' ? 'comparison_table' : rcChartType || 'comparison_table'
-      } else {
-        materialType = showScatter ? 'scatter_matrix' : 'correlation_matrix'
-      }
+    if (rcSubView === 'comparisons') {
+      materialType = rcChartType === 'comparison_table' ? 'comparison_table' : rcChartType || 'comparison_table'
+    } else if (rcSubView === 'correlations') {
+      materialType = showScatter ? 'scatter_matrix' : 'correlation_matrix'
     } else {
       materialType = chartTypeParam || chartType || 'horizontal_bar'
     }
@@ -1227,9 +1249,9 @@ export default function AnalysisView() {
       material_type: materialType,
       config: materialConfig,
       auto_name: generateAutoName(),
-      source_tab: activeTab === 'rc' ? (rcView === 'comparisons' ? 'comparisons' : 'correlations') : 'descriptives',
+      source_tab: rcSubView ?? 'descriptives',
     })
-  }, [ensureCollectionId, hasAnySelection, buildCurrentChartConfig, chartTypeParam, chartType, addToMaterialsMutation, generateAutoName, activeTab, rcView, rcChartType, showScatter])
+  }, [ensureCollectionId, hasAnySelection, buildCurrentChartConfig, chartTypeParam, chartType, addToMaterialsMutation, generateAutoName, rcSubView, rcChartType, showScatter])
 
   const handleChartTypeSelect = useCallback((type: ChartType) => {
     // #509: no requiresMetricTypeChange entry = type not applicable to the

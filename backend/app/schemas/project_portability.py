@@ -1,5 +1,7 @@
 """Pydantic schemas for project portability (export/import) endpoints."""
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -59,6 +61,9 @@ class MergeCoderMatch(BaseModel):
     username: str
     archived: bool
     local_app_count: int
+    # #1352 — "identity": the same coder (`users.uuid`), pre-selected; "name": a coder
+    # who only shares the name, which the confirm step leaves for the researcher to answer.
+    basis: Literal["identity", "name"]
 
 
 class MergeCoderOption(BaseModel):
@@ -99,6 +104,8 @@ class MergeCoderPreview(BaseModel):
     name_in_use: MergeCoderNameInUse | None = None
     match_options: list[MergeCoderOption] = []
     machine_provenance: dict | None = None
+    # #1246 — the name *Add as new coder* gives this coder unless renamed.
+    create_username: str
 
 
 class MergeCodeCandidate(BaseModel):
@@ -134,6 +141,47 @@ class MergeCodePreview(BaseModel):
     magnitude_scale: dict | None = None
 
 
+class MergeAdditionSourceItem(BaseModel):
+    """#1190 (D15) — a source the file holds that the target does not."""
+    kind: Literal["conversation", "document", "observation"]
+    name: str
+
+
+class MergeAdditionDatasetItem(BaseModel):
+    """#1190 (D15) — a dataset the target does not have, with the records it brings."""
+    name: str
+    records: int
+
+
+class MergeAdditionRecordsItem(BaseModel):
+    """#1190 (D15) — records added to a dataset the target ALREADY has."""
+    dataset: str
+    count: int
+
+
+class MergeAdditions(BaseModel):
+    """#1190 (D15) — what a merge would ADD that the target does not hold
+    (`services/merge_additions.py`). A file-only item is the colleague's new work or
+    something deleted here since the copy was made, and no plain delete is recorded until
+    1.5.9, so names are given where a researcher would recognise them — each list capped
+    at `MERGE_ADDITIONS_NAME_CAP`, its `*_count` the true total — and the rest counted.
+    🔴 A withdrawn person is never named: `withdrawn_participants` / `withdrawn_items`
+    count what the merge will LEAVE OUT."""
+    sources: list[MergeAdditionSourceItem]
+    source_count: int
+    participants: list[str]
+    participant_count: int
+    datasets: list[MergeAdditionDatasetItem]
+    dataset_count: int
+    records: list[MergeAdditionRecordsItem]
+    record_count: int
+    quotes: int
+    notes: int
+    memos: int
+    withdrawn_participants: int
+    withdrawn_items: int
+
+
 class ImportValidationResult(BaseModel):
     manifest: ProjectExportManifest
     warnings: list[str]
@@ -149,6 +197,14 @@ class ImportValidationResult(BaseModel):
     # possible AND the codebook diverges; None/[] when shared-frozen (the common case).
     # Drives the code-reconcile step.
     merge_codes_preview: list[MergeCodePreview] | None = None
+    # #1321: the file's coders and the local coder each would land on, populated only
+    # when NO local project shares the identity (a coding copy is then on offer; the
+    # dialog asks which of these people is you, D2). Same rows as `merge_coders`; a different
+    # question, so a different field — `merge_coders` still means "a merge is possible".
+    file_coders: list[MergeCoderPreview] | None = None
+    # #1190 (D15): what the merge would also ADD, populated only when a merge is possible
+    # (existing_project set). Shown on the Merge page's Review step, before the merge.
+    merge_additions: MergeAdditions | None = None
 
 
 class MergeReport(BaseModel):
@@ -174,6 +230,16 @@ class MergeReport(BaseModel):
     # the target code's declared scale — imported UNRATED with the number kept as
     # the row's `magnitude_conflict`, so nothing is lost and the grid can show it.
     ratings_out_of_range: int = 0
+    # #1190 — what the file held of a withdrawn person, NOT brought back: the
+    # people (a count, never a name) and what was theirs (records, answers' quotes,
+    # notes and codings, deleted speakers, new quotes of a blanked turn, memos the copy
+    # added on her records).
+    withdrawn_participants_skipped: int = 0
+    withdrawn_items_skipped: int = 0
+    # #1190 D13 — records the copy holds that were deleted here, whose person is now
+    # linked to ANOTHER record of the same dataset: re-inserted LINKED TO NOBODY (one
+    # record per person per dataset), so the researcher decides which is theirs.
+    records_reinserted_unlinked: int = 0
 
 
 class ProjectImportResult(BaseModel):

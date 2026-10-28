@@ -32,11 +32,15 @@ import {
   retryUnanswered,
 } from '@/lib/api'
 import { useHistory } from '@/hooks/useHistory'
+import { useTextEditSave } from '@/hooks/useTextEditSave'
+import { TextEditQuotesDialog } from '@/components/TextEditQuotesDialog'
+import type { TextEditDoor } from '@/lib/text-edit-quotes'
+import { excerptRestorePayload } from '@/lib/excerpt-shape'
 import { PageErrorBoundary } from '@/components/PageErrorBoundary'
 import FloatingCreateCode, { type FloatingCoords } from '@/components/FloatingCreateCode'
 import FloatingCreateNote from '@/components/FloatingCreateNote'
 import { coordsFromElement, selectionPrefill } from '@/lib/floating-utils'
-import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { invalidateAfterRating, invalidateDerivedCounts } from '@/lib/coding-cache'
 import { describeQuoteNotesStayed } from '@/lib/split-disclosure'
 import { optionOrdinals, optionPositionAria } from '@/lib/listbox-aria'
 import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
@@ -155,6 +159,9 @@ export default function DocumentCodingWorkbench() {
   const selfId = user?.id ?? null
   // #1042: the stack is this coder's — a coder switch clears it.
   const history = useHistory(selfId)
+  // #1319: a text edit's save flow (preview → quotes dialog → history), shared
+  // with the conversation workbench.
+  const { save: saveTextEdit, dialogProps: textEditDialogProps } = useTextEditSave(history.execute)
   const [hiddenCoders, setHiddenCoders] = useState<Set<number>>(new Set())
   // #451: archived coders' chips hidden by default; "view all coders" reveals them.
   const [showArchivedCoders, setShowArchivedCoders] = useState(false)
@@ -584,6 +591,7 @@ export default function DocumentCodingWorkbench() {
       try {
         await codingApi.setMagnitude(segmentId, codeId, value)
         queryClient.invalidateQueries({ queryKey: key })
+        invalidateAfterRating(queryClient, projectId)   // #1425: α, the grid, the queue — elsewhere
       } catch (e) {
         queryClient.setQueryData(key, snapshot)
         throw e  // `useHistory` toasts the server's own reason (a refused rating names why)
@@ -1033,21 +1041,26 @@ export default function DocumentCodingWorkbench() {
     const oldText = seg.text
     if (newText === oldText) { setEditingSegmentId(null); return }
 
-    history.execute({
-      type: 'segment_edit',
-      description: 'Edit segment text',
-      redo: async () => {
-        await documentsApi.updateSegment(projectId, documentId, segmentId, { text: newText })
-        queryClient.invalidateQueries({ queryKey: ['document', projectId, documentId] })
-      },
-      undo: async () => {
-        await documentsApi.updateSegment(projectId, documentId, segmentId, { text: oldText })
-        queryClient.invalidateQueries({ queryKey: ['document', projectId, documentId] })
-      },
+    // #1319 — a text edit carries the paragraph's quotes: preview, confirm what it
+    // would change (D5), then save. The editor stays open with the typed text until
+    // the server has answered, and "Saved" means saved. ⚠️ This editor saves on
+    // BLUR, and the quotes dialog opening blurs it: that second call is `'busy'`.
+    const door: TextEditDoor = {
+      preview: (text) => documentsApi.previewSegmentEdit(projectId, documentId, segmentId, text),
+      apply: async (text, answer) =>
+        (await documentsApi.updateSegment(projectId, documentId, segmentId, { text, ...answer })).quote_rebase,
+      recreateQuote: async (q) => (await excerptsApi.create(projectId, excerptRestorePayload({
+        segment_id: segmentId, dataset_value_id: null,
+        start_offset: q.old_start, end_offset: q.old_end,
+      }))).id,
+      refresh: () => { queryClient.invalidateQueries({ queryKey: ['document', projectId, documentId] }) },
+    }
+    void saveTextEdit({ segmentId, oldText, newText, door }).then(result => {
+      if (result !== 'saved') return
+      setEditingSegmentId(cur => (cur === segmentId ? null : cur))
+      showSaved()
     })
-    setEditingSegmentId(null)
-    showSaved()
-  }, [segmentMap, history, queryClient, projectId, documentId, showSaved])
+  }, [segmentMap, saveTextEdit, queryClient, projectId, documentId, showSaved])
 
   // ── Title editing ──
 
@@ -2013,6 +2026,9 @@ export default function DocumentCodingWorkbench() {
         <div className="flex-1" />
         <span className="opacity-60">{codeKeyHint(codes)} · s: quote · c: create code · n: note · r: rate · j: next uncoded · Ctrl+Z/Y: undo/redo</span>
       </div>
+
+      {/* #1319 — the quotes a text edit would change, before it is saved. */}
+      <TextEditQuotesDialog {...textEditDialogProps} />
 
       {/* Floating create code dialog */}
       {createCodeDialog && (

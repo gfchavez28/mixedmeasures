@@ -419,12 +419,17 @@ export function ColumnFormDialog({
                   {!previewLoading && preview?.valid && (
                     <span className="text-xs text-green-600 dark:text-green-400 flex items-center gap-1">
                       <CheckCircle2 className="w-3 h-3" /> Valid
-                      {preview.warnings.length > 0 && (
-                        <span className="text-amber-600 dark:text-amber-400 ml-1">
-                          ({preview.warnings.length} warning{preview.warnings.length > 1 ? 's' : ''})
-                        </span>
-                      )}
                     </span>
+                  )}
+                  {/* #1368 — the server's sentences, not a count of them: "(1 warning)"
+                      told the researcher something was wrong and never what. */}
+                  {!previewLoading && preview?.valid && preview.warnings.length > 0 && (
+                    <ul
+                      className="mt-1 space-y-0.5 text-xs text-amber-700 dark:text-amber-300"
+                      data-testid="formula-warnings"
+                    >
+                      {preview.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                    </ul>
                   )}
                   {!previewLoading && preview && !preview.valid && (
                     <span className="text-xs text-red-600 dark:text-red-400 flex items-center gap-1">
@@ -480,6 +485,7 @@ export function ColumnFormDialog({
                   <p><code className="bg-mm-bg px-0.5 rounded">[Variable]</code> &mdash; variable reference (by code or name)</p>
                   <p><code className="bg-mm-bg px-0.5 rounded">+ - * /</code> &mdash; arithmetic</p>
                   <p><code className="bg-mm-bg px-0.5 rounded">== != &lt; &gt; &lt;= &gt;=</code> &mdash; comparison</p>
+                  <p><code className="bg-mm-bg px-0.5 rounded">[Q1] == "Agree"</code> &mdash; an answer in quotes, as the data shows it; <code className="bg-mm-bg px-0.5 rounded">[Q1] == 4</code> &mdash; its stored number</p>
                   <p><code className="bg-mm-bg px-0.5 rounded">AND OR NOT</code> &mdash; boolean logic</p>
                   <p><code className="bg-mm-bg px-0.5 rounded">IF(cond, then, else)</code> &mdash; conditional</p>
                   <p><code className="bg-mm-bg px-0.5 rounded">MEAN() SUM() MIN() MAX() COUNT_VALID()</code> &mdash; row aggregates</p>

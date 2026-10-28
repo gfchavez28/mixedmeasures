@@ -37,11 +37,13 @@ import {
 } from '@/components/canvas/qual-timeline-params'
 import {
   detectChartType,
-  shapeScalarBars,
+  shapeScalarBarFigure,
   shapeFrequencyBars,
   shapeHeatmapRows,
+  shapeHistogramBars,
   shapeDumbbellRows,
   shapeLineChart,
+  isGroupedMetrics,
   DISPLAY_PRECISION,
   type ChartType,
 } from '@/lib/chart-data'
@@ -55,14 +57,13 @@ import {
   qualChartKind,
   qualChartHasEnoughToFetch,
   extractComparisonParams,
-  isComparisonMaterialConfig,
-  isCorrelationMaterialConfig,
   extractCrossTabParams,
-  isCrossTabMaterialConfig,
+  extractGroupDisplayOptions,
+  quantChartKind,
   type QualComputeParams,
 } from '@/components/canvas/inline-chart-params'
 import { isQualitativeMaterialConfig } from '@/lib/material-kind'
-import { describeUndefined } from '@/lib/stat-format'
+import { describeUndefined, NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -165,12 +166,12 @@ export async function fetchChartTables(
   themes: CanvasTheme[],
   projectId: number,
   timelineLens: TimelineExportLens,
-): Promise<Map<number, { md: string; html: string }>> {
+): Promise<Map<number, ChartExportTable>> {
   const charts = collectChartEmbeds(themes)
   if (charts.length === 0) return new Map()
 
   const results = await Promise.allSettled(
-    charts.map(async (chart) => {
+    charts.map(async (chart): Promise<{ materialId: number; md: string; html: string; table?: ExportTable }> => {
       // #652 slab 1: a qualitative embed reads a different endpoint. Without
       // this branch `extractComputeParams` finds no columns or domains and the
       // chart exports as an EMPTY table in Markdown, HTML, PDF and the docx
@@ -182,12 +183,15 @@ export async function fetchChartTables(
         }
         const table = await qualChartTable(projectId, qualParams, timelineLens)
         if (!table || table.rows.length === 0) return { materialId: chart.materialId, md: '', html: '' }
-        return {
-          materialId: chart.materialId,
-          md: mdTable(table.headers, table.rows),
-          html: htmlTable(table.headers, table.rows),
-        }
+        return tableExport(chart.materialId, table)
       }
+
+      // 🔴 #1315 — the SAME dispatch the renderer asks, so the two cannot take
+      // different branches for one embed. They did: the renderer asked
+      // "comparison?" first and this file "correlation?" first, so a comparison
+      // carrying `show_scatter` drew on the canvas and exported as "Chart data
+      // not available". The order lives in `quantChartKind`, nowhere else.
+      const kind = quantChartKind(chart.config)
 
       // 🔴 #817 — a quantitative COMPARISON must not be run through
       // `quickCompute` here either. This path is not a fallback for the
@@ -209,21 +213,17 @@ export async function fetchChartTables(
       //
       // Exporting NOTHING is the honest match for a refusal on screen. The
       // embed's title and surrounding prose still carry into the document.
-      if (isCorrelationMaterialConfig(chart.config)) {
+      if (kind === 'correlation') {
         return { materialId: chart.materialId, md: '', html: '' }
       }
 
-      if (isComparisonMaterialConfig(chart.config)) {
+      if (kind === 'comparison') {
         const cmp = extractComparisonParams(chart.config)
         if (cmp.request == null) return { materialId: chart.materialId, md: '', html: '' }
         const data = await comparisonsApi.groupComparison(projectId, cmp.request)
         const table = comparisonExportTable(data)
         if (!table) return { materialId: chart.materialId, md: '', html: '' }
-        return {
-          materialId: chart.materialId,
-          md: mdTable(table.headers, table.rows),
-          html: htmlTable(table.headers, table.rows),
-        }
+        return tableExport(chart.materialId, table)
       }
 
       // 🔴 #832 — a CROSS-TAB is the one descriptives type whose data does not
@@ -237,7 +237,7 @@ export async function fetchChartTables(
       //
       // ⚠️ The axis derivation and the display mode are SHARED with the
       // renderer (`extractCrossTabParams`), not re-read from `content` here.
-      if (isCrossTabMaterialConfig(chart.config)) {
+      if (kind === 'cross_tab') {
         const ct = extractCrossTabParams(chart.config)
         // A half-configured cross-tab has no row or no column axis. The
         // renderer says so on screen; an export emits nothing, exactly as it
@@ -246,11 +246,7 @@ export async function fetchChartTables(
         const data = await metricsApi.crossTabulation(projectId, ct.request)
         const table = crossTabExportTable(data, ct.display, ct.scaleOrder)
         if (!table) return { materialId: chart.materialId, md: '', html: '' }
-        return {
-          materialId: chart.materialId,
-          md: mdTable(table.headers, table.rows),
-          html: htmlTable(table.headers, table.rows),
-        }
+        return tableExport(chart.materialId, table)
       }
 
       const params = extractComputeParams(chart.config)
@@ -264,19 +260,45 @@ export async function fetchChartTables(
 
       const chartType = (chart.config.chart_type as ChartType) ?? detectChartType(metrics)
       const metricType = params.metricType
-      const md = metricsToMarkdownTable(metrics, chartType, metricType)
-      const html = metricsToHtmlTable(metrics, chartType, metricType)
-      return { materialId: chart.materialId, md, html }
+      // #1406 — the groups the embed shows, from the function the renderer reads.
+      const groupOpts = extractGroupDisplayOptions(chart.config)
+      const binWidth = (chart.config.formatting as { binWidth?: number | null } | undefined)?.binWidth
+      const table = convertMetrics(metrics, chartType, metricType, groupOpts, binWidth)
+      // A table the shapers could not build still says so in the Markdown and
+      // HTML; the `.docx` then reads "Chart data unavailable" for it.
+      if (!table) {
+        return {
+          materialId: chart.materialId,
+          md: '*[Chart data could not be converted to table]*',
+          html: '<p><em>Chart data could not be converted to table</em></p>',
+        }
+      }
+      return tableExport(chart.materialId, table)
     }),
   )
 
-  const map = new Map<number, { md: string; html: string }>()
+  const map = new Map<number, ChartExportTable>()
   for (const r of results) {
     if (r.status === 'fulfilled' && r.value.md) {
-      map.set(r.value.materialId, { md: r.value.md, html: r.value.html })
+      map.set(r.value.materialId, { md: r.value.md, html: r.value.html, table: r.value.table ?? null })
     }
   }
   return map
+}
+
+/**
+ * #1406 D5 — the tables the `.docx` export renders for a chart with no captured
+ * image. The server derives none of its own (its `_get_chart_table_data` read
+ * a grouped metric's missing-group bucket, and ignored the embed's grouping,
+ * proportion settings and exclusions), so a Word table is the one the Markdown
+ * and HTML exports print.
+ */
+export function docxChartTables(tables: Map<number, ChartExportTable>): Map<number, ExportTable> {
+  const out = new Map<number, ExportTable>()
+  for (const [materialId, t] of tables) {
+    if (t.table) out.set(materialId, t.table)
+  }
+  return out
 }
 
 /**
@@ -438,8 +460,13 @@ async function qualChartTable(
           entry.code_name,
           ...groups.map(g => String(entry.by_group?.[g]?.count ?? 0)),
           ...groups.map(g => {
-            const p = entry.by_group?.[g]?.proportion
-            return p == null ? '' : `${(p * 100).toFixed(1)}%`
+            const cell = entry.by_group?.[g]
+            const p = cell?.proportion
+            if (p != null) return `${(p * 100).toFixed(1)}%`
+            // #1421: a group with no segments has no share — `—` and the server's
+            // reason, #1363's rule for an undefined cell (a blank reads as a broken
+            // export). An absent cell keeps its blank.
+            return cell ? `${NO_VALUE} ${undefinedTooltip(cell.undefined_reason)}` : ''
           }),
         ]),
       }
@@ -575,6 +602,46 @@ function fmt(v: number | null | undefined, decimals = 1): string {
   return Number(v.toFixed(decimals)).toString()
 }
 
+/**
+ * #1363 — a SCALAR statistic's cell: the number, or `—` and the reason. `fmt`'s
+ * blank is right for an absent count and wrong here: before #1363 these cells
+ * printed `0` for an undefined statistic, and a blank is indistinguishable from
+ * a broken export (#566's rule, which the comparison table above already keeps).
+ */
+function fmtScalar(v: number | null | undefined, reason?: string | null): string {
+  if (v != null) return fmt(v)
+  return `${NO_VALUE} ${undefinedTooltip(reason)}`
+}
+
+/**
+ * #1412 — a FREQUENCY share's cell: `N%`, or `—` and the reason when the result
+ * had no valid answers (the shapers' `null`). A real 0 is `0%`.
+ */
+function fmtFrequencyShare(v: number | null | undefined, reason?: string | null): string {
+  return v == null ? fmtScalar(null, reason) : `${fmt(v)}%`
+}
+
+/** #1406 D5 — a chart's table as headers and rows, before any format renders it. */
+export interface ExportTable {
+  headers: string[]
+  rows: string[][]
+}
+
+/**
+ * One chart's entry from `fetchChartTables`: its Markdown and HTML renderings,
+ * and the table they render — `null` when none could be shaped, so the
+ * `.docx` cannot print a table the other formats do not.
+ */
+export interface ChartExportTable {
+  md: string
+  html: string
+  table: ExportTable | null
+}
+
+function tableExport(materialId: number, table: ExportTable) {
+  return { materialId, md: mdTable(table.headers, table.rows), html: htmlTable(table.headers, table.rows), table }
+}
+
 function mdTable(headers: string[], rows: string[][]): string {
   const h = `| ${headers.join(' | ')} |`
   const sep = `| ${headers.map(() => '---').join(' | ')} |`
@@ -588,42 +655,94 @@ function htmlTable(headers: string[], rows: string[][]): string {
   return `<table>\n<thead><tr>${ths}</tr></thead>\n<tbody>\n${trs}\n</tbody>\n</table>`
 }
 
-function esc(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+/**
+ * #1339 — escape a value for HTML TEXT **and** a double- or single-quoted
+ * ATTRIBUTE. One function for both contexts, because the call sites already mix
+ * them (`alt="${title}"` reuses the heading's escaped title) and a text-only
+ * escape there let a `"` open a new attribute — an `onload` on the chart image,
+ * which runs when the downloaded file is OPENED.
+ *
+ * Takes `unknown`: node attrs are untyped JSON that a `.mmproject` import stores
+ * verbatim, and a non-string used to throw out of `.replace` and fail the whole
+ * export.
+ */
+function esc(s: unknown): string {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }
 
-function metricsToMarkdownTable(
-  metrics: MetricDefinitionResponse[],
-  chartType: ChartType | null,
-  metricType: string,
-): string {
-  return convertMetrics(metrics, chartType, metricType, 'md')
+/** The schemes a link in an exported report keeps its anchor for (#1339). */
+const EXPORT_LINK_SCHEMES: ReadonlySet<string> = new Set(['http', 'https', 'mailto'])
+
+/**
+ * #1339 — the href to emit for a link mark, or `null` when the export must
+ * drop the anchor and keep only the link's words.
+ *
+ * ALLOW-list, anchored at the first non-blank character: an href keeps its
+ * anchor only when it literally begins `http:`, `https:` or `mailto:`. A
+ * browser's URL parser also drops leading C0 controls and every tab/newline,
+ * so `\u0001javascript:` and `java\tscript:` are `javascript:` to it — and
+ * both are refused here because neither BEGINS with an allowed scheme. Nothing
+ * a parser removes can turn a string that begins `https:` into another scheme.
+ * (Measured: a version that first stripped every C0 control passed the same
+ * tests — the strip was redundant, so it is not here; `trim()` stays only so a
+ * pasted ` https://…` keeps its anchor.)
+ *
+ * ⚠️ Not Tiptap's `isAllowedUri`: the editor never sees imported JSON, and
+ * that check accepts relative and scheme-less hrefs, which resolve against the
+ * downloaded FILE and so lead nowhere a reader could follow.
+ */
+export function exportableHref(href: unknown): string | null {
+  if (typeof href !== 'string') return null
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(href.trim())?.[1]?.toLowerCase()
+  return scheme && EXPORT_LINK_SCHEMES.has(scheme) ? href : null
 }
 
-function metricsToHtmlTable(
-  metrics: MetricDefinitionResponse[],
-  chartType: ChartType | null,
-  metricType: string,
-): string {
-  return convertMetrics(metrics, chartType, metricType, 'html')
-}
+/**
+ * #1339 — the exported HTML leaves the app, and with it the app's own CSP, so
+ * it states one. It permits what the document uses (its `<style>` and the
+ * chart PNG data URLs) and nothing else: no script, no handler, no navigation
+ * to `javascript:` — so an escape this module misses still cannot run.
+ */
+const EXPORT_CSP_META =
+  `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">`
 
+type GroupDisplayOptions = ReturnType<typeof extractGroupDisplayOptions>
+
+/**
+ * A metric chart's table, shaped ONCE — the Markdown, HTML and `.docx` exports
+ * each render it (#1406 D5) — or `null` when the shapers could not build it.
+ */
 function convertMetrics(
   metrics: MetricDefinitionResponse[],
   chartType: ChartType | null,
   metricType: string,
-  format: 'md' | 'html',
-): string {
-  const table = format === 'md' ? mdTable : htmlTable
+  groupOpts: GroupDisplayOptions,
+  binWidth?: number | null,
+): ExportTable | null {
+  const table = (headers: string[], rows: string[][]): ExportTable => ({ headers, rows })
 
   try {
     if (metricType === 'frequency_distribution') {
-      if (chartType === 'heatmap' || metrics.length > 1) {
-        const data = shapeHeatmapRows(metrics)
+      // #1406 — a histogram's table is its BINS, as drawn (pooled across groups
+      // when grouped — `shapeHistogramBars` says so under the chart).
+      if (chartType === 'histogram' && metrics.length === 1) {
+        const { bars } = shapeHistogramBars(metrics[0], { binWidth })
+        return table(['Bin', '%', 'Count'], bars.map(b => [b.label, `${fmt(b.value)}%`, String(b.count ?? '')]))
+      }
+      // #1406 — ONE grouped distribution is a row per group, the heatmap's
+      // shape; `shapeFrequencyBars` read `results[0]`, the missing-group bucket.
+      if (chartType === 'heatmap' || metrics.length > 1 || isGroupedMetrics(metrics)) {
+        const data = shapeHeatmapRows(metrics, groupOpts)
         const headers = ['Variable', ...data.columnLabels, 'N']
+        // #1412: a row nobody answered is `—` and why in every cell, never `0%`.
         const rows = data.rows.map(r => [
           r.label,
-          ...r.cells.map(c => c ? `${fmt(c.percentage)}%` : ''),
+          ...r.cells.map(c => c ? fmtFrequencyShare(c.percentage, c.undefinedReason) : ''),
           String(r.totalN ?? ''),
         ])
         return table(headers, rows)
@@ -631,17 +750,23 @@ function convertMetrics(
       // Single frequency distribution
       const bars = shapeFrequencyBars(metrics[0])
       const headers = ['Response', '%', 'Count']
-      const rows = bars.map(b => [b.label, `${fmt(b.value)}%`, String(b.count ?? '')])
+      const rows = bars.map(b => [b.label, fmtFrequencyShare(b.value, b.undefinedReason), String(b.count ?? '')])
       return table(headers, rows)
     }
 
     // Scalar metrics
     if (chartType === 'dumbbell') {
-      const data = shapeDumbbellRows(metrics)
+      // #1406 — the embed hides the saved hidden groups; so must its table.
+      const data = shapeDumbbellRows(metrics, undefined, groupOpts)
       const headers = ['Metric', ...data.groupValues.map(g => g ?? 'Overall'), 'N']
+      // One cell per HEADER, looked up by group — `r.dots.map` shifted every
+      // later column left under a metric that has no result for some group.
       const rows = data.rows.map(r => [
         r.label,
-        ...r.dots.map(d => fmt(d.value)),
+        ...data.groupValues.map(g => {
+          const d = r.dots.find(dd => dd.groupValue === g)
+          return d ? fmtScalar(d.value, d.undefinedReason) : ''
+        }),
         String(r.dots[0]?.n ?? ''),
       ])
       return table(headers, rows)
@@ -652,7 +777,7 @@ function convertMetrics(
       if (data.series.length <= 1) {
         const headers = ['Metric', 'Value', 'N']
         const rows = (data.series[0]?.points ?? []).map(p => [
-          p.label, fmt(p.value), String(p.n ?? ''),
+          p.label, fmtScalar(p.value, p.undefinedReason), String(p.n ?? ''),
         ])
         return table(headers, rows)
       }
@@ -660,18 +785,29 @@ function convertMetrics(
       const points = data.series[0]?.points ?? []
       const rows = points.map((p, i) => [
         p.label,
-        ...data.series.map(s => fmt(s.points[i]?.value)),
+        ...data.series.map(s => {
+          const q = s.points[i]
+          return q ? fmtScalar(q.value, q.undefinedReason) : ''
+        }),
       ])
       return table(headers, rows)
     }
 
-    // Default: scalar bars
-    const bars = shapeScalarBars(metrics)
+    // Default: scalar bars (and the summary table) — through THE decision the
+    // embed draws by (#1406), so a grouped figure exports a row per group, each
+    // with its own n, an undefined group as `—` and a real 0 as `0`.
+    const figure = shapeScalarBarFigure(metrics, groupOpts)
+    if (figure.kind === 'grouped') {
+      const rows = figure.sections.flatMap(s => s.groups.map(g => [
+        s.metricName, g.groupValue, fmtScalar(g.value, g.undefinedReason), String(g.n),
+      ]))
+      return table(['Metric', 'Group', 'Value', 'N'], rows)
+    }
     const headers = ['Metric', 'Value', 'N']
-    const rows = bars.map(b => [b.label, fmt(b.value), String(b.n ?? '')])
+    const rows = figure.bars.map(b => [b.label, fmtScalar(b.value, b.undefinedReason), String(b.n ?? '')])
     return table(headers, rows)
   } catch {
-    return format === 'md' ? '*[Chart data could not be converted to table]*' : '<p><em>Chart data could not be converted to table</em></p>'
+    return null
   }
 }
 
@@ -685,7 +821,11 @@ function renderTextWithMarks(node: TiptapNode): string {
       case 'bold': text = `**${text}**`; break
       case 'italic': text = `*${text}*`; break
       case 'strike': text = `~~${text}~~`; break
-      case 'link': text = `[${text}](${(mark.attrs?.href as string) ?? ''})`; break
+      case 'link': {
+        const href = exportableHref(mark.attrs?.href)
+        if (href != null) text = `[${text}](${href})`
+        break
+      }
     }
   }
   return text
@@ -891,7 +1031,11 @@ function renderTextWithMarksHtml(node: TiptapNode): string {
       case 'bold': text = `<strong>${text}</strong>`; break
       case 'italic': text = `<em>${text}</em>`; break
       case 'strike': text = `<s>${text}</s>`; break
-      case 'link': text = `<a href="${esc((mark.attrs?.href as string) ?? '')}">${text}</a>`; break
+      case 'link': {
+        const href = exportableHref(mark.attrs?.href)
+        if (href != null) text = `<a href="${esc(href)}">${text}</a>`
+        break
+      }
     }
   }
   return text
@@ -945,7 +1089,7 @@ function nodeToHtml(node: TiptapNode, chartTables: Map<number, { md: string; htm
       const pngDataUrl = mid ? chartPngs.get(mid) : undefined
       let html = `<div class="chart"><h4>${title}</h4>\n`
       if (pngDataUrl) {
-        html += `<img src="${pngDataUrl}" alt="${title}" style="max-width:100%;margin-bottom:0.75rem" />\n`
+        html += `<img src="${esc(pngDataUrl)}" alt="${title}" style="max-width:100%;margin-bottom:0.75rem" />\n`
       }
       html += tableData?.html ?? '<p><em>Chart data not available</em></p>'
       if (tag) html += `\n<p class="tag">Tag: ${esc(tag)}</p>`
@@ -953,7 +1097,7 @@ function nodeToHtml(node: TiptapNode, chartTables: Map<number, { md: string; htm
     }
 
     case 'memo-embed': {
-      const numId = (node.attrs?.numericId as number) ?? ''
+      const numId = esc(node.attrs?.numericId)
       const title = esc((node.attrs?.title as string) ?? '')
       const preview = esc((node.attrs?.preview as string) ?? '')
       const tag = (node.attrs?.materialTag as string) ?? ''
@@ -1106,6 +1250,7 @@ export async function exportCanvasHtml(
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+${EXPORT_CSP_META}
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${esc(canvas.name)}</title>
 <style>${HTML_STYLES}</style>
@@ -1191,6 +1336,7 @@ export async function exportCanvasPdf(
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+${EXPORT_CSP_META}
 <title>${esc(canvas.name)}</title>
 <style>${HTML_STYLES}
 ${PRINT_STYLES}</style>

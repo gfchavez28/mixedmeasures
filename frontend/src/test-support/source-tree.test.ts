@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { stripComments } from '@/lib/strip-comments'
-import { SOURCE_SCAN_TIMEOUT_MS, SRC_DIR, sourceFiles, srcRel } from './source-tree'
+import {
+  ELECTRON_DIR, SOURCE_SCAN_TIMEOUT_MS, SRC_DIR, shellSources, sourceFiles, srcRel,
+} from './source-tree'
 
 /**
  * The guard that makes `sourceFiles()` unavoidable — and the self-checks that
@@ -118,5 +120,19 @@ describe('sourceFiles() — the self-checks a walker owes its consumers', () => 
     const files = sourceFiles({ ext: 'both', floor: 400 })
     expect(files.every(f => f.startsWith(SRC_DIR))).toBe(true)
     expect([...files].sort()).toEqual(files)
+  })
+})
+
+describe('shellSources() — the same self-checks, for the shell’s folder (#1268)', () => {
+  it('lists the shell’s modules and not its tests, absolute and sorted', () => {
+    const files = shellSources({ floor: 5, sentinels: ['main.js'] })
+    expect(files.every(f => f.startsWith(ELECTRON_DIR) && f.endsWith('.js'))).toBe(true)
+    expect(files.some(f => f.endsWith('.test.js'))).toBe(false)
+    expect([...files].sort()).toEqual(files)
+  })
+
+  it('throws below its floor and on a missing sentinel — never a short list', () => {
+    expect(() => shellSources({ floor: 10_000 })).toThrow(/below the floor/)
+    expect(() => shellSources({ floor: 1, sentinels: ['no-such-module.js'] })).toThrow(/cannot see/)
   })
 })

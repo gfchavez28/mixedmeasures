@@ -105,8 +105,8 @@ export const ALL_CODERS_QUERY_KEY = [...CODERS_QUERY_KEY, 'all'] as const
  * archiving a model coder (Settings lists it for exactly that) would have put its
  * codings back into every gauge: its chips are hidden by default (#451), its
  * passages counted as coded. The archive-inclusive list is `['coders', 'all']`,
- * which Settings already fetches; every roster invalidation and
- * `resetCoderRoster` reach it by prefix.
+ * which Settings already fetches; every roster invalidation reaches it by
+ * prefix, and `resetCoderRoster` invalidates it by name.
  *
  * ⚠️ Until that list answers, the set is the ACTIVE roster's machines — which is
  * cached on every page (TopRail reads it), so the only thing a first render can
@@ -136,8 +136,18 @@ export function useMachineCoderIds(): ReadonlySet<number> {
  * conversation showed 8 of their chips with no blind toggle, still there a
  * minute later, because nothing refetched the roster while the page stayed
  * open. A reset makes the roster honestly unknown, which the blind lens treats
- * as blind. Prefix-matched, so Settings' `['coders', 'all']` resets too.
+ * as blind.
+ *
+ * 🔴 **Only the ACTIVE roster is reset — `exact`** (10-19 group C item 11). It is
+ * the one list blind mode reads (`useBlindMode` → `useCoders`). The archive-
+ * inclusive `['coders', 'all']` decides nothing private (Settings' roster
+ * manager, the coding import's picker, `useMachineCoderIds`), so it is
+ * INVALIDATED: reset, it blanked the list holding the button just pressed.
+ * Resolves when both lists have answered — a caller lands focus on that.
  */
 export function resetCoderRoster(queryClient: QueryClient): Promise<void> {
-  return queryClient.resetQueries({ queryKey: CODERS_QUERY_KEY })
+  return Promise.all([
+    queryClient.resetQueries({ queryKey: CODERS_QUERY_KEY, exact: true }),
+    queryClient.invalidateQueries({ queryKey: ALL_CODERS_QUERY_KEY }),
+  ]).then(() => undefined)
 }

@@ -96,7 +96,8 @@ const docAbout = (name: string, id = 11) => [{ id, name, source_format: 'txt' }]
 
 const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   participant_id: 0, identifier: '', display_name: null, role: null, has_demographics: false,
-  speaker_names: [], conversations: [], datasets: [], documents: [], total_items: 1, ...over,
+  speaker_names: [], conversations: [], datasets: [], documents: [], total_items: 1,
+  unlinked_records_with_identifier: 0, ...over,
 })
 
 let lastClient: QueryClient
@@ -338,6 +339,42 @@ describe('#1091 — what else the panel must survive', () => {
     fireEvent.click(confirm)
     await waitFor(() => expect(withdraw).toHaveBeenCalled())
     await waitFor(() => expect(screen.queryByRole('complementary')).toBeNull())
+  })
+
+  /**
+   * 🔴 #1320 — the server rewrote the canvas copies of their quotes and deleted the
+   * quotes. A canvas left in the cache would hand its OLD content to the next
+   * Writing view, whose editor binds content once and autosaves it — writing their
+   * words straight back. So the canvas content is RESET (no data at all), and every
+   * other surface showing their quotes or words is invalidated.
+   */
+  it('#1320: a withdrawal drops cached canvas content and marks quote and search caches stale', async () => {
+    withdraw.mockResolvedValue({ identifier: 'P001', backup_filename: 'b.mmbackup', documents_unlinked: 0 })
+    renderPage(people())
+    await screen.findByText('P001')
+    const reset = [['canvas', 1, 4], ['snapshot-detail', 1, 4, 9]]
+    const stale = [
+      ['canvases', 1], ['snapshots', 1, 4], ['excerpts', 1], ['excerpts-quoted', 1],
+      ['quote-board-config', 1], ['search', 1, 'maria', '', null, false],
+      ['conversation', 1, 3], ['speakers', 1], ['segments', 3],
+    ]
+    for (const key of [...reset, ...stale]) lastClient.setQueryData(key, { cached: true })
+    // A key from ANOTHER project: the prefixes are project-scoped.
+    lastClient.setQueryData(['canvas', 2, 4], { cached: true })
+
+    fireEvent.click(screen.getByRole('button', { name: "Remove P001's data (withdrawal request)" }))
+    const confirm = await screen.findByRole('button', { name: /Back up and remove/ })
+    await waitFor(() => expect(confirm).not.toHaveAttribute('aria-disabled'))
+    fireEvent.click(confirm)
+    await waitFor(() => expect(withdraw).toHaveBeenCalled())
+
+    await waitFor(() => {
+      for (const key of reset) expect(lastClient.getQueryData(key), JSON.stringify(key)).toBeUndefined()
+    })
+    for (const key of stale) {
+      expect(lastClient.getQueryState(key)?.isInvalidated, JSON.stringify(key)).toBe(true)
+    }
+    expect(lastClient.getQueryData(['canvas', 2, 4])).toEqual({ cached: true })
   })
 })
 

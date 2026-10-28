@@ -47,7 +47,7 @@ import { useCoders, useMachineCoderIds } from '@/hooks/useCoders'
 import { useCoderCoverage } from '@/hooks/useCoderCoverage'
 import { isSegmentCodedVisible, computeCoverage, isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
 import { lensHidesAnyCoder } from '@/lib/coder-color'
-import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { invalidateAfterRating, invalidateDerivedCounts } from '@/lib/coding-cache'
 import { describeQuoteNotesStayed } from '@/lib/split-disclosure'
 import { collectBulkOutcome, describeBulkFailure } from '@/lib/bulk-code-result'
 import {
@@ -61,6 +61,10 @@ import CollapsiblePanel, { PANEL_EXPANDED, PANEL_RAIL_SCROLL } from '@/component
 import NotesPanel, { type NotesPanelHandle } from '@/components/NotesPanel'
 import MemoPanel, { type MemoPanelHandle } from '@/components/MemoPanel'
 import { useHistory } from '@/hooks/useHistory'
+import { useTextEditSave } from '@/hooks/useTextEditSave'
+import { TextEditQuotesDialog } from '@/components/TextEditQuotesDialog'
+import type { TextEditDoor } from '@/lib/text-edit-quotes'
+import { excerptRestorePayload } from '@/lib/excerpt-shape'
 import { PageErrorBoundary } from '@/components/PageErrorBoundary'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import FloatingCreateCode, { type FloatingCoords } from '@/components/FloatingCreateCode'
@@ -170,6 +174,14 @@ export default function CodingWorkbench() {
   // Undo/Redo history (Item 28)
   // #1042: the stack is this coder's — a coder switch clears it.
   const history = useHistory(user?.id ?? null)
+  // #1319: a text edit's save flow (preview → quotes dialog → history), shared
+  // with the document workbench.
+  const {
+    save: saveTextEdit,
+    isSaving: isTextEditSaving,
+    dialogProps: textEditDialogProps,
+  } = useTextEditSave(history.execute)
+  const pendingNextEditRef = useRef<{ segmentId: number; field: 'text' | 'speaker' } | null>(null)
 
   // Fetch data
   const { data: project, isLoading: projectLoading, isError: projectError } = useQuery({
@@ -908,12 +920,13 @@ export default function CodingWorkbench() {
       try {
         await codingApi.setMagnitude(segmentId, codeId, value)
         queryClient.invalidateQueries({ queryKey: key })
+        invalidateAfterRating(queryClient, pid)   // #1425: α, the grid, the queue — elsewhere
       } catch (e) {
         queryClient.setQueryData(key, snapshot)
         throw e
       }
     },
-    [queryClient, cid, patchSegmentMagnitude],
+    [queryClient, cid, pid, patchSegmentMagnitude],
   )
 
   // The rating a given coder currently holds, read from the same cache the chips
@@ -1394,39 +1407,70 @@ export default function CodingWorkbench() {
       const segment = segmentMap.get(segmentId)
       if (!segment) return
 
-      const oldText = segment.text
+      if (update.text !== undefined) {
+        // #1319 — a text edit carries the turn's quotes: preview, confirm what it
+        // would change (D5), then save. The editor stays open with the typed text
+        // until the server has answered, and "Saved" means saved.
+        const door: TextEditDoor = {
+          preview: (text) => segmentsApi.previewTextEdit(cid, segmentId, text),
+          apply: async (text, answer) => {
+            const res = await segmentsApi.updateSegment(cid, segmentId, { text, ...answer })
+            if (!res.quote_rebase) throw new Error('A text edit answered without its quote report')
+            return res.quote_rebase
+          },
+          recreateQuote: async (q) => (await excerptsApi.create(pid, excerptRestorePayload({
+            segment_id: segmentId, dataset_value_id: null,
+            start_offset: q.old_start, end_offset: q.old_end,
+          }))).id,
+          refresh: () => { queryClient.invalidateQueries({ queryKey: ['segments', cid] }) },
+        }
+        void saveTextEdit({ segmentId, oldText: segment.text, newText: update.text, door }).then(result => {
+          if (result === 'busy') return
+          const next = pendingNextEditRef.current?.segmentId === segmentId ? pendingNextEditRef.current : null
+          pendingNextEditRef.current = null
+          if (result !== 'saved') return
+          if (next) setEditField(next.field)
+          else setEditingSegmentId(cur => (cur === segmentId ? null : cur))
+          showSaved()
+        })
+        return
+      }
+
       const oldSpeakerId = segment.speaker_id
-
-      const description = update.text !== undefined
-        ? 'Edit segment text'
-        : 'Change segment speaker'
-
-      history.execute({
+      let saved = false
+      void history.execute({
         type: 'segment_edit',
-        description,
+        description: 'Change segment speaker',
         redo: async () => {
           await segmentsApi.updateSegment(cid, segmentId, update)
           queryClient.invalidateQueries({ queryKey: ['segments', cid] })
+          saved = true
         },
         undo: async () => {
-          const undoData: { text?: string; speaker_id?: number } = {}
-          if (update.text !== undefined) undoData.text = oldText
+          const undoData: { speaker_id?: number } = {}
           if (update.speaker_id !== undefined && oldSpeakerId !== null) undoData.speaker_id = oldSpeakerId
           await segmentsApi.updateSegment(cid, segmentId, undoData)
           queryClient.invalidateQueries({ queryKey: ['segments', cid] })
         },
-      })
+      }).then(() => { if (saved) showSaved() })
 
       setEditingSegmentId(null)
-      showSaved()
     },
-    [cid, segmentMap, history, queryClient, showSaved]
+    [cid, pid, segmentMap, history, saveTextEdit, queryClient, showSaved]
   )
 
   const handleStartEdit = useCallback((segmentId: number, field: string) => {
+    // #1319: Tab in the text editor saves and then asks for the speaker editor.
+    // While that save is still deciding (a preview, perhaps the quotes dialog),
+    // switching would unmount the editor holding the typed text — so the switch
+    // waits for the save, and is dropped if the save does not land.
+    if (isTextEditSaving(segmentId)) {
+      pendingNextEditRef.current = { segmentId, field: field as 'text' | 'speaker' }
+      return
+    }
     setEditingSegmentId(segmentId)
     setEditField(field as 'text' | 'speaker')
-  }, [])
+  }, [isTextEditSaving])
 
   const handleCancelEdit = useCallback(() => {
     setEditingSegmentId(null)
@@ -2143,6 +2187,9 @@ export default function CodingWorkbench() {
 
         </div>{/* end tail group (#516) */}
       </div>
+
+      {/* #1319 — the quotes a text edit would change, before it is saved. */}
+      <TextEditQuotesDialog {...textEditDialogProps} />
 
       {/* Remove audio confirmation */}
       <ConfirmDialog

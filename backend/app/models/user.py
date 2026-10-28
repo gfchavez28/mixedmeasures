@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -34,6 +36,16 @@ class User(Base):
     # researcher has not recorded — which is honest and is the state every other
     # tool is permanently in. Nothing infers a value for it.
     machine_provenance = Column(Text, nullable=True)
+
+    # ── A coder's identity across installs (#1352 / #1246, migration c6e2a8d41f97) ──
+    # Minted where the coder is created and carried in every `.mmproject`
+    # (`project_portability.CODER_PORTABLE_FIELDS`), so an import recognises a coder it
+    # has seen before by WHO they are, not by a name every install starts with
+    # ("Researcher"). NOT a project-entity uuid: an import never fresh-stamps it, in
+    # any mode — a person is the same person in every copy. ⚠️ A cloned database (one
+    # `.mmbackup` restored on two machines) clones the identities with it; the merge's
+    # confirm step is where a researcher separates them.
+    uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
 
     projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
 

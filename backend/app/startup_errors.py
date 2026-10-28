@@ -149,6 +149,36 @@ def _write_marker_line(out: TextIO, line: str) -> None:
     buffer.flush()
 
 
+#: The marker for a startup PHASE the shell should know about (#1362). Mirrored in
+#: `electron/fatal-error.js`, like `MM_FATAL_PREFIX`. Not a failure: the dialog never
+#: shows these lines.
+MM_PHASE_PREFIX = "MM-PHASE: "
+
+#: The phases this backend announces. `migrating` goes out when an update of the
+#: database is about to start (before its pre-migration copy); `migrated` when it has
+#: committed. The shell waits for the update with its own, longer deadline in between.
+STARTUP_PHASES = ("migrating", "migrated")
+
+
+def emit_startup_phase(phase: str, stream: TextIO | None = None) -> None:
+    """Tell the shell which startup phase this is (#1362). Never raises.
+
+    The lifespan migrates BEFORE uvicorn serves, so `/health` cannot say "updating";
+    stderr is the channel the shell already reads and buffers across chunks for
+    `MM-FATAL:`. The same writer as the fatal line (bytes, never `logging`), and the
+    payload is ASCII from `STARTUP_PHASES`, never user data.
+    """
+    if phase not in STARTUP_PHASES:
+        raise ValueError(f"unknown startup phase {phase!r}")
+    out = stream if stream is not None else sys.stderr
+    if out is None:
+        return
+    try:
+        _write_marker_line(out, f"\n{MM_PHASE_PREFIX}{phase}\n")
+    except Exception:  # noqa: BLE001 — a report must never stop the startup it reports
+        pass
+
+
 def emit_fatal_startup(exc: BaseException, stream: TextIO | None = None) -> None:
     """Write the marker line to stderr. Never raises, never masks `exc`.
 

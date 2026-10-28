@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest'
 import {
   withdrawalLocations, describeDeleteConsequence, withdrawalHeadline,
   keptSummary, removedSummary, withdrawalDoneNote, WITHDRAWAL_SCOPE_NOTE,
+  WITHDRAWAL_RESIDUAL_NOTE, WITHDRAWAL_BACKUP_RESIDUAL, WITHDRAWAL_RECORD_NOTE,
+  unlinkedRecordsNote,
 } from './withdrawal-copy'
 import type { WithdrawalReport } from '@/lib/api/participants'
 
@@ -22,7 +24,7 @@ const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   speaker_names: ['Jane'],
   conversations: [{
     conversation_id: 1, name: 'Interview A',
-    segments: 12, code_applications: 4, excerpts: 1, notes: 1,
+    segments: 12, combined_turns: 0, code_applications: 4, excerpts: 1, notes: 1,
   }],
   datasets: [{
     dataset_id: 1, name: 'Board Survey',
@@ -31,7 +33,16 @@ const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   }],
   documents: [],
   total_items: 59,
+  unlinked_records_with_identifier: 0,
   ...over,
+})
+
+/** #1320 — their words also in turns reached only by a merge or a split. */
+const merged = (combined: number) => report({
+  conversations: [{
+    conversation_id: 1, name: 'Interview A',
+    segments: 12, combined_turns: combined, code_applications: 4, excerpts: 1, notes: 1,
+  }],
 })
 
 const workplan = (name = 'Workplan 2026', segments = 3) => ({
@@ -55,11 +66,17 @@ describe('withdrawalLocations', () => {
     const line = withdrawalLocations(report({
       conversations: [{
         conversation_id: 1, name: 'Interview A',
-        segments: 1, code_applications: 0, excerpts: 0, notes: 0,
+        segments: 1, combined_turns: 0, code_applications: 0, excerpts: 0, notes: 0,
       }],
       datasets: [],
     }))
     expect(line).toEqual(['Interview A — 1 turn'])
+  })
+
+  it('#1320: counts the turns their words reached by a merge or a split', () => {
+    expect(withdrawalLocations(merged(2))[0])
+      .toBe('Interview A — 12 turns, 2 merged or split turns, 4 codes, 1 quote, 1 note')
+    expect(withdrawalLocations(merged(1))[0]).toContain('1 merged or split turn,')
   })
 })
 
@@ -117,6 +134,10 @@ describe('describeDeleteConsequence', () => {
     expect(describeDeleteConsequence(report())).toMatch(/"Jane" remain in/)
   })
 
+  it('#1320: a merged or split turn holding their words survives a delete too', () => {
+    expect(describeDeleteConsequence(merged(3))).toContain('15 transcript turns')
+  })
+
   it('has a safe form before the report has loaded', () => {
     // The dialog can open before the fetch resolves; silence there would be the
     // old behaviour by accident.
@@ -160,6 +181,86 @@ describe('WITHDRAWAL_SCOPE_NOTE (#1136)', () => {
     expect(WITHDRAWAL_SCOPE_NOTE).toMatch(/notes and memos/)
     expect(WITHDRAWAL_SCOPE_NOTE).toMatch(/not compliance advice/)
   })
+
+  it('#1320 (D12): says what it does not reach — recordings and every earlier copy', () => {
+    expect(WITHDRAWAL_SCOPE_NOTE).toContain(
+      'It does not edit recordings, and backups, safety copies and files exported before '
+      + 'the withdrawal still hold their data.')
+  })
+})
+
+describe('#1320 (D12) — the disclosure, as decided', () => {
+  it('the confirm names every copy that still holds the data, and recordings', () => {
+    // Pinned whole: the developer decided this wording (#1320 D12); #1190 appends the
+    // sentence about the withdrawal's own record, pinned on its own below.
+    expect(WITHDRAWAL_RESIDUAL_NOTE).toBe(
+      'For honouring a withdrawal request. A full backup is taken first. That backup, your '
+      + 'earlier backups, the safety copies kept before a merge or overwrite, and any file '
+      + 'already exported or shared still hold everything this removes until they are '
+      + 'deleted. Automatic and On quit backups are replaced over time; the others stay '
+      + 'until you delete them in Settings › Backup & Data. Recordings are not edited — '
+      + 'their voice stays in the audio or video. There is no per-person undo: restoring '
+      + 'a backup also undoes any work done after it. ' + WITHDRAWAL_RECORD_NOTE)
+  })
+})
+
+describe('#1190 — what the withdrawal leaves behind on purpose', () => {
+  it('says merging, importing and linking do not bring them back, and the hand-add asks', () => {
+    expect(WITHDRAWAL_RECORD_NOTE).toBe(
+      'Afterwards this project keeps a record of the withdrawal: merging or importing a copy '
+      + 'of it, or linking records or speakers to participants, does not bring them back, and '
+      + 'adding a participant with their ID asks first. Project files exported afterwards carry '
+      + 'that record. It keeps their ID as a one-way code, which is not anonymisation — anyone '
+      + 'who can guess the ID can confirm it from the code.')
+  })
+
+  it('D9: never calls the kept ID anonymous', () => {
+    expect(WITHDRAWAL_RECORD_NOTE).toMatch(/not anonymisation/)
+    expect(WITHDRAWAL_RECORD_NOTE).not.toMatch(/\banonymi[sz]ed\b|\banonymous\b/)
+  })
+
+  it('never claims the copies made BEFORE are cleaned — the earlier sentence keeps them', () => {
+    expect(WITHDRAWAL_RECORD_NOTE).not.toMatch(/every copy|all copies|removed everywhere/)
+    expect(WITHDRAWAL_RESIDUAL_NOTE).toMatch(/any file already exported or shared still hold everything/)
+  })
+
+  it('D14: counts unlinked records carrying their ID — never deleted, never named', () => {
+    expect(unlinkedRecordsNote(report())).toBeNull()
+    const one = unlinkedRecordsNote(report({ unlinked_records_with_identifier: 1 }))
+    expect(one).toBe('1 dataset record linked to no one carries their ID. It stays — check it '
+      + 'yourself: a matching ID does not prove the record is theirs')
+    expect(unlinkedRecordsNote(report({ unlinked_records_with_identifier: 3 })))
+      .toMatch(/^3 dataset records linked to no one carry their ID\. They stay/)
+    // Said where the decision is made: the withdrawal confirm's "kept" list.
+    expect(keptSummary(report({ unlinked_records_with_identifier: 3 })))
+      .toContain(unlinkedRecordsNote(report({ unlinked_records_with_identifier: 3 })))
+    expect(keptSummary(report()).join(' ')).not.toMatch(/linked to no one/)
+    // Never the identifier, never the name.
+    expect(one).not.toMatch(/P001|Jane/)
+  })
+
+  it('the note after a withdrawal ends on the backups, whatever else it says', () => {
+    const backups = 'The “Before a withdrawal” backup taken now, and every earlier backup, '
+      + 'still hold their data until you delete them in Settings › Backup & Data.'
+    expect(WITHDRAWAL_BACKUP_RESIDUAL).toBe(backups)
+    for (const docs of [0, 1, 3]) expect(withdrawalDoneNote(docs).endsWith(backups)).toBe(true)
+  })
+})
+
+describe('#1320 (D7) — a merged or split turn holding their words', () => {
+  it('the confirm says it is blanked whole, the other speaker’s words in it included', () => {
+    expect(removedSummary(merged(1))).toContain(
+      'All the words of 1 merged or split turn holding theirs, including anything others said in it')
+    expect(removedSummary(merged(4))).toContain(
+      'All the words of 4 merged or split turns holding theirs, including anything others said in them')
+    expect(removedSummary(report()).join(' ')).not.toMatch(/merged or split/)
+  })
+
+  it('and that the other speaker loses nothing: Unmerge brings their own turn back', () => {
+    expect(keptSummary(merged(2)).join(' | ')).toMatch(
+      /What others said in a merged turn is still in their own turn from before the merge — Unmerge brings it back/)
+    expect(keptSummary(report()).join(' | ')).not.toMatch(/Unmerge/)
+  })
 })
 
 describe('#1123 — the document arm, on every sentence that reads the report', () => {
@@ -188,8 +289,10 @@ describe('#1123 — the document arm, on every sentence that reads the report', 
 
   it('the note after a withdrawal counts the documents it unlinked', () => {
     expect(withdrawalDoneNote(0)).toBe(
-      'Now search your transcripts and free-text answers for their name — that part cannot be automated.')
-    expect(withdrawalDoneNote(1)).toMatch(/ 1 document no longer says who it is about — read it too\.$/)
-    expect(withdrawalDoneNote(3)).toMatch(/ 3 documents no longer say who they are about — read them too\.$/)
+      'Now search your transcripts and free-text answers for their name — that part cannot be automated. '
+      + WITHDRAWAL_BACKUP_RESIDUAL)
+    expect(withdrawalDoneNote(1)).toContain(' 1 document no longer says who it is about — read it too. ')
+    expect(withdrawalDoneNote(3)).toContain(' 3 documents no longer say who they are about — read them too. ')
+    expect(withdrawalDoneNote(0)).not.toMatch(/document/)
   })
 })

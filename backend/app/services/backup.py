@@ -50,7 +50,7 @@ from ..schemas.backup import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.5.7"
+APP_VERSION = "1.5.8"
 MANIFEST_FORMAT_VERSION = 1
 STALE_HOURS = 24
 #: How far ahead of this clock a backup's MODIFICATION time may read and still count

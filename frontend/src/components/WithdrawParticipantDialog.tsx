@@ -33,6 +33,13 @@
  * #1139 — capped at the window and scrolling inside it (a short window had the
  * title and both buttons off-screen, nothing scrolling): `DIALOG_FITS_VIEWPORT`, as
  * `Dashboard.tsx`'s import preview does for the same reason.
+ *
+ * 🔴 #1320 (D12) — **it says what still holds the data.** It said "a full backup is
+ * taken first" and nothing of what that backup MEANS: it, every earlier backup, the
+ * safety copies and any exported file hold everything removed, and recordings are
+ * never edited. A researcher recording that a request was honoured needs to know
+ * which copies they still have to deal with. The sentence is
+ * `withdrawal-copy.ts::WITHDRAWAL_RESIDUAL_NOTE`, inside the description.
  */
 import { useRef } from 'react'
 import { TriangleAlert, Info } from 'lucide-react'
@@ -42,7 +49,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import type { WithdrawalReport } from '@/lib/api'
 import type { ListLoad } from '@/lib/list-status'
-import { removedSummary, keptSummary } from '@/lib/withdrawal-copy'
+import { removedSummary, keptSummary, WITHDRAWAL_RESIDUAL_NOTE } from '@/lib/withdrawal-copy'
 import { withdrawConfirmTitle, type ParticipantNaming } from '@/lib/participant-naming'
 import { MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
 import { useKeepInViewWhen } from '@/hooks/useKeepInViewWhen'
@@ -115,11 +122,11 @@ export default function WithdrawParticipantDialog({
           <AlertDialogTitle>{withdrawConfirmTitle(participant)}</AlertDialogTitle>
           <AlertDialogDescription asChild>
             <div className="space-y-3">
-              <p>
-                For honouring a withdrawal request. A full backup is taken first — but
-                there is no per-person undo, so restoring it would also undo any work
-                done afterwards.
-              </p>
+              {/* #1320 (D12) — every copy that still holds what this removes:
+                  the backup it takes, the earlier ones, safety copies, exported
+                  files, and recordings, which it never edits. Inside the
+                  description, so it is heard on open. */}
+              <p>{WITHDRAWAL_RESIDUAL_NOTE}</p>
 
               {/* #1152 — the shared loading line (and, after a failure, the
                   shared notice with its Retry) where the lists will be: inside

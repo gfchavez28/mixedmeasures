@@ -35,6 +35,8 @@ import {
   serverDetailMessage,
 } from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
+import { useWithdrawnIdentifierConfirm } from '@/hooks/useWithdrawnIdentifierConfirm'
+import { createConfirmingWithdrawn, WITHDRAWN_RENAME_WORDING } from '@/lib/withdrawn-identifier'
 import { invalidateAfterParticipantLinkChange } from '@/lib/participant-link-cache'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { LoadState } from '@/components/LoadStatus'
@@ -52,6 +54,7 @@ import {
   withdrawalLocations, describeDeleteConsequence, withdrawalHeadline, withdrawalDoneNote,
   WITHDRAWAL_SCOPE_NOTE,
   bulkDeleteDescription,
+  unlinkedRecordsNote,
 } from '@/lib/withdrawal-copy'
 import WithdrawParticipantDialog from '@/components/WithdrawParticipantDialog'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
@@ -214,10 +217,18 @@ export default function ParticipantsPage() {
   }, [selectedParticipantId])
 
   // Mutations
+  // #1190 (D12) — an ID that belongs to someone who withdrew is refused with its own
+  // 409, and the researcher is asked (the server's sentence) before the override is
+  // sent. `null` = they declined: nothing was created, and the form stays as it was.
+  const { ask: askWithdrawn, dialog: withdrawnDialog } = useWithdrawnIdentifierConfirm()
   const createParticipantMutation = useMutation({
     mutationFn: (data: { identifier: string; display_name?: string; role?: string }) =>
-      participantsApi.create(projectId, data),
-    onSuccess: () => {
+      createConfirmingWithdrawn(
+        (confirm) => participantsApi.create(projectId, confirm ? { ...data, confirm_withdrawn: true } : data),
+        askWithdrawn,
+      ),
+    onSuccess: (created) => {
+      if (created === null) return
       queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
       setNewParticipantName('')
       setNewParticipantRole('')
@@ -227,9 +238,16 @@ export default function ParticipantsPage() {
   })
 
   const updateParticipantMutation = useMutation({
+    // #1190 (D12) — a RENAME to a withdrawn person's ID is refused the same way and asks
+    // the same question, in a rename's words; `null` = declined, nothing was renamed.
     mutationFn: ({ participantId, data }: { participantId: number; data: { identifier?: string; display_name?: string; role?: string } }) =>
-      participantsApi.update(projectId, participantId, data),
-    onSuccess: (_result, { participantId }) => {
+      createConfirmingWithdrawn(
+        (confirm) => participantsApi.update(
+          projectId, participantId, confirm ? { ...data, confirm_withdrawn: true } : data),
+        (sentence) => askWithdrawn(sentence, WITHDRAWN_RENAME_WORDING),
+      ),
+    onSuccess: (result, { participantId }) => {
+      if (result === null) return
       queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
       queryClient.invalidateQueries({ queryKey: ['speakers', projectId] })
       queryClient.invalidateQueries({ predicate: (query) => query.queryKey[0] === 'segments' })
@@ -309,12 +327,39 @@ export default function ParticipantsPage() {
       void queryClient.invalidateQueries({ queryKey: ['dataset'] })
       // #1123 — and a document about them no longer says so.
       void queryClient.invalidateQueries({ queryKey: ['documents', projectId] })
+      // 🔴 #1320 — the server rewrote every canvas copy of their quotes, deleted
+      // the quotes, blanked merged turns and renamed speakers.
+      // The canvas CONTENT is RESET, never merely invalidated: an invalidated
+      // query keeps serving its old data to the next mount until the refetch
+      // lands, and the theme editor binds its content ONCE, at creation
+      // (`components/canvas/the internal design notes) — so the Writing view opened next would
+      // edit their words, and its autosave would write them straight back.
+      // Reset leaves no data, so the view waits for the server's version
+      // (`useCoders.ts::resetCoderRoster`'s reason, `list-load-state.md` §5).
+      // The rest would only show what is gone until a refetch, so they are
+      // invalidated. Prefixes by grep: `CanvasView` (`canvas`, `canvases`,
+      // `snapshots`), `CanvasCompareView` (`snapshot-detail`), the Materials
+      // drawer and workbenches (`excerpts`), the Quote Board (`excerpts-quoted`,
+      // `quote-board-config`), `SearchPopover` (`search`), the workbench
+      // (`conversation`) and the turn lists (`segments`).
+      void queryClient.resetQueries({ queryKey: ['canvas', projectId] })
+      void queryClient.resetQueries({ queryKey: ['snapshot-detail', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['canvases', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['snapshots', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['excerpts', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['excerpts-quoted', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['quote-board-config', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['search', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['conversation', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['speakers', projectId] })
+      void queryClient.invalidateQueries({ predicate: (query) => query.queryKey[0] === 'segments' })
       // #1139 — the person, as the dialog named them; it said "E-01 removed".
       toast.success(
         `${participantNameWithId(target)} removed. Backup saved as ${res.backup_filename}.`,
         {
+          // #1320 — it now also names the backups, so it is held longer.
           description: withdrawalDoneNote(res.documents_unlinked),
-          duration: 12000,
+          duration: 20000,
         },
       )
       setWithdrawParticipant(null)
@@ -587,7 +632,9 @@ export default function ParticipantsPage() {
             })()}
             {createParticipantMutation.isError && (
               <p className="text-sm text-red-600">
-                {(createParticipantMutation.error as Error & { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Failed to create participant'}
+                {/* `serverDetailMessage`, never the raw `detail`: since #1190 a 409 can
+                    carry an OBJECT detail, which React cannot render. */}
+                {serverDetailMessage(createParticipantMutation.error) ?? 'Failed to create participant'}
               </p>
             )}
             <div className="flex justify-end gap-2">
@@ -607,15 +654,21 @@ export default function ParticipantsPage() {
                     display_name: name,
                   }
                   if (newParticipantRole.trim()) data.role = newParticipantRole.trim()
+                  // The busy guard (#754): `aria-disabled` below announces, this refuses.
+                  if (createParticipantMutation.isPending) return
                   createParticipantMutation.mutate(data)
                 }}
                 disabled={
                   !newParticipantName.trim() ||
-                  createParticipantMutation.isPending ||
                   (!!newParticipantName.trim() && !!participants.find(
                     p => (p.display_name || p.identifier).toLowerCase() === newParticipantName.trim().toLowerCase()
                   ) && !duplicateConfirmed)
                 }
+                // #1190 (D12) — BUSY is `aria-disabled`, never `disabled` (#959/#965):
+                // the withdrawn-ID confirm opens mid-request, and a blurred button
+                // left it no opener to return focus to.
+                aria-disabled={createParticipantMutation.isPending || undefined}
+                aria-busy={createParticipantMutation.isPending || undefined}
               >
                 {createParticipantMutation.isPending ? 'Creating...' : 'Create'}
               </Button>
@@ -870,6 +923,10 @@ export default function ParticipantsPage() {
         }}
         destructive
       />
+
+      {/* #1190 (D12) — at PAGE level: *Add Participant*'s create and a row's rename both
+          ask through it, and the rename's row closes its editor before the answer. */}
+      {withdrawnDialog}
 
       {/* #702(3) — honour a withdrawal request. */}
       <WithdrawParticipantDialog
@@ -1650,6 +1707,10 @@ function WithdrawalSection({
           {report.speaker_names.map(n => `"${n}"`).join(' / ')}, which survives
           independently of this record.
         </p>
+      )}
+      {/* #1190 (D14) — records that carry their ID but are linked to no one. */}
+      {unlinkedRecordsNote(report) && (
+        <p className="mt-2 text-xs text-mm-text-faint leading-snug">{unlinkedRecordsNote(report)}.</p>
       )}
       <p className="mt-2 text-[11px] text-mm-text-faint leading-snug">
         {WITHDRAWAL_SCOPE_NOTE}

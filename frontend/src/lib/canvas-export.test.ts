@@ -290,6 +290,35 @@ describe('fetchChartTables — qualitative embeds', () => {
     expect(md).toContain('| Trust | 4 | 1 | 40.0% | 20.0% |')
   })
 
+  it('exports — and the reason for a group with no segments, and keeps a real 0.0% (#1421)', async () => {
+    vi.mocked(codeAnalysisApi.demographicComparison).mockResolvedValueOnce({
+      groups: ['Staff', 'Volunteer', 'Board'],
+      group_totals: {
+        Staff: { total_segments: 10, total_word_count: 0 },
+        Volunteer: { total_segments: 5, total_word_count: 0 },
+        Board: { total_segments: 0, total_word_count: 0 },
+      },
+      codes: [{
+        code_id: 65, code_name: 'Trust', category_name: null,
+        by_group: {
+          Staff: { count: 4, proportion: 0.4, undefined_reason: null },
+          Volunteer: { count: 0, proportion: 0, undefined_reason: null },
+          Board: { count: 0, proportion: null, undefined_reason: 'no_segments' },
+        },
+        delta_proportion: null, test: null,
+      }],
+    } as never)
+    const tables = await fetchChartTables(
+      themeWithChart(qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: 'role' })), 3, LENS,
+    )
+
+    const row = tables.get(1)!.md.split('\n').find(l => l.startsWith('| Trust '))!
+    const cells = row.split('|').slice(1, -1).map(c => c.trim())
+    // Code, Staff n, Volunteer n, Board n, Staff %, Volunteer %, Board %
+    expect(cells.slice(0, 6)).toEqual(['Trust', '4', '0', '0', '40.0%', '0.0%'])
+    expect(cells[6]).toMatch(/^— No participant turns from this group/)  // HEAD: ''
+  })
+
   it('emits nothing for a comparison with no grouping variable', async () => {
     const tables = await fetchChartTables(
       themeWithChart(qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: null })), 3, LENS,
@@ -527,6 +556,18 @@ describe('#817 — a comparison exports the comparison', () => {
     expect(md).toContain('Under 45 n')
     expect(md).toContain('690.880')
     expect(md).toContain('Trust scale A')
+  })
+
+  it('🔴 #1315 arm 3: a comparison carrying correlation keys still exports the comparison', async () => {
+    // A pre-#1315 saver wrote every R&C key on every view, so a comparison saved
+    // after a Spearman or scatter toggle carries `corr_type` and `show_scatter`.
+    // The renderer asked "comparison?" first and drew it; this file asked
+    // "correlation?" first and exported NOTHING — "Chart data not available"
+    // under a chart the canvas showed. Both ask `quantChartKind` now.
+    const arm3 = { ...comparisonConfig, show_scatter: true, corr_type: 'spearman' }
+    const tables = await fetchChartTables(themeWithChart(arm3), 4, LENS)
+    expect(comparisonsApi.groupComparison).toHaveBeenCalled()
+    expect(tables.get(1)?.md ?? '').toContain('690.880')
   })
 
   it('prints the REASON when a row has no test, never a blank cell', async () => {

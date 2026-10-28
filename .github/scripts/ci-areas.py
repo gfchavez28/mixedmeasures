@@ -87,7 +87,11 @@ AREAS: dict[str, tuple[str, ...]] = {
         "frontend/**",
         "backend/app/schemas/scratchpad.py",                # scratchpad-context.test.ts
         "backend/tests/fixtures/recode_range_cases.json",   # recode-ranges.test.ts
-        "electron/zoom.js",                                 # zoom.test.ts
+        "electron/*",                                       # zoom.test.ts reads zoom.js;
+                                                            # no-log-instructions.test.ts LISTS
+                                                            # the folder and scans every module
+                                                            # (#1268) — a folder read is covered
+                                                            # only by a pattern matching any file
     ),
     "electron": (
         "electron/**",
@@ -773,7 +777,8 @@ def self_test() -> int:
     expect(not any(run.values()), "a Dependabot PR on the private repo plans nothing")
     pr = {**priv, "pull_request": {"user": {"login": "someone"}, "base": {"sha": "b"}, "head": {"sha": "h"}}}
     run, _, _ = decide({**env, "GITHUB_EVENT_NAME": "pull_request"}, pr,
-                       changed_pr=lambda b, h: ["electron/main.js"])
+                       # Not a top-level shell module: the frontend reads every one (#1268).
+                       changed_pr=lambda b, h: ["electron/scripts/check-fuses.js", "backend/app/main.py"])
     expect(run == {"backend": True, "frontend": False, "electron": True},
            f"a pull request runs what its own diff reaches: {run}")
     run, _, w = decide({**env, "GITHUB_EVENT_NAME": "pull_request"}, pr, changed_pr=boom)

@@ -818,8 +818,14 @@ def _run_kruskal_wallis(
 
     k = len(arrays)
     n = sum(len(a) for a in arrays)
-    # Epsilon-squared (ε²) as effect size — Tomczak & Tomczak (2014)
-    eps2 = float(max((h_stat - k + 1) / (n - 1), 0.0)) if n > 1 else 0.0
+    # Epsilon-squared, Tomczak & Tomczak (2014): E²_R = H / ((n² − 1) / (n + 1)),
+    # which is H / (n − 1) (#1327). With scipy's tie-corrected H it is EXACTLY the
+    # one-way η² of the RANKS (between-group over total sum of squares), so it lies
+    # in [0, 1] by construction and needs no clamp. The formula this replaced,
+    # (H − k + 1) / (n − 1), was neither ε² nor η²_H — (H − k + 1) / (n − k), which
+    # divides by zero when every group holds one value, a size this test accepts.
+    # n ≥ 2 here: two or more arrays, each with a value.
+    eps2 = float(h_stat) / (n - 1)
 
     return {
         "test_type": "kruskal_wallis",

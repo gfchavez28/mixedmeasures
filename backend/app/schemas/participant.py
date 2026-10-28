@@ -73,6 +73,10 @@ class ParticipantCreate(BaseModel):
     display_name: str | None = Field(None, max_length=255)
     role: str | None = Field(None, max_length=100)
     demographics: str | None = None  # JSON string
+    # #1190 D12 — an identifier a withdrawal tombstoned is refused (409,
+    # `{"error": "withdrawn_identifier", "message"}`) unless the researcher confirms
+    # it now names someone who agreed to take part.
+    confirm_withdrawn: bool = False
 
     _trim_identifier = field_validator("identifier")(_strip_identifier)
     _trim_text = field_validator("display_name", "role")(_strip_optional_text)
@@ -83,6 +87,8 @@ class ParticipantUpdate(BaseModel):
     display_name: str | None = Field(None, max_length=255)
     role: str | None = Field(None, max_length=100)
     demographics: str | None = None
+    # #1190 D12 — the create's contract, for a rename TO a withdrawn identifier.
+    confirm_withdrawn: bool = False
 
     _trim_identifier = field_validator("identifier")(_strip_identifier)
     _trim_text = field_validator("display_name", "role")(_strip_optional_text)
@@ -145,6 +151,10 @@ class WithdrawalConversationTouchpoint(BaseModel):
     conversation_id: int
     name: str
     segments: int = 0
+    #: #1320 — turns their words reached through a merge or a split (a combined
+    #: or absent speaker). REQUIRED, like `documents` (#1123): a count the client
+    #: can be missing is a count a sentence can forget.
+    combined_turns: int
     code_applications: int = 0
     excerpts: int = 0
     notes: int = 0
@@ -212,3 +222,8 @@ class WithdrawalReportResponse(BaseModel):
     datasets: list[WithdrawalDatasetTouchpoint] = []
     documents: list[WithdrawalDocumentTouchpoint] = []
     total_items: int = 0
+    # #1190 D14 — records LINKED TO NOBODY whose identifier column carries this
+    # participant's identifier (linking's own match: trim, then exact). Possibly hers,
+    # not provably: the withdrawal never deletes them, and the count is NOT part of
+    # `total_items`. A count only — never which records.
+    unlinked_records_with_identifier: int = 0

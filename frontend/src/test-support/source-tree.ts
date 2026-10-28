@@ -167,3 +167,35 @@ export function sourceFiles(options: SourceTreeOptions): string[] {
   }
   return out
 }
+
+/** The desktop shell's folder, beside `frontend/` — its strings reach a researcher too. */
+export const ELECTRON_DIR = join(SRC_DIR, '..', '..', 'electron')
+
+/**
+ * The shell's own modules (`electron/*.js`, its tests excluded, not recursive — its
+ * `node_modules` and build output sit below), as ABSOLUTE paths, sorted, proven
+ * non-vacuous like `sourceFiles()`: a floor, and sentinels by FILE NAME. Here, not in a
+ * consumer, because a hand-rolled `readdirSync` outside this folder is what
+ * `source-tree.test.ts` refuses (#729). First consumer: #1268's log-instruction scan.
+ */
+export function shellSources(options: { floor: number; sentinels?: string[] }): string[] {
+  const { floor, sentinels = [] } = options
+  const names = existsSync(ELECTRON_DIR)
+    ? readdirSync(ELECTRON_DIR).filter(n => n.endsWith('.js') && !n.endsWith('.test.js')).sort()
+    : []
+  if (names.length < floor) {
+    throw new Error(
+      `shellSources() found ${names.length} module(s) in ${ELECTRON_DIR} — below the floor of `
+        + `${floor}. The folder has moved or the filter is wrong, so a scan over this list would pass `
+        + 'vacuously (#730). Fix the path; do NOT lower the floor.',
+    )
+  }
+  const missing = sentinels.filter(s => !names.includes(s))
+  if (missing.length) {
+    throw new Error(
+      `shellSources() cannot see ${missing.join(', ')} in ${ELECTRON_DIR}; a count alone cannot tell `
+        + 'this folder from another holding .js files.',
+    )
+  }
+  return names.map(n => join(ELECTRON_DIR, n))
+}

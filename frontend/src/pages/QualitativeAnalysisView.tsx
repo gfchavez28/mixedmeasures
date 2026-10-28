@@ -974,14 +974,14 @@ export default function QualitativeAnalysisView() {
     setCooccurrenceN(info.totalSegments + info.totalComments)
   }, [])
 
+  // #1337 — this page's readers (frequencies, the Content lists, the read-only source
+  // panes) are in the helper's list now: the hand-list here named the conversation and
+  // text panes and not the document or observation ones. The clip list stays here: it
+  // is also the observation workbench's own (active) list, which the helper must not
+  // refetch on every chord there.
   const handleCodeChange = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['excerpts-quoted', pid] })
-    queryClient.invalidateQueries({ queryKey: ['code-frequencies', pid] })
     queryClient.invalidateQueries({ queryKey: ['codes', pid] })
-    queryClient.invalidateQueries({ queryKey: ['code-segments-context', pid] })
-    queryClient.invalidateQueries({ queryKey: ['code-texts-context', pid] })
-    queryClient.invalidateQueries({ queryKey: ['conversation-segments-readonly', pid] })
-    queryClient.invalidateQueries({ queryKey: ['text-column-readonly', pid] })
+    queryClient.invalidateQueries({ queryKey: ['observation-segments', pid] })
     invalidateDerivedCounts(queryClient, pid, { metrics: true })  // #450: cross-surface counts (Content tab codes text + segments)
   }, [queryClient, pid])
 

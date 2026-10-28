@@ -4,6 +4,7 @@ import type { HeatmapData, HeatmapCell, ChartFormatting, VariableNMode } from '@
 import { DISPLAY_PRECISION, mergeFormatting, resolveHeatmapColors } from '@/lib/chart-data'
 import { useChartColors, useTheme } from '@/lib/theme-context'
 import { getHslTextColor } from '@/lib/utils'
+import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
 
 interface HeatmapTableProps {
   data: HeatmapData
@@ -22,7 +23,9 @@ function getCellStyle(
   saturation: number,
   isDark: boolean,
 ): React.CSSProperties {
-  if (!cell) return {}
+  // #1412: an undefined share (nobody answered) takes no colour — a 0 shade
+  // would read as "nobody chose this".
+  if (!cell || cell.percentage == null) return {}
 
   const pct = cell.percentage
   let normalized: number
@@ -68,7 +71,7 @@ export default function HeatmapTable({
     return data.rows.map(row => {
       let max = 0
       for (const cell of row.cells) {
-        if (cell && cell.percentage > max) max = cell.percentage
+        if (cell && cell.percentage != null && cell.percentage > max) max = cell.percentage
       }
       return max
     })
@@ -174,13 +177,17 @@ export default function HeatmapTable({
               </th>
               {row.cells.map((cell, ci) => {
                 const style = getCellStyle(cell, rowMaxes[ri], scaling, heatmapColors.hue, heatmapColors.saturation, isDark)
+                // #1412: `percentage: null` — nobody in this row answered, so
+                // the share is 0/0: `—` and why. Its count is a real 0.
                 const displayVal = cell
                   ? display === 'count'
                     ? cell.count
-                    : `${cell.percentage.toFixed(DISPLAY_PRECISION)}%`
+                    : cell.percentage == null ? NO_VALUE : `${cell.percentage.toFixed(DISPLAY_PRECISION)}%`
                   : '—'
                 const titleText = cell
-                  ? `${cell.percentage.toFixed(DISPLAY_PRECISION)}% (n=${cell.count})`
+                  ? cell.percentage == null
+                    ? `${NO_VALUE} ${undefinedTooltip(cell.undefinedReason)} (n=${row.totalN})`
+                    : `${cell.percentage.toFixed(DISPLAY_PRECISION)}% (n=${cell.count})`
                   : 'No data'
                 return (
                   <td

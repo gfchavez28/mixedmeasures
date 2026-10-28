@@ -16,6 +16,14 @@ import type { QueryClient } from '@tanstack/react-query'
  * document-coding already invalidates it on every change. Deliberately does NOT touch any
  * `staleTime` — that would trade a cosmetic lag for a real perf regression (#450 fix note).
  *
+ * 🔴 **#1337: what a coding moves is a POPULATION, and `coding-cache-population.test.ts`
+ * classifies every query-key root in `src/`** — a new root fails it until it says whether a
+ * coding changes it. ⚠️ A root in this list must be INACTIVE on every coding workbench: an
+ * active one is refetched on every chord, and a workbench that also invalidates its own
+ * copy re-issues the request (TanStack cancels the in-flight fetch and starts another).
+ * So a workbench's OWN list (`['observation-segments', …]`, `['document', …]`,
+ * `text-data`, `codes`) is invalidated by its hosts — the test names them.
+ *
  * `opts.metrics`: also invalidate the dataset analysis aggregates that TEXT-coding-domain
  * code changes feed (`['metrics']` scale scores, `['canvas-chart']` inline charts). Pass true
  * only from text-coding / qualitative-analysis / codebook-CRUD sites — conversation/document
@@ -24,31 +32,117 @@ import type { QueryClient } from '@tanstack/react-query'
  * New code-application / code-edit mutation sites MUST route through this helper rather than
  * re-listing the cross-surface keys (the convention-only drift was the #450 root cause).
  */
+export const DERIVED_COUNT_ROOTS = [
+  'search',
+  'project-summary',
+  'codebook-tree',
+  'consensus-status',
+  'code-sample-segments',
+  'irr',
+  'reconciliation',
+  // #1030 — the model comparison is a tab of its own now, opened straight after
+  // the coding import that fills it; a coding on either side moves its figures.
+  'machine-agreement',
+  // Group A (#1/#3/#13): per-source / per-project coder coverage — a coder's
+  // first (or last) code on a source changes who's "active here".
+  'coder-coverage',
+  // #1337 — Qualitative Analysis. Staleness there was bounded only by the 60 s
+  // staleTime; the open-cut tab (binned κ, unitizing α) is observation coding's.
+  'code-frequencies',
+  'qual-source-frequencies',
+  'qual-saturation',
+  'qual-demographic-comparison',
+  'code-cooccurrence',          // also the Canvas's co-occurrence embed
+  'binned-kappa',
+  'unitizing-alpha',
+  'qual-text-columns',          // which text columns carry coding (the source picker)
+  // #1337 — the Content and Quote Board tabs' lists and read-only source panes. Coding
+  // a document passage or a clip from Content › by source left its chips stale: the
+  // page's own handler named the conversation and text panes only.
+  'code-segments-context',
+  'code-texts-context',
+  'excerpts-quoted',
+  'conversation-segments-readonly',
+  'document-segments-readonly',
+  'text-column-readonly',
+  // #1337 — the Canvas's qualitative embeds hold 5 min (`InlineChartRenderer`), so
+  // without these a coding never reached them inside a working session.
+  'canvas-qual-chart',
+  'canvas-qual-saturation',
+  'canvas-qual-comparison',
+  // #1337 — the Ratings page: an applied ratable code adds a passage to rate.
+  'rating-queue',
+  // #1337 — Text Coding's Analysis tab (`CrossAnalysisPanel`), mounted only on that
+  // tab, so a coding made on the table tab reached it only after 60 s.
+  'text-filtered-freq',
+  'text-crosstab',
+  'text-density',
+  'text-length',
+] as const
+
+/** With `opts.metrics` (text-coding / qualitative-analysis / codebook CRUD). */
+export const DERIVED_METRIC_ROOTS = ['metrics', 'canvas-chart'] as const
+
 export function invalidateDerivedCounts(
   qc: QueryClient,
   projectId: number | string,
   opts?: { metrics?: boolean },
 ): void {
-  const keys: (string | number)[][] = [
-    ['search', projectId],
-    ['project-summary', projectId],
-    ['codebook-tree', projectId],
-    ['consensus-status', projectId],
-    ['code-sample-segments', projectId],
-    ['irr', projectId],
-    ['reconciliation', projectId],
-    // #1030 — the model comparison is a tab of its own now, opened straight after
-    // the coding import that fills it; a coding on either side moves its figures.
-    ['machine-agreement', projectId],
-    // Group A (#1/#3/#13): per-source / per-project coder coverage — a coder's
-    // first (or last) code on a source changes who's "active here".
-    ['coder-coverage', projectId],
-  ]
-  if (opts?.metrics) {
-    keys.push(['metrics', projectId], ['canvas-chart', projectId])
+  const roots: readonly string[] = opts?.metrics
+    ? [...DERIVED_COUNT_ROOTS, ...DERIVED_METRIC_ROOTS]
+    : DERIVED_COUNT_ROOTS
+  for (const root of roots) {
+    qc.invalidateQueries({ queryKey: [root, projectId] })
   }
-  for (const key of keys) {
-    qc.invalidateQueries({ queryKey: key })
+}
+
+/**
+ * #1425 — what a RATING moves, on every screen but the one it was given on.
+ *
+ * A rating changes no coded COUNT, so `invalidateDerivedCounts` is the wrong list — but
+ * it is an input to the rating α (`irr`'s `magnitude_per_code`, held 5 minutes), the
+ * reconciliation grid (ratings by coder, *Ratings differ*, the consensus median), the
+ * consensus layer's stale count (the server marks the target, `routers/coding.py`), the
+ * Ratings page's queue (a rated passage leaves it, an unrated one returns), the rating
+ * chips in Content › by source, and the participant table's "out of date" marker
+ * (`managed_stale`, read from `dataset-data` — the dataset LIST carries it too). Before
+ * this, no rating door refreshed any of them.
+ *
+ * Every root here is INACTIVE on every surface that rates (the four workbenches, the
+ * Ratings page, the scale dialog), so invalidating marks them stale at no network cost —
+ * the #450 bargain. ⚠️ **`rating-queue` is marked with `refetchType: 'none'`**: it IS
+ * active on the Ratings page, and its own write needs no queue request per keypress. That
+ * is cost, not correctness — `'none'` does not freeze an active query (the next refocus
+ * or remount re-reads it), which is why the page itself never trusts its queue to stay
+ * still (#1456).
+ *
+ * `opts.lists` also marks the four workbench lists — ONLY from a surface where none of
+ * them is active (the Ratings page): on a workbench its own list is refetched by its
+ * writer, and a second invalidation of an active query re-issues the request.
+ * `['segments', cid]` carries a conversation id, not the project's, so it is marked by
+ * its root alone.
+ */
+export const RATING_DERIVED_ROOTS = [
+  'irr', 'reconciliation', 'consensus-status',
+  'conversation-segments-readonly', 'document-segments-readonly', 'text-column-readonly',
+  'datasets', 'dataset-data',
+] as const
+
+/** The workbench lists — marked only with `opts.lists`. */
+export const RATING_LIST_ROOTS = ['document', 'observation-segments', 'text-data'] as const
+
+export function invalidateAfterRating(
+  qc: QueryClient,
+  projectId: number | string,
+  opts?: { lists?: boolean },
+): void {
+  for (const root of RATING_DERIVED_ROOTS) {
+    qc.invalidateQueries({ queryKey: [root, projectId] })
+  }
+  qc.invalidateQueries({ queryKey: ['rating-queue', projectId], refetchType: 'none' })
+  if (opts?.lists) {
+    for (const root of RATING_LIST_ROOTS) qc.invalidateQueries({ queryKey: [root, projectId] })
+    qc.invalidateQueries({ queryKey: ['segments'] })
   }
 }
 

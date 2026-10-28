@@ -19,6 +19,9 @@ import {
   shapeFrequencyBars,
   shapeGroupedFrequencyBars,
   buildUnifiedLabels,
+  frequencyUndefined,
+  frequencyUndefinedReason,
+  undefinedGroupsNote,
   getGroupValues,
   sortGroupValues,
   isGroupedMetrics,
@@ -27,10 +30,12 @@ import {
   resolveGroupTextColors,
 } from '@/lib/chart-data'
 import { useChartColors } from '@/lib/theme-context'
+import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
 import type { LabelProps } from 'recharts'
 import type { BarDatum, ChartFormatting, VariableNMode, GroupedFrequencySection, SortOrder } from '@/lib/chart-data'
 import type { RechartsTooltipProps, RechartsPayloadEntry, ChartDataRow } from '@/lib/chart-types'
 import { ChartFigure } from './ChartFigure'
+import { barRowLabel } from './bar-row-label'
 
 interface FrequencyBarChartProps {
   metrics: MetricDefinitionResponse[]
@@ -117,15 +122,19 @@ function SingleFrequencyChart({
     const barMap = new Map(barData.map(d => [d.label, d]))
 
     // Order bars by unified responseLabels
-    const ordered: (BarDatum & { displayValue: number })[] = []
+    const ordered: (BarDatum & { displayValue: number | null })[] = []
+    // A category nobody chose is a real 0 — but a variable NOBODY ANSWERED has
+    // no share at all (#1412): its bars carry `value: null` and draw nothing.
+    // The count stays a real 0.
+    const shown = (d: BarDatum) => display === 'count' ? (d.count ?? 0) : (d.value == null ? null : (d.percentage ?? d.value))
     for (const label of responseLabels) {
       const d = barMap.get(label)
-      if (d) ordered.push({ ...d, displayValue: display === 'count' ? (d.count ?? 0) : (d.percentage ?? d.value) })
+      if (d) ordered.push({ ...d, displayValue: shown(d) })
     }
     // Append any bars not in responseLabels (edge case)
     for (const d of barData) {
       if (!responseLabels.includes(d.label)) {
-        ordered.push({ ...d, displayValue: display === 'count' ? (d.count ?? 0) : (d.percentage ?? d.value) })
+        ordered.push({ ...d, displayValue: shown(d) })
       }
     }
     return ordered
@@ -166,8 +175,15 @@ function SingleFrequencyChart({
   const n = metric.results[0]?.valid_n
   const showN = showVariableN === 'all' ||
     (showVariableN === 'differing' && n != null && n !== chartN)
+  // #1412 — nobody answered: say so beside the name, in text (the PNG and a
+  // reader both get it), rather than drawing a 0% per option. An undeclared
+  // variable has no options at all then, and used to VANISH from the chart.
+  const undef = metric.results[0] != null && frequencyUndefined(metric.results[0])
+  const undefinedNote = undef && (display === 'percentage' || sorted.length === 0)
+    ? `${NO_VALUE} ${undefinedTooltip(frequencyUndefinedReason(metric.results[0]))}`
+    : null
 
-  if (sorted.length === 0) return null
+  if (sorted.length === 0 && !undefinedNote) return null
 
   return (
     <div className="mb-4" ref={containerRef}>
@@ -180,7 +196,13 @@ function SingleFrequencyChart({
             (n={n})
           </span>
         )}
+        {undefinedNote && (
+          <span data-undefined-statistic="" className="text-xs" style={{ color: colors.textMuted }}>
+            {undefinedNote}
+          </span>
+        )}
       </div>
+      {sorted.length > 0 && (
       <ResponsiveContainer width="100%" height={chartHeight}>
         <BarChart
           layout="vertical"
@@ -233,11 +255,10 @@ function SingleFrequencyChart({
             dataKey="displayValue"
             radius={[0, 2, 2, 0]}
             barSize={fmt.barSize - 4}
-            label={fmt.dataLabels === 'none' ? false : (props: LabelProps) => {
-              const { x, y, width, height, index } = props as unknown as { x: number; y: number; width: number; height: number; index: number }
-              const entry = sorted[index]
-              if (!entry) return null
+            // #1314: the label reads its own row — never `sorted[index]` (bar-row-label.ts).
+            label={fmt.dataLabels === 'none' ? false : barRowLabel<(typeof sorted)[number]>((entry, { x, y, width, height }) => {
               const val = entry.displayValue
+              if (val == null) return null // #1412: no share, no label — the header says why
               const barEnd = x + width
               const cy = y + height / 2
               const valSuffix = display === 'percentage' ? '%' : ''
@@ -270,7 +291,7 @@ function SingleFrequencyChart({
                   {val.toFixed(precision)}{valSuffix}
                 </text>
               )
-            }}
+            })}
           >
             {sorted.map(entry => (
               <Cell
@@ -281,6 +302,7 @@ function SingleFrequencyChart({
           </Bar>
         </BarChart>
       </ResponsiveContainer>
+      )}
     </div>
   )
 }
@@ -316,14 +338,28 @@ function GroupedSingleFrequencyChart({
       for (const gv of groupValues) {
         const group = section.groups.find(g => g.groupValue === gv)
         const bar = group?.bars.find(b => b.label === label)
-        entry[gv] = bar ? (display === 'count' ? (bar.count ?? 0) : (bar.percentage ?? 0)) : 0
-        entry[`_count_${gv}`] = bar?.count ?? 0
-        entry[`_pct_${gv}`] = bar?.percentage ?? 0
+        // #1412 — three cases, and only the last is a number: a group with no
+        // result for this variable (absent) and a group nobody answered (0/0)
+        // draw NOTHING; a group with answers that chose none of this option is
+        // a real 0. Never `?? 0` across all three.
+        const absent = !group || (group.bars.length === 0 && !group.undefinedStatistic)
+        const pct = absent || group.undefinedStatistic ? null : (bar?.percentage ?? 0)
+        const count = absent ? null : (bar?.count ?? 0)
+        entry[gv] = display === 'count' ? count : pct
+        entry[`_count_${gv}`] = count
+        entry[`_pct_${gv}`] = pct
         entry[`_n_${gv}`] = bar?.n ?? 0
       }
       return entry
     })
   }, [section, groupValues, display, responseLabelsFromParent])
+
+  // #1412 — the groups nobody answered, said once in text beside the name.
+  const undefinedNote = display === 'percentage'
+    ? undefinedGroupsNote(section.groups
+      .filter(g => g.undefinedStatistic && groupValues.includes(g.groupValue))
+      .map(g => ({ group: g.groupValue, reason: g.undefinedReason })))
+    : null
 
   const colors = useChartColors()
 
@@ -383,6 +419,11 @@ function GroupedSingleFrequencyChart({
                 <span style={{ color: groupTextColors[gv] }}>{gv}</span>: n={groupNs[i] ?? 0}
               </span>
             ))})
+          </span>
+        )}
+        {undefinedNote && (
+          <span data-undefined-statistic="" className="text-xs" style={{ color: colors.textMuted }}>
+            {undefinedNote}
           </span>
         )}
       </div>

@@ -42,6 +42,12 @@ the single-page app that the backend serves same-origin at
   prefix is a contract **mirrored by hand in two languages with no codegen**, so each
   side's suite can stay green while the two drift.
 - `fatal-error.test.js` — `node --test` suite for the above.
+- `startup-phase.test.js` — `node --test` suite for the startup PHASE (#1362): the
+  backend's `MM-PHASE: migrating` / `migrated` lines read from the same stream as
+  `MM-FATAL:`, the deadline an update gets (30 minutes from `migrating`, on a
+  monotonic clock), the hard stop during an update, the splash's updating line, and
+  a wiring scan of `main.js`. The phase pair is mirrored by hand too, pinned by
+  `backend/tests/test_startup_phase.py`.
 - `renderer-recovery.js` — what the window does when its PAGE crashes or hangs
   (#1046): a native dialog that says saved work is safe and offers *Reload this
   page · Open the project list · Quit* (or *Wait · Reload the window* for a hang),
@@ -69,7 +75,10 @@ the single-page app that the backend serves same-origin at
   or onto another major, or if the declared range admits anything lower. **A major
   move must set `FLOOR` again**, because a patched version is per line.
 - `preload.js` — minimal hardened context bridge (`window.mmDesktop`).
-- `splash.html` — shown while the backend starts.
+- `splash.html` — shown while the backend starts. `main.js` reads it and loads it as a
+  `data:` URL (#1171); while the backend updates the database it reloads it with
+  `backend-process.js::splashHtmlFor`'s updating sentence (#1362), because the page
+  runs no script.
 - `scripts/update-manifest.js` — release-pipeline tool: re-patches
   `latest-mac.yml` after the DMG staple rewrites the artifact, merges the mac
   legs' per-arch manifests into the one file the auto-updater reads, and stamps
@@ -101,6 +110,13 @@ the single-page app that the backend serves same-origin at
   requires it to be the built app, because installed Macs update from that zip
   and nothing else reads it. Dependency-free; its tests use real symlinks and
   modes.
+- `scripts/stapler.js` — release-pipeline tool (#1293): every `xcrun stapler` call
+  the mac leg makes, retried up to 3 times 20 s apart when Apple's ticket service
+  drops it, silent on a first-time pass and printing each failed attempt's output.
+  `--self-test` drives it through a stand-in `xcrun`, and `release.yml` runs that
+  on the mac leg before anything is published, so every run's log shows the retry.
+  electron-builder's own staple inside *Package & publish* is a fifth call it
+  cannot reach. Dependency-free, unit-tested; not packaged.
 
 ## 🔴 `build.files` is a deny-by-default allow-list — and nothing but a launch tests it (#761)
 
@@ -206,7 +222,8 @@ cd electron && npm install && npm test   # node --test, headless
 
 The helper suite covers port selection, the health gate (including crash-bail and
 timeout), per-platform executable resolution, spawn-environment injection,
-teardown (POSIX `SIGTERM`-then-`SIGKILL`, Windows `taskkill`), the update-manifest
+teardown (POSIX `SIGTERM`-then-`SIGKILL`, or `SIGKILL` at once during a database
+update; Windows `taskkill`), the startup deadline an update gets (#1362), the update-manifest
 patch/merge tool (round-trip fidelity, hash recomputation, arch-merge dedup,
 version-mismatch refusal), and the updater state machine (offline is swallowed,
 a periodic check never interrupts an in-flight download, install refuses unless an
@@ -232,8 +249,9 @@ so (`fatal-error.js::showCrashDialog`); `main.js` holds `window-all-closed` off
 while it shows. **The same is true of the renderer-recovery dialogs
 (#1046):** the suite drives every rule through fakes. A throwaway harness has driven
 them in a real Electron on Linux: 42.3.3 (2026-09-26), 42.11.8 at the runtime
-bump (2026-09-28), and 44.5.1 at the major move (2026-10-04 — the kill-by-process-id
-fallback still fires there). Whether they appear on the packaged Windows build, and whether
+bump (2026-09-28), 44.5.1 at the major move (2026-10-04 — the kill-by-process-id
+fallback still fires there), and 44.9.3 at #1366's move (2026-10-28, all seven
+results as before). Whether they appear on the packaged Windows build, and whether
 the hang path's kill behaves the same there, is a §4b check. **Re-run that harness in
 the new binary whenever the runtime moves**
 (the internal design notes, git-ignored; run steps in its
@@ -266,9 +284,12 @@ and confirm the backend process exits and a shutdown backup is written.
   since #1186 it is taken a couple of minutes after launch whenever the last one is
   more than the interval old (4 h by default), so every Windows session longer than
   that gets one — it used to need the app to stay open a whole interval. POSIX
-  platforms get a clean `SIGTERM` shutdown.
-- The shipped Electron runtime is locked to a release on a supported line (44.5.1,
-  taken on 2026-10-04 as the head of the 44 line; 42 reaches end of life 2026-10-20),
+  platforms get a clean `SIGTERM` shutdown, except a quit while the backend is
+  updating the database: that is a `SIGKILL` on every platform, and the update is
+  undone and runs again at the next launch (#1362).
+- The shipped Electron runtime is locked to a release on a supported line (44.9.3,
+  taken on 2026-10-28 for 1.5.8 — GHSA-jr5w names 44.5.1, which the 44 move took on
+  2026-10-04 as the line's head, #1366; 42 reached end of life 2026-10-20),
   with a floor guarded by `runtime-floor.test.js`. **Supported is dated:** Electron
   supports the latest three majors; 44's end of life is 2027-03-02, and the move
   after it needs #1121 first (Electron 46 removes the synchronous `safeStorage`

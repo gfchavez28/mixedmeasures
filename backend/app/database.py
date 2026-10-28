@@ -9,7 +9,7 @@ import re
 import time
 from datetime import datetime, timezone
 from .config import get_settings, get_backup_dir, resource_base
-from .startup_errors import FatalStartupError
+from .startup_errors import FatalStartupError, emit_startup_phase
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +108,18 @@ class DatabaseUnreadableError(FatalStartupError):
     """
 
 
+class MigrationFailedError(FatalStartupError):
+    """A PENDING startup migration failed, and was rolled back (#1312).
+
+    The message can say "nothing has been changed" only because `alembic/env.py` runs
+    the whole chain, DDL and the foreign-key check included, in ONE transaction:
+    before #1312 a failure kept its DDL and the next launch failed on "duplicate
+    column". Composed by `migration_failed_guidance`. Raised only when a migration was
+    pending — at head nothing is being updated, so that failure keeps the generic
+    framing rather than claim an update was undone.
+    """
+
+
 #: The driver's own words for the four causes behind an unreadable database —
 #: MEASURED 2026-10-12 with `sqlite3` and `sqlcipher3` on scratch files (#953). The
 #: startup guidance keys on them, so `test_unreadable_database_guidance.py` binds
@@ -186,6 +198,40 @@ def unreadable_database_guidance(db_path: Path, driver_text: str) -> str:
     except OSError:
         size = "size unknown"
     return f"{lead} The file is: {db_path} ({size}; {driver_text})."
+
+
+#: SQLite's own words for SQLITE_FULL — a full disk, or `max_page_count` reached. The
+#: one migration failure a researcher can fix alone (#1312); bound for real in
+#: `test_migration_atomicity.py`.
+MIGRATION_DISK_FULL = "database or disk is full"
+
+
+def migration_failed_guidance(
+    db_path: Path, backup_path: Path | None, driver_text: str
+) -> str:
+    """What the crash dialog says when a pending migration failed (#1312).
+
+    True only because the chain is one transaction (`alembic/env.py`): the database
+    is exactly as the previous version left it, so that version can still open it.
+    Like `unreadable_database_guidance`, the paths and the driver's words go LAST —
+    the line is cut at 800 characters from the end.
+    """
+    if MIGRATION_DISK_FULL in driver_text:
+        lead = (
+            "There was not enough free disk space to update the Mixed Measures database "
+            "to this version. The update was undone, so nothing has been changed. Free "
+            "up disk space and open Mixed Measures again."
+        )
+    else:
+        lead = (
+            "Mixed Measures could not update its database to this version, so it stopped "
+            "before opening it. The update was undone: nothing has been changed, and the "
+            "version you updated from can still open this database. For help, email "
+            f"{HELP_CONTACT} with this message (Copy details copies it), but never your "
+            "recovery key or your database."
+        )
+    copy = f" A copy taken before the update is at: {backup_path}." if backup_path else ""
+    return f"{lead}{copy} The database is: {db_path} ({driver_text})."
 
 
 class Base(DeclarativeBase):
@@ -563,8 +609,8 @@ def prune_orphaned_pre_migration_backups(db_path: Path, backup_dir: Path) -> int
 
 
 #: At startup nothing in this process holds the database, so a busy one is held by
-#: another program and waiting longer rarely helps; the packaged shell's health
-#: probe allows 60 s for the whole startup (`electron/backend-process.js`).
+#: another program and waiting longer rarely helps. The copy runs inside the update's
+#: own startup deadline, not the shell's 60 s (#1362, `electron/backend-process.js`).
 PRE_MIGRATION_BUSY_WAIT_SECONDS = 10.0
 
 
@@ -829,7 +875,14 @@ def run_migrations():
     # stderr, and the spawned-child dialog said only "the local engine exited
     # unexpectedly". It is true as of #716 because the error subclasses
     # FatalStartupError and the lifespan emits it with the MM-FATAL marker.
-    if current_rev is not None and current_rev not in heads:
+    pending = current_rev is not None and current_rev not in heads
+    backup_path = None
+    if pending:
+        # #1362: before the copy, because the copy is part of the update's cost. The
+        # shell stops counting its 60 s startup deadline and waits for `migrated` under
+        # its own, longer one. ONLY here: a restore's `upgrade_database_file` runs while
+        # serving, where no shell is waiting.
+        emit_startup_phase("migrating")
         backup_path = _backup_database(db_path)
         if backup_path:
             logger.info(
@@ -845,7 +898,21 @@ def run_migrations():
     # raises, and refuses to prune anything it is not certain about.
     prune_orphaned_pre_migration_backups(db_path, get_backup_dir())
 
-    command.upgrade(alembic_cfg, "head")
+    try:
+        command.upgrade(alembic_cfg, "head")
+    except Exception as exc:
+        # #1312: the chain is one transaction, so a failed update has been undone —
+        # which is what lets the dialog say so. At head nothing was being updated
+        # (only `env.py`'s foreign-key check ran), so that failure keeps the
+        # lifespan's generic framing.
+        if not pending:
+            raise
+        logger.exception("Migration from %s failed and was rolled back", current_rev)
+        raise MigrationFailedError(
+            migration_failed_guidance(db_path, backup_path, driver_message(exc))
+        ) from exc
+    if pending:
+        emit_startup_phase("migrated")
 
     # Confirm the app's ORM engine can read the (possibly encrypted) DB before
     # we start serving — see _probe_engine_readable. No-op when encryption is off.

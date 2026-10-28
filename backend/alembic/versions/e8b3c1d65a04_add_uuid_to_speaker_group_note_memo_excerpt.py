@@ -29,16 +29,19 @@ depends_on: Union[str, Sequence[str], None] = None
 _TABLES = ["speakers", "segment_groups", "notes", "memos", "excerpt"]
 
 
+#: The SQL name of the per-row `uuid4()` this revision registers on its own connection.
+_UUID4_SQL = "mm_migration_uuid4"
+
+
 def upgrade() -> None:
     conn = op.get_bind()
+    # #1362: one statement per table, as d7a2f3b8c1e9 (which says why).
+    conn.connection.driver_connection.create_function(
+        _UUID4_SQL, 0, lambda: str(_uuid.uuid4())
+    )
     for table in _TABLES:
         op.add_column(table, sa.Column("uuid", sa.String(length=36), nullable=True))
-        rows = conn.execute(sa.text(f"SELECT id FROM {table} WHERE uuid IS NULL")).fetchall()
-        for (rid,) in rows:
-            conn.execute(
-                sa.text(f"UPDATE {table} SET uuid = :u WHERE id = :i"),
-                {"u": str(_uuid.uuid4()), "i": rid},
-            )
+        conn.execute(sa.text(f"UPDATE {table} SET uuid = {_UUID4_SQL}() WHERE uuid IS NULL"))
         op.create_index(f"ix_{table}_uuid", table, ["uuid"], unique=True)
 
 
