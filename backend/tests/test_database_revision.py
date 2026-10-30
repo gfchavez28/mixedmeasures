@@ -107,8 +107,22 @@ def test_run_migrations_refuses_unreadable_db(tmp_path, monkeypatch):
 # "attempted and failed" both returned None before, leaving the caller unable to
 # tell them apart.
 
-def _readable_db_at_revision(path, rev="abc123"):
-    _make_sqlite(path, with_alembic_rev=rev, other_table=True)
+def _older_revision():
+    """A real ancestor of head, derived from the scripts (never a literal).
+
+    It used to be a synthetic `"abc123"`: any non-head value read as pending. Since
+    #1476 a revision the scripts do not contain is a NEWER build's and is refused
+    before the copy, so "behind head" has to be a revision these scripts contain.
+    """
+    from alembic.script import ScriptDirectory
+
+    base = ScriptDirectory.from_config(database._script_only_alembic_config()).get_base()
+    assert database.classify_revision(base) == "older", "the chain has a single revision?"
+    return base
+
+
+def _readable_db_at_revision(path, rev=None):
+    _make_sqlite(path, with_alembic_rev=rev or _older_revision(), other_table=True)
     return path
 
 
@@ -237,17 +251,18 @@ def test_db_already_at_head_is_not_backed_up(tmp_path, monkeypatch):
 def test_db_behind_head_is_still_backed_up(tmp_path, monkeypatch):
     """The other arm, without which the fix could be 'delete the backup'.
 
-    The revision is synthetic on purpose: the predicate is "not among the heads",
-    so any non-head value exercises it, and naming a real historical revision
-    would add a second literal to keep in step with the migration chain.
+    The revision is the chain's base, DERIVED from the scripts — a literal would have
+    to be kept in step with the chain. It was synthetic (`"0000notahead0000"`) until
+    #1476, which refuses a revision the scripts do not contain before the copy.
     """
-    db = _readable_db_at_revision(tmp_path / "dev.db", rev="0000notahead0000")
+    older = _older_revision()
+    db = _readable_db_at_revision(tmp_path / "dev.db", rev=older)
     backup_dir = tmp_path / "backups"
     monkeypatch.setattr(database.settings, "mm_database_path", str(db), raising=False)
     monkeypatch.setattr(database, "get_backup_dir", lambda: backup_dir)
     called = _spy_on_upgrade(monkeypatch)
 
-    assert "0000notahead0000" not in _resolved_heads(), "fixture must be behind head"
+    assert older not in _resolved_heads(), "fixture must be behind head"
 
     run_migrations()
 

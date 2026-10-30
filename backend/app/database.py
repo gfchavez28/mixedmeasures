@@ -120,6 +120,21 @@ class MigrationFailedError(FatalStartupError):
     """
 
 
+class NewerDatabaseError(FatalStartupError):
+    """The database records a revision these scripts do not contain (#1476).
+
+    A NEWER build wrote it: an older version reinstalled, or an old AppImage or `.app`
+    still on disk, started on data a later one had updated. It is refused before the
+    phase line and before the pre-migration copy, because nothing here can update it —
+    `command.upgrade` fails on *Can't locate revision*. Until #1476 the case read as
+    pending, so every such launch announced an update, wrote a full copy (rotating out
+    the older ones, the only way back to the older schema) and then showed
+    `migration_failed_guidance`, which says the opposite of what is true. Composed by
+    `newer_database_guidance`; classified by `classify_revision`, the restore's own
+    classifier (#1026).
+    """
+
+
 #: The driver's own words for the four causes behind an unreadable database —
 #: MEASURED 2026-10-12 with `sqlite3` and `sqlcipher3` on scratch files (#953). The
 #: startup guidance keys on them, so `test_unreadable_database_guidance.py` binds
@@ -232,6 +247,31 @@ def migration_failed_guidance(
         )
     copy = f" A copy taken before the update is at: {backup_path}." if backup_path else ""
     return f"{lead}{copy} The database is: {db_path} ({driver_text})."
+
+
+def newer_database_guidance(db_path: Path, revision: str) -> str:
+    """What the crash dialog says when a newer version wrote the database (#1476).
+
+    The database records no app version, so the sentence names THIS one, and says to
+    install the newest: the in-app updater starts only once the app is open
+    (`electron/main.js::startup` calls `setupUpdater` after `/health`), so it cannot
+    offer the way out. Every shipped install postdates the 2026-06-06 squash (1.0.0
+    is 2026-06-19), so a pre-squash revision — the other "unknown" — is a developer's
+    database. Like the other startup sentences, the path and the revision go LAST:
+    the line is cut at 800 characters from the end.
+    """
+    # Lazy: `services/backup.py` imports this module (the version lives there, and
+    # `test_version_agreement.py` reads it there).
+    from .services.backup import APP_VERSION
+
+    return (
+        "Your Mixed Measures data was last opened by a newer version of Mixed Measures, "
+        f"which updated it to a form this version ({APP_VERSION}) cannot read. Nothing "
+        "has been changed. Install the newest version of Mixed Measures and open it "
+        f"again. For help, email {HELP_CONTACT} with this message (Copy details copies "
+        "it), but never your recovery key or your database. "
+        f"The database is: {db_path} (database version {revision})."
+    )
 
 
 class Base(DeclarativeBase):
@@ -769,8 +809,13 @@ def classify_revision(revision: str | None) -> str:
     - ``"older"`` — an ancestor these scripts contain: it can be brought forward.
     - ``"unknown"`` — no revision at all, or one these scripts do not contain. That
       is a database written by a NEWER build (the common case), or one from before
-      the 2026-06-06 squash; either way this build cannot read it, and the startup
-      migration would refuse to launch on it (`Can't locate revision`).
+      the 2026-06-06 squash; either way this build cannot read it. Two callers: the
+      restore refuses such a backup at preview, and startup refuses such a database
+      with `NewerDatabaseError` before the phase line and the copy (#1476).
+      🔴 **`None` is "unknown" here for the restore's sake** (a backup with no
+      revision is refused). At startup `None` is a FRESH database, which is
+      baselined, so `run_migrations` asks this only when a revision exists — calling
+      it with `None` there would refuse every first launch.
     """
     from alembic.script import ScriptDirectory
 
@@ -840,6 +885,22 @@ def run_migrations():
             unreadable_database_guidance(db_path, driver_message(exc.__cause__ or exc))
         ) from exc
 
+    # #1476: a revision these scripts do not contain was written by a NEWER build, and
+    # nothing here can update it. Refused BEFORE the phase line and the copy below: it
+    # used to read as pending, so each launch announced an update, wrote a full copy
+    # (rotating out the older ones) and then said the update "was undone".
+    # 🔴 `current_rev is None` is a FRESH database (no file, an empty one, or no
+    # `alembic_version`), which is baselined below. `classify_revision(None)` answers
+    # "unknown" for the restore's sake (a backup with no revision is refused), so the
+    # None arm must never reach this check — it would refuse every first launch.
+    if current_rev is not None and classify_revision(current_rev) == "unknown":
+        logger.error(
+            "Refusing to start: the database is at revision %s, which this build's "
+            "migrations do not contain (a newer version wrote it). Nothing was changed.",
+            current_rev,
+        )
+        raise NewerDatabaseError(newer_database_guidance(db_path, current_rev))
+
     # Is a migration ACTUALLY pending? (#920)
     #
     # 🔴 This block used to be commented "Check if migrations are actually pending"
@@ -852,10 +913,11 @@ def run_migrations():
     # provide, destroyed by normal use. In dev under `uvicorn --reload` the same
     # write happened on every file save.
     #
-    # `not in heads`, never `!= head`: if the head set cannot be resolved, or the DB
-    # sits on a revision the scripts no longer contain, or the chain has branched,
-    # the predicate is True and we back up. Every unknown resolves toward taking the
-    # backup — the only safe direction for the guard on the one destructive path.
+    # `not in heads`, never `!= head`: if the head set cannot be resolved, or the chain
+    # has branched, the predicate is True and we back up. Every unknown resolves toward
+    # taking the backup — the only safe direction for the guard on the one destructive
+    # path. (A revision the scripts do not contain no longer reaches here: #1476 refuses
+    # it above, because no update can run on it, so there is nothing to protect.)
     try:
         heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
     except Exception as e:  # pragma: no cover - defensive; fails toward backing up

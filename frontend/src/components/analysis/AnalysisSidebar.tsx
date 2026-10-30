@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useId } from 'react'
 import type { ComposableSetSearchParams } from '@/hooks/useComposableSearchParams'
-import { SELECTED_ROW } from '@/lib/selection'
+import { SELECTED_ROW, SELECTED_SEGMENT } from '@/lib/selection'
 import {
   ChevronDown,
   Trash2,
@@ -861,7 +861,7 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                         key={type}
                         className={`flex-1 px-2 py-1.5 text-xs font-medium rounded-md border transition-colors ${
                           corrType === type
-                            ? 'bg-[hsl(var(--mm-accent)/0.1)] border-[hsl(var(--mm-accent)/0.3)] text-[hsl(var(--mm-accent))]'
+                            ? SELECTED_SEGMENT
                             : 'bg-mm-bg border-mm-surface-border text-mm-text-muted hover:text-mm-text hover:border-mm-text-faint'
                         }`}
                         onClick={() => setUrlParam('corrType', type)}
@@ -936,7 +936,7 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                         key={value}
                         className={`flex-1 px-1.5 py-1 text-[11px] font-medium rounded border transition-colors ${
                           corrCellFormat === value
-                            ? 'bg-[hsl(var(--mm-accent)/0.1)] border-[hsl(var(--mm-accent)/0.3)] text-[hsl(var(--mm-accent))]'
+                            ? SELECTED_SEGMENT
                             : 'bg-mm-bg border-mm-surface-border text-mm-text-muted hover:text-mm-text'
                         }`}
                         onClick={() => setUrlParam('cellFormat', value)}
@@ -1018,7 +1018,7 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                     value={compareBy != null ? String(compareBy) : ''}
                     onValueChange={(v) => setUrlParam('compareBy', v)}
                   >
-                    <SelectTrigger id={`${selectId}-compare-by`} className="h-7 text-xs border-2 border-[hsl(var(--mm-accent)/0.4)] bg-[hsl(var(--mm-accent)/0.05)]">
+                    <SelectTrigger id={`${selectId}-compare-by`} className="h-7 text-xs">
                       <SelectValue placeholder="Select a column..." />
                     </SelectTrigger>
                     <SelectContent>

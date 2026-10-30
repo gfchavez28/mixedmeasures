@@ -40,7 +40,9 @@ SEGMENT_BLANKED = "segment_blanked"
 #: under a withdrawn identifier, having confirmed it names someone again. Without it
 #: the identifier hash would skip that NEW person at every later merge and refuse
 #: every coding copy of the project (`withdrawn_participant`). It travels in the
-#: file's `tombstones` key with the rest, so a copy made after it agrees.
+#: file's `tombstones` key with the rest, so a copy made after it agrees — and a
+#: "new" import (Duplicate, an independent project), which re-mints every
+#: participant's uuid, follows it through the re-mint with `rekey` (#1471).
 PARTICIPANT_REINSTATED = "participant_reinstated"
 
 ENTITY_TYPES = frozenset({
@@ -126,6 +128,18 @@ def union(a: Tombstones, b: Tombstones) -> Tombstones:
             for u in us:
                 out.add(etype, u)
         out.identifier_hashes |= t.identifier_hashes
+    return out
+
+
+def rekey(t: Tombstones, entity_type: str, old_to_new: dict[str, str]) -> Tombstones:
+    """#1471 — the same record with `entity_type`'s uuids followed through a re-mint
+    (`old_to_new`: a file entity's uuid → the uuid the import gave it). A uuid the map
+    does not name is kept as it was: it names nothing in the project the import made,
+    so it stays inert."""
+    out = union(t, Tombstones())
+    have = out.uuids.get(entity_type)
+    if have:
+        out.uuids[entity_type] = {old_to_new.get(u, u) for u in have}
     return out
 
 

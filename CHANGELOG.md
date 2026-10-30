@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.5.8] - 2026-10-25
+## [1.5.8] - 2026-10-30
 
 ### Security
 
@@ -15,6 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   eMudhra intermediate certificates that someone intercepting your network could
   have used to impersonate GitHub to the update check (GHSA-jr5w-w6x2-84p9), and
   carries the 44 line's fixes since 44.5.1. (#1366)
+- **An exported R script no longer runs R code that arrived in someone else's project
+  file or codebook.** The R export wrote dataset, code and category names into comments,
+  and a saved chart's settings into the script itself, without checking them. A name
+  holding a line break, or a chart setting holding text where a number belongs — both of
+  which a project file or codebook from someone else can carry — could run commands on
+  your computer when you ran the script. Every name is now escaped, and a chart setting
+  reaches the script only as a real number or one of the app's own choices: a bad
+  formatting value falls back to its default or is left out, and a proportion the app
+  could not compute is skipped with a note saying why. (#1468)
+- **A grouped answer that starts with "=" is written to Excel as text, never as a
+  formula.** The dataset workbook wrote the group a recoded answer falls into without the
+  check every other cell gets, so a group label beginning with "=" — which a project file
+  from someone else can carry — became a live formula when you opened the export. (#1485)
 
 ### Fixed
 
@@ -34,62 +47,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minutes for it; quitting during the update stops and undoes it on every platform,
   and it runs again next time. (#1362)
 - **Importing a document no longer deletes text that sits between `<` and `>`.**
-  Text, Word and PDF imports removed anything between a `<` and a later `>` and
-  turned HTML codes such as `&amp;` into the characters they stand for, without
-  saying so. "I scored <5 on one and >9 on the other" arrived as "I scored 9 on
-  the other", and transcription marks such as `<laughs>` vanished. Documents now
-  import exactly as written. **A document imported before this change may be
-  missing such text;** the original file is kept, so importing it again brings
-  the text back. (#1317)
+  Text, Word and PDF imports removed everything from a `<` to the next `>` (in Word
+  and PDF files, within one paragraph or line) and turned HTML codes such as `&amp;`
+  into the characters they stand for, without saying so. "I scored <5 on one and >9
+  on the other" arrived as "I scored 9 on the other", and transcription marks such as
+  `<laughs>` vanished. Such text is now kept as written. **A document imported before
+  this change may be missing such text;** the original file is kept, so importing it
+  again brings the text back. (#1317)
 - **A canvas with a quote waiting in its Unsorted section opens again.** Sending a
   quote to a canvas from the Quote Board made that canvas fail to open, save,
-  duplicate or restore a snapshot until the quote was removed. Quotes in Unsorted
-  are now listed by the words they quote. (#1316)
+  duplicate or restore a snapshot, and nothing in the app could take the quote back
+  out. Quotes in Unsorted are now listed by the words they quote. (#1316)
 - **Bar charts label every bar with its own value.** In the frequency bar chart,
   the horizontal bar chart and the stacked bar charts, every label after an
-  empty category showed the value of the category above it — "20%" printed
-  where the bar was 30% long — on screen and in the saved PNG and SVG images,
-  while the bar lengths and the frequency table were right. Grouped and diverging
-  stacked charts were affected even with no empty category. Clicking a bar in the
+  empty category showed the value of an earlier bar — "20%" printed where the bar
+  was 30% long — on screen and in the saved PNG and SVG images, while the bar
+  lengths and the frequency table were right. Grouped stacked charts, diverging or
+  not, were affected even with no empty category. Clicking a bar in the
   qualitative comparison and stacked charts could open the wrong code. An empty
   category now shows no label, and an empty row in the horizontal bar chart no
-  longer shows its "(n=…)"; the tooltip still gives both. **A chart saved or
-  exported before this change may carry wrong labels** — redraw it to check.
-  (#1314)
+  longer shows its "(n=…)"; the tooltip still gives both. **A chart image saved, or
+  a Canvas exported, before this change may carry wrong labels** — redraw it to
+  check. (#1314)
 - **Descriptives charts can be placed on the Canvas and exported again.** Saving
   any Analysis chart to Materials also stored settings from the Relationships &
   Comparisons tab. So a Descriptives chart on the Canvas said "Correlation
-  matrices can't be drawn on the canvas yet" and was left out of Word, HTML and
-  PDF exports. After a visit to Comparisons, it was drawn as a group comparison
-  under the frequency chart's title. A chart now saves only its own tab's
-  settings. Charts saved before this are repaired when the app starts or a
-  project file is imported — in Materials, on every canvas that embeds them, and
-  in canvas snapshots. A canvas that showed the wrong comparison will say "The
-  figures have changed…" once, because its numbers really did. (#1315)
-- **A scale measured in several datasets scores its respondents again.** A
-  record's score over a variable group was judged against every item of the group
-  in every dataset, so in a group spanning two or more datasets most records — and
-  in three complete datasets every record — got no score, and a saved t-test or
-  ANOVA on it failed or used too few people. A record is now scored when it
-  answered at least half of the items its own dataset asked. A saved test on a
-  group now scores records by the same rule as the stored scores, uses only the
-  item a metric is narrowed to, and tests a proportion metric on each record's
-  proportion. An item nobody answered still counts toward its dataset's items.
-  Scores and saved tests computed by an earlier version are marked out of date
-  when the app starts or a backup is restored. (#1313)
-- **The R script no longer replaces your computed variables with different
-  numbers.** The exported `.R` script re-ran each computed variable's formula in
-  R and wrote the result over the values in the data file. R cannot run them the
-  way Mixed Measures does, so the results often differed: arithmetic on rating
-  items came out empty, an average over a scale starting at 0 came out one point
-  too high, a sum of all-missing answers became 0, dividing by zero gave infinity,
-  and a second dataset's records got values the app never computed. Two kinds of
-  formula stopped the whole script, and every later statistic used the replaced
-  numbers — a saved mean of 1.0 printed as 2.0. The script now keeps the values
-  Mixed Measures computed, lists each formula as a comment, and names any
-  computed variable that is out of date. The formula editor's "R equivalent" line
-  now gives NA, not 0, NaN or infinity, for an all-missing sum or average and for
-  division by zero, and quotes a backslash so R can read it. (#1322)
+  matrices can't be drawn on the canvas yet", was left out of the Markdown, HTML
+  and PDF exports, and reached Word only as a table. After a visit to Comparisons,
+  it was drawn as a group comparison under the frequency chart's title. A chart now
+  saves only its own tab's settings. Charts saved before this are repaired when the
+  app starts or a project file is imported — in Materials, on every canvas that
+  embeds them, and in canvas snapshots. A canvas that showed the wrong comparison
+  will say "The figures have changed…" until you mark it as reviewed, because its
+  numbers really did. (#1315)
+- **A scale measured in several datasets scores its respondents again.** A record's
+  score over a variable group was judged against every item of the group in every
+  dataset, so a record needed answers to at least half of all the group's items: in a
+  group spanning two datasets one skipped item could cost a record its score, and in
+  three complete datasets no record was scored at all. A saved t-test or ANOVA on such a
+  score failed or used too few people. A record is now scored when it answered at least
+  half of the items its own dataset asked. A saved test on a group now scores records
+  by the same rule as the stored scores, uses only the items a metric is narrowed to,
+  and tests a proportion metric on each record's proportion. An item nobody answered
+  still counts toward its dataset's items. Scores and saved tests the new rule changes
+  are marked out of date when the app starts or a backup is restored. (#1313)
 - **Word documents import the text Word keeps inside other elements, and say
   what they leave out.** A Word import read only plain paragraphs, so it silently
   dropped text in tracked insertions, content controls (form fields), simple fields
@@ -102,33 +103,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   picture in a text box is stored once instead of three times, and a 20,000-paragraph
   document reads in under a second instead of over 20. **A Word document imported
   before this change may be missing text;** the original file is kept, so importing
-  it again brings the text back as a new document. (#1318)
+  it again brings the text back as a new document. When several files are imported at
+  once, the preview names the file it shows and says the others are checked when they
+  are imported. (#1318, #1494)
 - **Editing a turn's or paragraph's text no longer moves its quotes onto other
   words.** A quote's position was not adjusted when the text around it changed, so
   fixing a typo earlier in a turn shifted every later quote on it onto different
   words — in the Quote Board, the exports and new Canvas placements — and
   shortening a turn could leave a quote empty. A quote now follows its words through
-  an edit. When an edit changes words at a quote's edge, runs across it, or removes
-  it, the workbench shows the quote before and after and asks whether to keep it as
-  shown or remove it; Cancel returns to the editor with your text. The editor stays
-  open until the save has gone through, "Saved" appears only then, and a failed
-  save keeps what you typed. Undo puts every quote back where it was. Edits to a
-  document paragraph are now recorded in the project's activity log, without the
-  text. (#1319)
-- **Withdrawing a participant removes their words wherever the app had copied
-  them, and says what it cannot remove.** A turn merged with someone else's kept
-  their words, under a combined speaker name or under no speaker at all, and so did
-  each part of a split of such a turn; the withdrawal report did not count them. The
-  Canvas kept their quotes in its sections, snapshots and Unsorted list; the
-  Audit Trail kept their earlier wording, edited answers and name; and a saved
-  frequency could still list a unique answer. Now a merged or split turn holding
-  their words is blanked whole — the other speaker's own turn from before the merge
-  is kept, and Unmerge brings it back — and combined speaker names are renamed.
-  Canvas quotes read "[Removed at the participant's request]", audit entries keep
-  what happened but not the words, and saved results are computed again. The
-  confirmation now says that the backup it takes, earlier backups, safety copies
-  and files already exported still hold everything removed, and that recordings are
-  not edited. If any part cannot be completed, nothing is changed. (#1320)
+  an edit. When an edit changes words at a quote's edge — lengthening the word there
+  included, such as "said no" to "said nothing" or "able" to "unable" — runs across it,
+  or removes it, the workbench shows the quote before and after and asks whether to
+  keep it as shown (over the whole new word, for a lengthened one) or remove it; a
+  quote with no words left can only be removed. Cancel keeps the editor open with your
+  text, and punctuation typed next to a quote changes nothing. The editor stays open
+  until the save has gone through, "Saved" appears only then, and a failed save keeps
+  what you typed. Undo puts every quote back where it was; an undo that would lengthen
+  a word at the edge of a quote made after the edit is refused, and says so. Edits to a
+  document paragraph are now recorded in the Audit Trail, without the text. (#1319,
+  #1477)
+- **Withdrawing a participant removes their words where the app had copied them, and
+  says what it cannot remove.** A turn merged with someone else's kept their words, under
+  a combined speaker name or under no speaker at all, and so did each part of a split of
+  such a turn; the withdrawal report did not count them. The Canvas kept their quotes in
+  its sections and snapshots; the Audit Trail kept their earlier wording, edited answers
+  and name; and a saved frequency could still list a unique answer. Now a merged or split
+  turn holding their words is blanked whole — the other speaker's own turn from before the
+  merge is kept, and Unmerge brings it back — and combined speaker names are renamed.
+  Canvas quotes of their words, including one whose quote had already been deleted, read
+  "[Removed at the participant's request]", audit entries keep what happened but not the
+  words, and saved results are computed again. The confirmation now says that the backup
+  it takes, earlier backups, safety copies and files already exported still hold
+  everything removed, and that recordings are not edited. If any part cannot be completed,
+  nothing is changed. Not yet reached: a turn merged with theirs and later unmerged keeps
+  their words in a Canvas quote of it, and in the Audit Trail if it was edited. (#1320,
+  #1473)
 - **A colleague's copy of a project can now be merged back.** Every import of a
   project file gave it a new identity, so a copy a colleague imported could never be
   merged with the project it came from — only a call the app never made could do it.
@@ -136,35 +145,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *Import as an independent project* gives the copy a new one, as every import did
   before. The import first asks which of the file's people is you, so your earlier
   coding stays yours and a colleague's stays theirs, and it says what a later merge
-  refuses (splitting, joining or editing a turn's words) and that undoing the change
-  clears the refusal. **Copies imported before this version were given a new
-  identity and cannot be merged back**; export the project again and import that
-  file. (#1321)
-- **Two people are no longer merged into one coder.** Every install's first coder is
-  called "Researcher", and coders were matched between copies by name alone — so the
-  lead's coding landed on the colleague's own coder, and a merge back could report
-  perfect agreement nobody made. Each coder now carries an identity in the project
-  file, and imports and merges recognise who a coder is before what they are called.
-  Merge's confirm step pre-selects only a coder it recognises as the same person; one
-  who only shares a name waits for your answer. Merging the same file again proposes
-  the coder the first merge added, and the confirm step names the numbered name a new
-  coder will get. The agreement note counts the people already coding the project.
-  The update gives every existing coder an identity. (#1352, #1246, #1273)
+  refuses (splitting or joining a turn or paragraph, editing its words, or freezing or
+  unfreezing an observation's clips) and that undoing the change clears the refusal.
+  A file exported by a version before 1.5.8 does not record who its coders are, so
+  *Import* takes it only when nobody but you coded in it; otherwise it asks for a new
+  export from an updated copy, or an import as an independent project. **Copies
+  imported before this version were given a new identity and cannot be merged back**;
+  export the project again from this version and import that file. When a project here
+  does share the file's identity, the choice that used to read *Import as new copy* now
+  has the same name, *Import as an independent project*. (#1321, #1508, #1469)
+- **A coding copy or a merge no longer makes two people one coder.** Every install's first
+  coder is called "Researcher", and coders were matched between copies by name alone, so a
+  colleague who imported the lead's project found the lead's coding under their own coder.
+  Each coder now carries an identity in the project file, and imports and merges recognise
+  who a coder is before what they are called. A coding copy never matches a coder by name,
+  and Merge's confirm step pre-selects only a coder it recognises as the same person; one who
+  only shares a name waits for your answer. *Import as an independent project* and *Overwrite
+  my copy* still match a coder they do not recognise by name, as before. Merging the same file
+  again proposes a coder the first merge added, and the confirm step names the numbered name
+  a new coder will get. The agreement note counts the people already coding the project. The
+  update gives every existing coder an identity, separately on each computer, so a colleague
+  from before this version is known here only by name: each merge asks about them, and a
+  *Map to* answer is not yet remembered. (#1352, #1246, #1273)
 - **A participant who withdrew does not come back.** Merging a copy made before a
   withdrawal brought the person back — their record, answers and quotes — and after
   their turns were blanked every older copy was refused for good. What a withdrawal
   removes is now remembered in the project (by identity, and their ID as a one-way
   code, which is not anonymisation), so a merge leaves it out and says how much, an
-  import of a copy that still holds them is refused, linking records or speakers
-  never recreates them, and adding or renaming a participant to their ID asks first.
-  The withdrawal confirmation counts unlinked records that carry their ID. Merging
-  after deleting and re-creating a participant or a quote no longer fails, and a
-  deleted record whose person now has another record is added back unlinked, and
-  said. (#1190)
-- **Merge shows what else the file will add before it runs** — sources, participants,
-  datasets and records by name, and how many quotes, notes and memos — so something
-  deleted here since the copy was made can be recognised before it comes back. A
-  plain delete is not yet remembered the way a withdrawal is. (#1190)
+  import of a copy that still holds them is refused, linking records never recreates
+  them, and adding or renaming a participant to their ID asks first — someone added
+  that way stays added, in copies of the project too. A transcript speaker labelled
+  with their ID is left unlinked, but one labelled with their name can still recreate
+  them. Project files exported afterwards carry the record; a copy made before the
+  withdrawal does not, so another computer that never had the record imports it as it
+  is, and versions before 1.5.8 ignore the record. A withdrawal made in a colleague's
+  copy does not reach your project through a merge: withdraw the person in your own
+  project as well. The withdrawal confirmation counts unlinked records that carry their
+  ID. Merging after deleting and re-creating a participant or a quote no longer fails,
+  and a deleted record whose person now has another record is added back unlinked, and
+  said. (#1190, #1471)
+- **Merge lists what else the file holds that this project does not, before it runs**
+  — sources, participants, datasets and records by name, and how many quotes, notes and
+  memos — so something deleted here since the copy was made can be recognised before it
+  comes back. A plain delete is not yet remembered the way a withdrawal is. (#1190)
 - **Failure messages no longer send you to a server log.** A desktop install has no
   log you can open. A failed import, merge, duplicate or codebook import now says
   that nothing was changed and that it is safe to try again; a duplicate that runs
@@ -176,11 +199,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row (and `!=` true on every row), with no warning. It now compares the answer,
   ignoring case; a quoted number, such as `[Q1] == "4"`, still matches the code. The
   formula dialog now shows each warning in full instead of a count, warns when a
-  quoted answer is not one of the variable's answers or is a missing-data code, and
-  its preview treats declared missing values as missing, as saving does. **Computed
+  quoted answer is not one of a labelled variable's answers or is a missing-data code,
+  and its preview treats declared missing values as missing, as saving does. **Computed
   variables written this way are marked out of date** when you update, and when you
-  import a project file from an earlier version, so a value computed the old way is
-  not used unnoticed; *Recompute* brings them up to date. (#1368)
+  import a project file from an earlier version: the Data and Variables views and the R
+  script say so, and *Recompute* brings them up to date. (#1368)
 - **A damaged Word file is refused with an explanation instead of an internal
   error.** Eleven kinds of damage, from a broken part inside the file to an
   unreadable compression method, answered with an error; the import now says the file
@@ -188,18 +211,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuses the whole file, even when its text is intact. (#1372)
 - **The Kruskal–Wallis effect size is now the ε² it is labelled as.** It was computed
   as (H − k + 1)/(n − 1), which is neither of the two formulas Tomczak & Tomczak
-  (2014) give. It is now their H/(n − 1), which always lies between 0 and 1. Values
-  move up a little, so a few effect-size labels may change. Files exported before
-  this version keep the old value. (#1327)
-- **The exported R script now runs to the end and reads the right columns.** A
-  variable group with a long or non-Latin name, two groups whose names differ only in
-  punctuation, a dataset column named like a group's score, or a group with no scale
-  score could make the script stop partway or read the wrong column, and a dataset
-  whose name starts with a digit, such as `2023 survey`, stopped it from running at
-  all. Three column names in the exported CSV change: a group whose name has no Latin
-  letters is now `group_score` (was `_score`), and in a project with several
-  datasets, a dataset whose name starts with a digit gets an `x_` prefix and one with
-  no Latin letters is called `ds`. (#1371)
+  (2014) give. It is now their H/(n − 1), which always lies between 0 and 1. Every value
+  moves up by (k − 1)/(n − 1) — most on small samples, where an effect-size label can
+  move up a category. Files exported before this version keep the old value. (#1327)
 - **Canvas HTML and PDF exports are safe to open and share.** A quotation mark in a
   chart title or a link could add markup to the exported file, and a link of any kind
   kept its address. Every value is now escaped, a link keeps its address only for web
@@ -208,83 +222,167 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#1339)
 - **A statistic that could not be computed is no longer drawn as zero.** A mean,
   proportion or variable-group score with no values left after missing data was
-  excluded showed as a zero bar, a dot at 0, or a 0 in the Canvas export tables. It
-  now shows "—" with "Not computable for this data" in the bar, dumbbell and line
-  charts and the Canvas exports. The Canvas dumbbell table no longer shifts later
-  values one column to the left when a variable has no result for a group. (#1363)
+  excluded showed as a zero bar, a dot at 0, or a 0 in the Canvas export tables. The
+  bar and dumbbell charts now mark it "—", with "Not computable for this data" when
+  you point at the mark; the line chart leaves a gap, and its screen-reader table
+  says why; the Canvas export tables print "— Not computable for this data." The
+  Canvas dumbbell table no longer shifts later values one column to the left when a
+  variable has no result for a group. (#1363)
 - **Coding refreshes the analysis pages straight away.** Qualitative Analysis, the
   content and quote lists, the Canvas's qualitative charts, the Ratings queue and Text
   Coding's Analysis tab could show counts from before your last coding for up to a
   minute (the Canvas's for five). Editing your own cell in Reconciliation, or
   recomputing consensus, now refreshes them too. (#1337)
-- **Adding or unarchiving a coder turns blind mode on at once**, and Settings keeps
-  its coder list on screen while it updates. Archived coders stay listed, and can be
-  unarchived, after you archive your last colleague. *Archive* and *Unarchive* keep
-  keyboard focus while they work. (#1387)
+- **Adding or unarchiving a coder turns blind mode on at once.** Archived coders stay listed in
+  Settings, and can be unarchived, after you archive your last colleague. *Archive* and
+  *Unarchive* keep keyboard focus while they work. (#1387)
 - **The Data view tells assistive technology where a record sits in the whole
-  dataset.** It shows 200 records a page, and the table described only the page; on a
-  dataset with more than one page it now states how many records there are and each
-  row's place among them.
-- **The address for creating a saved statistical test no longer ends in a slash.** It
-  was the one create endpoint declared that way; it is now `…/statistical-tests` like
-  every other, and a request to the old address is refused. The app was updated with
-  it; only a script that calls the API directly needs the change.
-- **A grouped chart shows each group's own numbers — on the Canvas, in the Analysis
-  view and in every export.** A Canvas bar chart, table or histogram of a grouped
-  variable (a mean score by site, say) showed one number under the variable's name,
-  and that number belonged to the records with no value for the grouping variable (or,
-  when every record had one, to the first group by name). The Analysis view's Summary
-  Table and Histogram did the same under *Group by*, and the Word export's table was
-  wrong for every grouped chart. Each group now shows its own value and n: the Summary
-  Table has a row per variable and group, a grouped histogram shows the variable's
-  whole distribution and says so, groups you hid stay hidden on the Canvas and in its
-  exports, and a grouped chart's exported table has a row per group. A Word export
-  made without chart images (from the Spatial view) now carries the same tables as
-  the Markdown and HTML exports, and a table too large for Word says so. (#1406)
+  dataset.** It shows 200 records a page, and the table's rows were counted within
+  the page alone; on a dataset with more than one page, the table now gives the
+  whole dataset's row count and each row its place in it.
+- **A grouped bar chart or table shows each group's own numbers — on the Canvas, in
+  the Analysis view and in every export.** A Canvas bar chart, table or histogram of
+  a grouped variable (a mean score by site, say) showed one number under the variable's
+  name, and that number belonged to the records with no value for the grouping variable
+  (or, when every record had one, to the first group by name). The Analysis view's
+  Summary Table and Histogram did the same under *Group by*, and the Word export's table
+  was wrong for every grouped chart. Each group now shows its own value and n: the
+  Summary Table has a row per variable and group, a grouped histogram shows the
+  variable's whole distribution and says so, groups you hid stay hidden on the Canvas
+  and in its exports, and the exported table of a grouped bar chart or table has a row
+  per group. A Word export made without chart images (from the Spatial view) now carries
+  the same tables as the Markdown and HTML exports, and a table too large for Word says
+  so. (#1406)
 - **The Data view's page buttons keep keyboard focus.** On a dataset with more than
   one page, pressing *Previous*, *Next* or *Go* from the keyboard could leave focus
   nowhere — on reaching the first or last page, while a page loaded, and after every
-  *Go* — so the next Tab started again from the top of the window. The buttons now
+  *Go*. The buttons now
   keep focus while a page loads (a second press does nothing until it arrives);
   reaching the first or last page moves focus to the other page button, and *Go*
   returns it to the record-number box. (#1407)
 - **A histogram's screen-reader caption says it is a histogram.** On the Canvas and
   in the Analysis view it said "Vertical bar chart"; it now says "Histogram" and the
   number of bins. (#1408)
-- **A grouped vertical bar chart of answers shows every answer any group gave.** On
-  the Canvas and in the Analysis view, a vertical bar chart of one variable's answers
-  by group took its answers from the first group alone, so for a variable without
-  declared answer labels (a number, or text from a CSV) an answer only other groups
-  gave was not drawn and their bars added up to less than 100%. Every answer a shown
-  group gave now has its place, in the variable's own order, and a group that never
-  gave it shows 0. In the horizontal version, the tooltip for an answer a group never
-  gave now states that group's n instead of n=0. (#1455)
-- **A group nobody answered no longer shows as 0% in frequency charts and tables.** In
-  the horizontal, vertical and stacked bar charts, the heatmap and the frequency table — in
-  the Analysis view, on the Canvas and in the Canvas exports — a group with no answers to a
-  question was drawn as 0% for every answer, and its frequency table read 100.0% of
-  nothing. The figure now names the group with "Not computable for this data", its cells
-  read "—", and its counts stay 0; a group that answered but never chose an option still
-  shows a real 0%. A question nobody answered at all no longer disappears from a horizontal
-  bar chart. (#1412)
+- **A grouped vertical bar chart of answers shows every answer the groups gave.** In
+  the Analysis view, a vertical bar chart of one variable's answers by group took its
+  answers from the first group alone, so for a variable without declared answer labels
+  (a number, or text from a CSV) an answer only other groups gave was not drawn and
+  their bars added up to less than 100%. Every answer a shown group gave now has its
+  place, in the variable's own order, on the Canvas too, and a group that answered but
+  never gave it shows 0. In the horizontal version, the tooltip for an answer a group
+  never gave now states that group's n instead of n=0. (#1455)
+- **A group with no usable answers no longer shows as 0% in frequency charts and
+  tables.** In the horizontal, vertical and stacked bar charts, the heatmap and the
+  frequency table — in the Analysis view, on the Canvas and in the Canvas exports — a
+  group whose answers to a question were all missing data was drawn as 0% for every
+  answer, and its frequency table read 100.0% of nothing. The figure now names the
+  group with "Not computable for this data", its cells read "—", and its counts stay
+  0; a group that answered but never chose an option still shows a real 0%. A group
+  whose members all left the question blank is still left out of the chart. A
+  question nobody answered at all no longer disappears from a horizontal bar chart.
+  (#1412)
 - **The qualitative group comparison no longer reports 0% for a group with no conversation
   turns.** When a demographic group had no participant turns in the conversations compared
   (its members were surveyed but never spoke, spoke only in other conversations, spoke only as
   facilitators, or are linked only through a document), the comparison showed 0.0% for every
-  code, a difference as large as the other group's whole share, and ranked the codes by it.
-  Those cells now read "—" and the comparison says why, no difference is reported for them,
-  the CSV leaves them blank, and the Canvas chart and its exports say the same. (#1421)
+  code and, beside one other group, a difference as large as that group's whole share,
+  ranking the codes by it. Those cells now read "—" and the comparison says why, no
+  difference is reported for them, the CSV leaves them blank, and the Canvas chart and its
+  exports say the same. The comparison also now says what it counts: codings in
+  conversations only, through each speaker's participant link — documents, open-text
+  answers and observations are not included. (#1421)
 - **Ratings and rating scales refresh the figures they feed.** After a rating on a coding
   page or the Ratings page, or a change to a code's rating scale, Reliability's rating
   agreement could keep its old numbers for up to five minutes, and the reconciliation grid,
-  the consensus count, the participant table's "out of date" marker and the Ratings queue for
-  up to a minute. They now update when you next open them. (#1425)
-- **The Ratings page keeps your place.** Coming back to the window after a minute, editing a
-  code in the codebook panel, changing the code filter or loading the next batch could skip
-  unrated passages, send *Previous* to a different passage, and count your ratings twice
-  ("Nothing waiting to be rated." with a passage still on screen). The passage you are on
-  stays put and the counts are right; returning to a filter you left a minute ago shows a
-  brief "Loading the queue…". (#1456)
+  the consensus count and the participant table's "out of date" marker for up to a minute; a
+  rating on a coding page also left the passage in the Ratings queue for up to a minute. They
+  now update when you next open them. (#1425)
+- **The Ratings page keeps your place.** Coming back to the window after a minute, changing the
+  code filter or loading the next batch could skip unrated passages, send *Previous* to a
+  different passage, and count your ratings twice ("Nothing waiting to be rated." with a
+  passage still on screen). Returning to a filter, or choosing the code you were already on,
+  started again at its first passage even when you had just rated it. The passage you are on
+  now stays put, a re-read no longer counts a rating twice, a filter you return to starts
+  afresh — with a brief "Loading the queue…" when its list may be out of date — and choosing
+  the code you are on does nothing. (#1456, #1480)
+- **From this version on, opening data that a newer version has updated stops with a
+  message that says so, and changes nothing.** Running an older version on such data —
+  reinstalling it, or opening an old copy of the app still on disk — took a full copy
+  of the data at every launch, replacing, one launch at a time, the older copies that
+  are the only way back, and then stopped with an error that did not say why. The
+  message names the version you are running and says to install the newest one.
+  Versions before 1.5.8 do not have this check, and this version updates your data, so
+  reinstalling one of them after updating still takes those copies. (#1476)
+- **A Canvas chart hides the groups you hid, on every chart type that draws
+  groups.** The horizontal frequency bar, heatmap, stacked bar and line charts drew
+  groups you had hidden, and so did their picture in an HTML, PDF or Word export. A
+  grouped line chart showing a single group also keeps that group's name on its
+  exported table. (#1479)
+- **Scatter plots show their points in dark mode.** In Relationships & Comparisons, the
+  scatter matrix and the enlarged scatter plot drew their points in a colour the app never
+  defined, so they fell back to black — invisible on the dark panel, with only the trend
+  line showing. The points now use the text colour, readable in both themes. The same
+  undefined colour left the selected *Correlation Type* and *Cell Format* options without
+  their selected style, and drew a heavy outline around the *Compare By* boxes;
+  the options now use the app's selected style and the boxes look like the other menus.
+  (#1493)
+- **The withdrawal confirmation now says that your notes and codes on the person's survey
+  answers will be removed.** It listed those notes under what stays, for you to review,
+  but they are removed with the answers they belong to, and so are the codes on those
+  answers. The confirmation now lists both under what will be removed. The withdrawal's
+  entry in the Audit Trail now counts them, and counts the quotes of their answers it
+  removed as well as those of their turns. (#1473)
+- **After a withdrawal, no other page shows the person's data from memory.** The Data
+  grid, Text Coding, the Content tab, frequencies and other analysis pages could go on
+  showing their answers and words, and results computed with them, until each page asked
+  the server again — up to five minutes later. Every page now asks again when you next open
+  it, and the pages on screen refresh at once. (#1474)
+- **The R script no longer replaces your computed variables with different
+  numbers.** The exported `.R` script re-ran each computed variable's formula in
+  R and wrote the result over the values in the data file. R cannot run them the
+  way Mixed Measures does, so the results often differed: arithmetic on ordinal
+  items (a 1–5 agreement scale, say) came out empty, an average over a scale starting
+  at 0 came out one point too high, a sum of all-missing answers became 0, dividing by
+  zero gave infinity, and a second dataset's records got values the app never computed.
+  Two kinds of formula stopped the whole script, and every later statistic used the
+  replaced numbers — a saved mean of 1.0 printed as 2.0. The script now keeps the values
+  Mixed Measures computed, lists each formula as a comment, and names any
+  computed variable that is out of date. The formula editor's "R equivalent" line
+  now gives NA, not 0, NaN or infinity, for an all-missing sum or average and for
+  division by zero, and quotes a backslash so R can read it. (#1322)
+- **The exported R script now runs to the end and reads the right columns.** A
+  variable group with a long or non-Latin name, two groups whose names differ only in
+  capitals or punctuation, a dataset column named like a group's score, or a group with
+  no scale score could make the script stop partway or read the wrong column; and in a
+  project with several datasets, a dataset whose name starts with a digit, such as
+  `2023 survey`, stopped it from running at all. Column names in the exported CSV change
+  in three cases: a group whose name has no letters a–z or digits is now `group_score`
+  (was `_score`), and in a project with several datasets, a dataset whose name starts
+  with a digit gets an `x_` prefix and one with no letters a–z or digits is called `ds`.
+  (#1371)
+- **A proportion saved with "=" now counts correctly in the exported R script.** The
+  script wrote `sum(x = 4)`, which R reads as naming an argument rather than comparing,
+  so it printed a different count from the one the app showed, with no warning. It now
+  writes `==`, as the app computes. (#1468)
+- **An exported R script no longer stops at a name that is a word R reserves.** A variable
+  group named "Function" or a column named `next` made R refuse the whole script, so not
+  one line ran. Such a name now takes a trailing underscore in the script (`function_`,
+  `next_`), and a column's takes it in the data file too — in a project with several
+  datasets as well, where `survey__next` becomes `survey__next_`. (#1482)
+- **An answer spelled "NA" stays an answer in the exported R script, and text answers are
+  read as text.** R read "NA" — North America, Namibia, an ID — as a missing value while
+  the app counted it, and it read an answer such as `45,000`, `F`, `1.0` or `10:00` as a
+  number, a TRUE/FALSE or a time, so it matched none of the variable's categories and
+  every such answer became missing in R. Only a blank cell is missing now, and every
+  answer of a categorical or demographic variable is read as text — so a demographic such
+  as age now arrives in R as text, and needs `as.numeric()` before arithmetic. (#1483)
+- **One control character no longer stops an Excel, Word or codebook export.** An answer,
+  name or Canvas text holding a character such as the line break FileMaker uses inside a
+  cell, or Word's manual line break pasted as text, made the whole Excel or Word export
+  fail, and wrote a REFI-QDA codebook file that would not open — not even in Mixed
+  Measures. That line break is now written as a line break (as a space in a sheet's name
+  and in the codebook file's names) and other such characters are left out; the project
+  itself, the CSV exports and the R export keep the text unchanged. (#1485)
 
 ## [1.5.7] - 2026-10-17
 

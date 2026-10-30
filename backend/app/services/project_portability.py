@@ -2357,6 +2357,32 @@ def _predates_uuid_spine(data: dict) -> bool:
     )
 
 
+def _unrecognisable_copy_coders(data: dict, coder_mapping: dict | None) -> list[str]:
+    """#1469 — the file's people and models a CODING COPY could not recognise again.
+
+    A build before the coder identity (`users.uuid`, #1352) wrote none, so the copy
+    would MINT one for each such coder — an identity the install they came from has
+    never seen. The merge back then finds no one by identity, the copy has usually
+    renamed them (every install's first coder is "Researcher", so the lead arrives as
+    "Researcher (2)"), and the lead's own codings come back as a second coder's:
+    counted twice, and reliability computed between the lead and themselves.
+
+    A coder the caller ANSWERED with a match (D2's "this one is me") is not minted, so
+    is not listed; a system bucket ("Unattributed") is not a person and keeps its rule.
+    """
+    names: list[str] = []
+    for item in data.get("coders", []):
+        if normalize_coder_type(item.get("coder_type")) in SYSTEM_CODER_TYPES:
+            continue
+        if _file_coder_uuid(item) is not None:
+            continue
+        decision = (coder_mapping or {}).get(str(item["_original_id"]))
+        if decision and decision.get("action") == "match" and decision.get("target_user_id"):
+            continue
+        names.append(item.get("username") or "a coder")
+    return names
+
+
 def _assert_merge_compatible(
     db: Session, data: dict, code_mapping: dict | None = None,
     target_project_id: int | None = None,
@@ -3554,7 +3580,9 @@ def _mark_quoted_answer_columns_stale(
         )
 
 
-def _preflight_import_refusals(db: Session, data: dict, coder_mapping: dict | None) -> None:
+def _preflight_import_refusals(
+    db: Session, data: dict, coder_mapping: dict | None, *, import_mode: str,
+) -> None:
     """Every refusal an import can make from the FILE and the caller's coder decisions —
     raised BEFORE anything is written (#1150 a).
 
@@ -3569,7 +3597,8 @@ def _preflight_import_refusals(db: Session, data: dict, coder_mapping: dict | No
 
     ⚠️ **Not in `/validate-import`, deliberately**: these need `project.json` parsed, and
     on a v≤6 file that is the whole-document parse `merge_preview.json` exists to avoid.
-    All five are hand-edited, legacy or stale-screen states.
+    All five are hand-edited, legacy or stale-screen states — and so is the sixth, a
+    coding copy of a file whose coders carry no identity (#1469, an older build's file).
     """
     # 🔴 #1039 (d): a coder of the CONSENSUS kind is refused, and the whole file with
     # it. No export writes one — the consensus layer's rows are filtered out
@@ -3623,6 +3652,24 @@ def _preflight_import_refusals(db: Session, data: dict, coder_mapping: dict | No
         refusal = coder_match_refusal(item, target_coder)
         if refusal is not None:
             raise ValueError(_coder_mismatch_sentence(item, target_coder, refusal))
+
+    # 🔴 #1469 — a coding copy of a file whose coders carry no identity (a build before
+    # it wrote none) would mint one the original install has never seen, and the merge
+    # back would count those coders' codings twice. Refused unless each such coder is
+    # the caller's own "this one is me" answer — before the files are staged.
+    if import_mode == "copy_for_coding":
+        unrecognisable = _unrecognisable_copy_coders(data, coder_mapping)
+        if unrecognisable:
+            shown = ", ".join(f"“{n}”" for n in unrecognisable[:3])
+            if len(unrecognisable) > 3:
+                shown += f" and {len(unrecognisable) - 3} more"
+            raise ValueError(
+                "This file was exported by an older version of Mixed Measures, which did "
+                f"not record who its coders are, so the coding of {shown} would come back "
+                "to the original project as a second coder's when this copy is merged. Ask "
+                "for a new export from an updated copy, or import it as an independent "
+                "project."
+            )
 
     # #289: 1:1 column-per-dataset on incoming equivalence group memberships. A valid
     # export never carries a violation, but a legacy or hand-edited file could. Fail
@@ -3839,7 +3886,7 @@ def import_project(
 
         # #1150 (a): every refusal the file or the coder decisions can earn, BEFORE the
         # mode branch below writes the safety copy (merge, overwrite) or anything else.
-        _preflight_import_refusals(db, data, coder_mapping)
+        _preflight_import_refusals(db, data, coder_mapping, import_mode=import_mode)
 
         # #1190 — what a withdrawal removed, by this install AND by whoever made the
         # file, under the FILE's identity. Consulted in EVERY mode: an old copy brings
@@ -4010,6 +4057,7 @@ def import_project(
                     "merging, so a copy coded from it could not be merged back. Import it as "
                     "an independent project, or ask for a new export from an updated copy."
                 )
+            # (#1469's refusal of coders with no identity runs in the pre-flight.)
             clash = db.query(Project).filter(Project.project_uuid == incoming_uuid).first()
             if clash is not None:
                 raise ValueError(
@@ -4084,7 +4132,8 @@ def import_project(
             column default mints one: SQLAlchemy fills an explicit None from a Python
             default (measured, 2.0.49). A separate mint for that arm survived its mutant
             — redundant, so it is gone (#941); the outcome is pinned by
-            `test_an_older_builds_file_has_no_identity_and_the_copy_mints_one`."""
+            `test_an_older_builds_file_imported_as_new_mints_an_identity`. A coding copy
+            never reaches this for such a coder (#1469: refused, or answered as a match)."""
             file_uuid = _file_coder_uuid(item)
             held = (
                 file_uuid is not None
@@ -5878,6 +5927,31 @@ def import_project(
         # #1190 — carry every tombstone (this install's and the file's) under the
         # identity the imported project now has, and say what was not brought back.
         _result_uuid = db.query(Project.project_uuid).filter(Project.id == pid).scalar()
+        # 🔴 #1471 — a "new" import re-mints every participant's uuid, and D12's marker
+        # names the reinstated participant BY uuid. Carried as written it named nobody in
+        # the new project, so she read as withdrawn again: the next Duplicate or "new"
+        # import of it was refused and a merge into it skipped her. Followed through the
+        # re-mint here. The other uuid-keyed tombstones name things the file does not
+        # hold (her row, speaker, quotes, notes) or turns whose blank every copy of the
+        # new project shares, so they go inert, harmlessly; the identifier hash is not a
+        # uuid and keeps her out.
+        _reinstated = carried.uuids.get(_tomb.PARTICIPANT_REINSTATED) if carried else None
+        if import_mode == "new" and _reinstated:
+            _new_id_by_old = {
+                item["uuid"]: remap["participants"][item["_original_id"]]
+                for item in data.get("participants", [])
+                if item.get("uuid") in _reinstated
+                and item["_original_id"] in remap["participants"]
+            }
+            _new_uuid_by_id = dict(
+                db.query(Participant.id, Participant.uuid)
+                .filter(Participant.id.in_(list(_new_id_by_old.values())))
+                .all()
+            ) if _new_id_by_old else {}
+            carried = _tomb.rekey(carried, _tomb.PARTICIPANT_REINSTATED, {
+                old: _new_uuid_by_id[nid] for old, nid in _new_id_by_old.items()
+                if nid in _new_uuid_by_id
+            })
         if _result_uuid and carried:
             _tomb.write(db, _result_uuid, carried)
         # Merge-only, like every count here: no other mode skips (each refuses a file

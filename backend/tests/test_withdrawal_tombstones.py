@@ -541,6 +541,64 @@ class TestTypingAWithdrawnIdentifier:
         assert "PATSAYS I have diabetes" not in _answers(pid)
         assert _participants(pid).count("P07") == 1
 
+    @staticmethod
+    def _import_new(k, blob):
+        return k.c.post("/api/projects/import-project", data={"import_mode": "new"},
+                        files={"file": ("e.mmproject", blob, "application/zip")},
+                        headers=k.H)
+
+    @staticmethod
+    def _uuid_of(pid, identifier):
+        return _q("SELECT uuid FROM participants WHERE project_id=:p AND identifier=:i",
+                  p=pid, i=identifier)[0][0]
+
+    @staticmethod
+    def _tombs(pid):
+        (puuid,) = _q("SELECT project_uuid FROM projects WHERE id=:p", p=pid)[0]
+        return _q("SELECT entity_type, entity_uuid, identifier_hash FROM removal_tombstones "
+                  "WHERE project_uuid=:u", u=puuid)
+
+    def test_the_reinstatement_follows_her_through_a_re_minting_import(self, client):
+        """#1471 — a Duplicate (a "new" import) re-mints every participant's uuid; the
+        marker must name the NEW one, or the copy reads her as withdrawn again: its own
+        Duplicate refused, its export refused as "new", and a merge into it skipping her.
+        Two hops, every re-minting door, and the merge."""
+        ids = build_world(client)
+        pid = ids["pid"]
+        _withdraw(client, pid, ids["P"]["P07"])
+        ok(self._create(client, pid, "P07", confirm_withdrawn=True))
+        pid2 = ok(client.c.post(f"/api/projects/{pid}/duplicate", headers=client.H))["project_id"]
+        assert self._uuid_of(pid2, "P07") != self._uuid_of(pid, "P07")      # re-minted
+        marks = {u for t, u, _h in self._tombs(pid2) if t == "participant_reinstated"}
+        assert self._uuid_of(pid2, "P07") in marks
+        # hop two, by each re-minting door
+        r = client.c.post(f"/api/projects/{pid2}/duplicate", headers=client.H)
+        assert r.status_code == 200, r.text
+        assert "P07" in _participants(r.json()["project_id"])
+        r = self._import_new(client, export(client, pid2))
+        assert r.status_code == 200, r.text
+        assert "P07" in _participants(r.json()["project_id"])
+        # …and a merge of its own copy back into it keeps her
+        r = merge(client, export(client, pid2), pid2, code_mapping={})
+        assert r.status_code == 200, r.text
+        assert r.json()["merge_report"]["withdrawn_participants_skipped"] == 0
+
+    def test_CONTROL_the_person_who_withdrew_is_still_kept_out_of_the_re_minted_copy(self, client):
+        """The identifier hash is not a uuid, so the re-mint leaves it whole: the copy
+        still refuses a typed P07 once nobody holds it."""
+        ids = build_world(client)
+        pid = ids["pid"]
+        _withdraw(client, pid, ids["P"]["P07"])
+        ok(self._create(client, pid, "P07", confirm_withdrawn=True))
+        pid2 = ok(client.c.post(f"/api/projects/{pid}/duplicate", headers=client.H))["project_id"]
+        assert any(h for t, _u, h in self._tombs(pid2) if t == "participant")
+        (p07,) = _q("SELECT id FROM participants WHERE project_id=:p AND identifier='P07'", p=pid2)[0]
+        ok(client.c.patch(f"/api/projects/{pid2}/participants/{p07}",
+                          json={"identifier": "P08"}, headers=client.H))
+        r = self._create(client, pid2, "P07")
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["error"] == "withdrawn_identifier"
+
 
 class TestTheReportCountsUnlinkedRecordsCarryingHerIdentifier:
     """D14 — a count, by linking's own rule (an identifier-typed column, trim-then-

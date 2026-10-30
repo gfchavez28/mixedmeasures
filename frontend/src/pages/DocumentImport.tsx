@@ -368,8 +368,10 @@ export default function DocumentImport() {
 
                 {/* Right: preview */}
                 <div className="rounded-lg border border-mm-surface-border bg-mm-surface p-4">
+                  {/* #1494: the preview — and the warnings under it — are the FIRST
+                      file's; with several, name it (Conversation Import's form). */}
                   <h3 className="text-sm font-medium text-mm-text mb-3">
-                    Preview{preview && !previewLoading ? ` (${preview.total_segments} segment${preview.total_segments !== 1 ? 's' : ''})` : ''}
+                    Preview{preview && !previewLoading ? ` (${preview.total_segments} segment${preview.total_segments !== 1 ? 's' : ''}${files.length > 1 ? ` — ${files[0].name}` : ''})` : ''}
                   </h3>
                   {previewLoading ? (
                     <div className="flex items-center gap-2 text-sm text-mm-text-muted py-4 justify-center">
@@ -384,6 +386,13 @@ export default function DocumentImport() {
                           {w}
                         </div>
                       ))}
+                      {files.length > 1 && (
+                        <p className="text-xs text-mm-text-muted mb-2">
+                          {files.length === 2
+                            ? 'The other file is read when it is imported, and the Results step lists anything left out of it.'
+                            : `The other ${files.length - 1} files are read when they are imported, and the Results step lists anything left out of each.`}
+                        </p>
+                      )}
                       <div className="space-y-1 max-h-64 overflow-y-auto">
                         {preview.segments.map((seg) => (
                           <div key={seg.sequence_order} className="flex gap-2 text-xs py-1.5 border-b border-mm-border-subtle last:border-0">

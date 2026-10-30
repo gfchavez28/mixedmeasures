@@ -627,15 +627,12 @@ def test_an_ineligible_match_is_refused_before_anything_is_written(
     assert not (tmp_path / "b-docs").exists() or not any((tmp_path / "b-docs").iterdir())
 
 
-def test_an_older_builds_file_has_no_identity_and_the_copy_mints_one(tmp_path):
-    """A 1.5.7 export carries no coder `uuid` (D10: it rides v7 with no bump). The copy
-    still lands nobody by name, and the coder it creates gets an identity of its own —
-    never a NULL that every later import would treat as "no identity"."""
+def _as_an_older_build_wrote_it(f: Path, out: Path) -> Path:
+    """A 1.5.7 export: no coder `uuid` (D10: it rides v7 with no bump), in the document
+    the import reads AND the one the preview reads."""
     import json
     import zipfile
-    A, lead, p, s1, s2, f = _lead(tmp_path)
-    old = tmp_path / "old.mmproject"
-    with zipfile.ZipFile(f) as zin, zipfile.ZipFile(old, "w") as zout:
+    with zipfile.ZipFile(f) as zin, zipfile.ZipFile(out, "w") as zout:
         for name in zin.namelist():
             body = zin.read(name)
             if name in ("project.json", "merge_preview.json"):
@@ -644,11 +641,102 @@ def test_an_older_builds_file_has_no_identity_and_the_copy_mints_one(tmp_path):
                     c.pop("uuid", None)
                 body = json.dumps(doc).encode()
             zout.writestr(name, body)
+    return out
+
+
+def test_an_older_builds_file_imported_as_new_mints_an_identity(tmp_path):
+    """A coder created from a file with no identity gets one of its own — never a NULL
+    that every later import would treat as "no identity". (`new`, D6's door: a coding
+    copy no longer creates such a coder, #1469.)"""
+    A, lead, p, s1, s2, f = _lead(tmp_path)
+    old = _as_an_older_build_wrote_it(f, tmp_path / "old.mmproject")
     B = _install()
     me = ensure_default_user(B)
-    _copy(B, me, old, tmp_path, None)
-    lead_here = B.query(User).filter(User.username == "Researcher (2)").one()
+    me.username = "Bob"           # so D6's name rule does not land the lead on me
+    B.commit()
+    import_project(B, old, tmp_path / "b-docs", user_id=me.id, import_mode="new")
+    B.commit()
+    lead_here = B.query(User).filter(User.username == "Researcher").one()
     assert lead_here.uuid and lead_here.uuid not in (lead.uuid, me.uuid)
+
+
+# ── 5b. #1469 — a coding copy of an older build's file ──────────────────────────────
+
+def test_a_coding_copy_of_an_older_builds_file_is_refused_when_nobody_is_answered(
+    tmp_path, monkeypatch,
+):
+    """The colleague's install on 1.5.8, the lead's file from 1.5.7, "None of them".
+    The copy would mint the lead an identity the lead's install has never seen, rename
+    them "Researcher (2)", and the merge back would count the lead's codings twice
+    (the audit's F1 probe: α 0.375 "unreliable" between the lead and themselves).
+    Refused in the pre-flight (#1150 a) — before a file is staged or a row written —
+    with the way out."""
+    from app.services import project_portability as pp
+    A, lead, p, s1, s2, f = _lead(tmp_path)
+    old = _as_an_older_build_wrote_it(f, tmp_path / "old.mmproject")
+    B = _install()
+    me = ensure_default_user(B)
+    B.commit()
+    staged: list[int] = []
+    monkeypatch.setattr(pp, "_stage_archive_files", lambda *a, **k: staged.append(1))
+    with pytest.raises(ValueError, match="did not record who its coders are") as exc:
+        _copy(B, me, old, tmp_path, None)
+    assert "“Researcher”" in str(exc.value)
+    assert "independent project" in str(exc.value)
+    assert staged == []
+    B.rollback()
+    assert B.query(Project).count() == 0
+    assert _humans(B) == ["Researcher"]
+
+
+def test_the_remedy_an_updated_export_round_trips_with_one_lead(tmp_path):
+    """The sentence's way out: the lead updates and exports again — the file carries
+    their identity, and the merge back holds the lead once (the F1 probe's assertion)."""
+    A, lead, p, s1, s2, fb = _round_trip(tmp_path, colleague_codes=[("S2", "Beta")])
+    decisions, unanswered = _confirm_step_defaults(build_merge_coder_preview(A, fb))
+    for c in build_merge_coder_preview(A, fb):
+        if c["username"] in unanswered:
+            decisions[str(c["original_id"])] = {"action": "create"}
+    _merge(A, lead, p, fb, tmp_path, decisions)
+    got = _codings(A, p.id)
+    assert [k for k in got if k[0] == s1] == [(s1, "Researcher")]
+
+
+def test_CONTROL_answering_this_one_is_me_still_imports_an_older_builds_file(tmp_path):
+    """A researcher moving their OWN 1.5.7 project to a new install answers D2 with
+    themselves: nothing is minted for that coder, so nothing is refused. (Kills the
+    mutant that drops the answered-match exemption.)"""
+    A, lead, p, s1, s2, f = _lead(tmp_path)
+    old = _as_an_older_build_wrote_it(f, tmp_path / "old.mmproject")
+    B = _install()
+    me = ensure_default_user(B)
+    B.commit()
+    pid = _copy(B, me, old, tmp_path, {str(_oid(B, old, "Researcher")): {
+        "action": "match", "target_user_id": me.id}})
+    assert _humans(B) == ["Researcher"]
+    assert _codings(B, pid) == {(s1, "Researcher"): ["Alpha"]}
+
+
+def test_CONTROL_the_unattributed_bucket_of_an_older_builds_file_is_not_refused(tmp_path):
+    """"Unattributed" is a system bucket, not a person a copy mints: an older file holding
+    one, with its one person answered, imports. (Kills the mutant that drops the
+    system-kind exemption.)"""
+    A, lead, p, s1, s2, _ = _lead(tmp_path)
+    un = User(username="Unattributed", password_hash=None, coder_type="unattributed")
+    A.add(un)
+    A.flush()
+    seg = A.query(Segment).filter(Segment.uuid == s2).one()
+    beta = A.query(Code).filter(Code.project_id == p.id, Code.name == "Beta").one()
+    A.add(CodeApplication(segment_id=seg.id, code_id=beta.id, user_id=un.id, origin="human"))
+    A.commit()
+    f = _export(A, p.id, tmp_path / "lead" / "with-legacy.mmproject")
+    old = _as_an_older_build_wrote_it(f, tmp_path / "old.mmproject")
+    B = _install()
+    me = ensure_default_user(B)
+    B.commit()
+    _copy(B, me, old, tmp_path, {str(_oid(B, old, "Researcher")): {
+        "action": "match", "target_user_id": me.id}})
+    assert B.query(User).filter(User.coder_type == "unattributed").count() == 1
 
 
 # ── 6. D6 — "Import as an independent project" and overwrite keep today's name rule ──

@@ -206,6 +206,10 @@ export interface WithdrawalOutcome {
   computed_results_deleted: number
   /** #1320 — audit entries whose details were stripped (the entries are kept). */
   audit_entries_redacted: number
+  /** #1473 — notes and codings on their ANSWERS, deleted with the answers (a
+   *  turn's are kept; these cannot outlive what they hang off). */
+  notes_deleted: number
+  code_applications_deleted: number
   backup_filename: string
 }
 

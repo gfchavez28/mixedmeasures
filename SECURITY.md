@@ -121,9 +121,10 @@ application, authentication/session/CSRF bypasses, injection via imported files
 traversal / zip-slip in import/backup/restore, and similar application-layer flaws.
 
 The project already hardens several of these (defused XML parsing, CSV/Excel formula
-defanging, zip-slip checks and integrity verification on restore, upload size
-limits, a pinned security floor for a transitive CVE); reports of gaps in these
-defenses are welcome.
+defanging, escaped names and number-checked settings in the exported R script, a
+content-security policy in Canvas HTML exports, zip-slip checks and integrity
+verification on restore, upload size limits, a pinned security floor for a transitive
+CVE); reports of gaps in these defenses are welcome.
 
 ## Out of scope
 

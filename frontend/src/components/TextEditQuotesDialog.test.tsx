@@ -95,6 +95,39 @@ describe('TextEditQuotesDialog', () => {
     expect(screen.getByRole('alertdialog')).toHaveAccessibleDescription(/could not be followed word by word/)
   })
 
+  // #1492 — technique only: jsdom resolves no Tailwind and computes no colour, so
+  // the colour itself was checked live in both themes; these pin the classes that
+  // produce it. The outline variant sets no text colour of its own and must
+  // INHERIT the dialog's, so the default's `text-primary-foreground` must be gone.
+  it('#1492 (a): the remove action is the OUTLINE variant, with no default text colour left on it', () => {
+    render(<TextEditQuotesDialog plan={PLAN} onChoose={vi.fn()} />)
+    const remove = screen.getByRole('button', { name: 'Remove 2 quotes and save' })
+    expect(remove.className).toContain('bg-background')
+    expect(remove.className).not.toContain('text-primary-foreground')
+    expect(remove.className).not.toContain('bg-primary')
+    // The primary choice keeps the default (filled) variant.
+    const keep = screen.getByRole('button', { name: 'Keep as shown and save' })
+    expect(keep.className).toContain('bg-primary')
+    expect(keep.className).toContain('text-primary-foreground')
+  })
+
+  it('#1492 (a): with nothing keepable, remove is the one filled action', () => {
+    const onlyGone = { ...PLAN, quotes: [PLAN.quotes[2]] }
+    render(<TextEditQuotesDialog plan={onlyGone} onChoose={vi.fn()} />)
+    const remove = screen.getByRole('button', { name: 'Remove the quote and save' })
+    expect(remove.className).toContain('bg-primary')
+    expect(remove.className).toContain('text-primary-foreground')
+  })
+
+  it('#1492 (b): the footer wraps rather than scrolling the dialog sideways', () => {
+    render(<TextEditQuotesDialog plan={PLAN} onChoose={vi.fn()} />)
+    const footer = screen.getByRole('button', { name: 'Cancel' }).parentElement!
+    expect(footer.className).toContain('sm:flex-wrap')
+    expect(footer.className).toContain('gap-2')
+    // `space-x` indents a wrapped row; the footer's own `sm:space-x-2` must be gone.
+    expect(footer.className).not.toContain('sm:space-x-2')
+  })
+
   it('is closed with no plan', () => {
     render(<TextEditQuotesDialog plan={null} onChoose={vi.fn()} />)
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()

@@ -38,6 +38,7 @@ import { useListLoad } from '@/hooks/useListLoad'
 import { useWithdrawnIdentifierConfirm } from '@/hooks/useWithdrawnIdentifierConfirm'
 import { createConfirmingWithdrawn, WITHDRAWN_RENAME_WORDING } from '@/lib/withdrawn-identifier'
 import { invalidateAfterParticipantLinkChange } from '@/lib/participant-link-cache'
+import { forgetCachedProjectPages } from '@/lib/project-cache'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { LoadState } from '@/components/LoadStatus'
 import { toast } from 'sonner'
@@ -320,39 +321,27 @@ export default function ParticipantsPage() {
       participantsApi.withdraw(projectId, target.id),
     onSuccess: (res, target) => {
       const participantId = target.id
-      void queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
-      // Their turns and responses changed, so anything reading conversations or
-      // datasets is now stale.
-      void queryClient.invalidateQueries({ queryKey: ['conversations', projectId] })
-      void queryClient.invalidateQueries({ queryKey: ['dataset'] })
-      // #1123 — and a document about them no longer says so.
-      void queryClient.invalidateQueries({ queryKey: ['documents', projectId] })
-      // 🔴 #1320 — the server rewrote every canvas copy of their quotes, deleted
-      // the quotes, blanked merged turns and renamed speakers.
-      // The canvas CONTENT is RESET, never merely invalidated: an invalidated
-      // query keeps serving its old data to the next mount until the refetch
-      // lands, and the theme editor binds its content ONCE, at creation
-      // (`components/canvas/the internal design notes) — so the Writing view opened next would
-      // edit their words, and its autosave would write them straight back.
-      // Reset leaves no data, so the view waits for the server's version
-      // (`useCoders.ts::resetCoderRoster`'s reason, `list-load-state.md` §5).
-      // The rest would only show what is gone until a refetch, so they are
-      // invalidated. Prefixes by grep: `CanvasView` (`canvas`, `canvases`,
-      // `snapshots`), `CanvasCompareView` (`snapshot-detail`), the Materials
-      // drawer and workbenches (`excerpts`), the Quote Board (`excerpts-quoted`,
-      // `quote-board-config`), `SearchPopover` (`search`), the workbench
-      // (`conversation`) and the turn lists (`segments`).
-      void queryClient.resetQueries({ queryKey: ['canvas', projectId] })
-      void queryClient.resetQueries({ queryKey: ['snapshot-detail', projectId] })
-      void queryClient.invalidateQueries({ queryKey: ['canvases', projectId] })
-      void queryClient.invalidateQueries({ queryKey: ['snapshots', projectId] })
-      void queryClient.invalidateQueries({ queryKey: ['excerpts', projectId] })
-      void queryClient.invalidateQueries({ queryKey: ['excerpts-quoted', projectId] })
-      void queryClient.invalidateQueries({ queryKey: ['quote-board-config', projectId] })
-      void queryClient.invalidateQueries({ queryKey: ['search', projectId] })
-      void queryClient.invalidateQueries({ queryKey: ['conversation', projectId] })
-      void queryClient.invalidateQueries({ queryKey: ['speakers', projectId] })
-      void queryClient.invalidateQueries({ predicate: (query) => query.queryKey[0] === 'segments' })
+      // 🔴 #1474 — the act moved nearly every page in the project: it DELETED their
+      // rows, responses and quotes, BLANKED their turns, rewrote the canvas copies,
+      // deleted stored metric results and wrote a backup (`backend-invariants.md` §5).
+      // A hand list of keys here missed nine readers of their answers and words
+      // (the Data grid, Text Coding, Content › by code, frequencies, metrics, …), and
+      // no list can be complete — `['segments', cid]`, `['notes', cid]` and
+      // `['participant-detail', id]` carry no project id. So, as Merge does, every page
+      // not on screen is FORGOTTEN and the queries on screen refetch: the list keeps
+      // its rows while it asks again. The forget is in `onSettled`, below.
+      // Their OWN panel and confirm are dropped HERE, on success only — IN ADDITION
+      // to the forget, never instead of it (§1b: a by-id list misses the next key
+      // shape). Still observed in this tick, they would otherwise be refetched,
+      // asking the server about someone who no longer exists (three requests,
+      // measured), and their detail kept for the next participant given their id
+      // (#1248). `onSuccess` runs before `onSettled`, so they are gone before the
+      // forget refreshes what is on screen. NOT after a failure: the person may
+      // still exist and their panel and confirm stay open, and a removed query
+      // under a mounted observer comes back EMPTY ("Loading…", the confirm
+      // waiting again) where a refetch keeps the answer on screen.
+      queryClient.removeQueries({ queryKey: ['participant-detail', participantId] })
+      queryClient.removeQueries({ queryKey: ['withdrawal-report', projectId, participantId] })
       // #1139 — the person, as the dialog named them; it said "E-01 removed".
       toast.success(
         `${participantNameWithId(target)} removed. Backup saved as ${res.backup_filename}.`,
@@ -370,6 +359,22 @@ export default function ParticipantsPage() {
     onError: (err: unknown) => {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       toast.error(detail || 'Could not remove this participant. Nothing was changed.')
+    },
+    // #1474 — on SETTLED, `mm-file-doors.md` §1b's reason: the request has no client
+    // timeout (#1025), but a connection that drops AFTER the server committed (the
+    // engine dying between commit and answer) arrives here as a failure, and the
+    // act may have finished. After a real refusal the cost is first-visit loads.
+    onSettled: () => {
+      forgetCachedProjectPages(queryClient, { refreshActive: true })
+      // 🔴 #1320 — canvas CONTENT must never be served old: the theme editor binds
+      // its content ONCE (`components/canvas/the internal design notes), so a Writing view handed
+      // their words would edit them and autosave them straight back. A canvas no
+      // page shows was just removed; one still ON SCREEN (the act lands whenever
+      // the request returns — no client timeout, #1025) was only invalidated above,
+      // which keeps serving the old copy, so it is RESET: no data until the
+      // server's version arrives (`list-load-state.md` §5's reset-vs-invalidate).
+      void queryClient.resetQueries({ queryKey: ['canvas', projectId] })
+      void queryClient.resetQueries({ queryKey: ['snapshot-detail', projectId] })
     },
   })
 

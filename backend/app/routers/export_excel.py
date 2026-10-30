@@ -47,6 +47,7 @@ from ..services.coding_layers import (
 from ..auth import get_current_user
 from .helpers import _get_project_or_404, sanitize_content_disposition, visible_segment_filter
 from ..services.timestamp import format_timecode
+from ..services.xml_text import xml_safe_text
 from .excerpts import _base_excerpt_query, _excerpt_to_response
 from .export_helpers import (
     _build_category_tree_and_chains,
@@ -163,7 +164,8 @@ def export_study_excel(
         first_code_col = len(coded_headers) - len(codes) + 1
 
         for col, header in enumerate(coded_headers, 1):
-            cell = ws_coded.cell(row=1, column=col, value=header)
+            # Code NAMES ride these headers, so the safe assign (#1485).
+            cell = excel_set_safe(ws_coded.cell(row=1, column=col), header)
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center")
@@ -823,7 +825,9 @@ def export_datasets_excel(
     _SHEET_INVALID = ("/", "\\", ":", "*", "?", "[", "]")
 
     def _sanitize_sheet_title(name: str) -> str:
-        cleaned = name
+        # #1485: openpyxl checks a title only at `save`, where one control
+        # character fails the whole workbook. One line, so a line break is a space.
+        cleaned = xml_safe_text(name, line_break=" ")
         for ch in _SHEET_INVALID:
             cleaned = cleaned.replace(ch, "_")
         cleaned = cleaned[:31] or "Sheet"
@@ -1017,7 +1021,12 @@ def export_datasets_excel(
                             answer.value_text, recode_def,
                             missing_rules=missing_rules_by_col.get(column.id),
                         )
-                        ws.cell(row=row_idx, column=col_idx, value=computed if computed is not None else "")
+                        # A category_group recode returns its group LABEL, typed
+                        # by the researcher — the safe assign (#1485).
+                        excel_set_safe(
+                            ws.cell(row=row_idx, column=col_idx),
+                            computed if computed is not None else "",
+                        )
                     else:
                         ws.cell(row=row_idx, column=col_idx, value="")
                 col_idx += 1

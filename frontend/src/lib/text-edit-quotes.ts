@@ -4,7 +4,8 @@
  *
  * The server plans every quote (`segment_operations.py::plan_text_edit_rebase`):
  * `silent` ones are followed automatically; `edge` (a change touches the quote's
- * edge from inside), `straddle` (a change crosses an edge) and `gone` (none of its
+ * edge from inside, or glues a word onto it from outside — "no" -> "nothing",
+ * #1477), `straddle` (a change crosses an edge) and `gone` (none of its
  * words survive) are shown BEFORE saving (D5) and the save must say what to do with
  * each — or the server refuses it. The functions below turn the researcher's
  * choice, or an undo's captured facts, into that answer.
@@ -66,8 +67,9 @@ export function removedQuotes(report: TextEditPlan): TextEditQuote[] {
 }
 
 /** Undo: every quote the act KEPT goes back to its pre-edit offsets, exactly. The
- *  planner alone would not put it there (re-adding a deleted letter AT a quote's
- *  edge stays outside it), which is why the act's report is captured. */
+ *  planner alone would not put it there (re-adding deleted punctuation AT a quote's
+ *  edge stays outside it, and a re-added letter now asks — #1477), which is why the
+ *  act's report is captured. */
 export function undoAnswer(report: TextEditPlan): TextEditAnswer {
   return {
     excerpt_offsets: report.quotes.filter(q => !q.removed).map(q => placedAt(q, 'old')),

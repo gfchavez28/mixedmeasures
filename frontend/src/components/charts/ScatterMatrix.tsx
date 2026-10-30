@@ -3,6 +3,7 @@ import { getDivergingCellStyle, jitterOffset, formatPValue } from '@/lib/chart-d
 import { useTheme } from '@/lib/theme-context'
 import type { ScatterPair, CorrelationCell } from '@/lib/api'
 import { NO_VALUE, formatStat, undefinedTooltip } from '@/lib/stat-format'
+import { FOCUS_RING } from '@/lib/selection'
 import ScatterPlotModal from './ScatterPlotModal'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 
@@ -49,7 +50,7 @@ const MiniScatter = memo(function MiniScatter({
     <svg
       width={size}
       height={size}
-      className="cursor-pointer focus:outline-2 focus:outline-[hsl(var(--mm-accent))] focus:outline-offset-[-2px] rounded-sm"
+      className={`cursor-pointer rounded-sm ${FOCUS_RING}`}
       onClick={handleClick}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleClick() } }}
       tabIndex={0}
@@ -69,7 +70,11 @@ const MiniScatter = memo(function MiniScatter({
             cx={scaleX(xVal + jx)}
             cy={scaleY(pair.y[i] + jy)}
             r={2}
-            className="fill-[hsl(var(--mm-accent))]"
+            // #1493: `--mm-accent` was never defined, so the points fell back to
+            // black — invisible in dark mode. Judged BLENDED at this opacity over
+            // `--mm-bg` (WCAG 1.4.11), every accent fails in light mode; `mm-text`
+            // gives 3.77:1 light and 5.93:1 dark, and the trend line uses it too.
+            className="fill-mm-text"
             opacity={0.6}
           />
         )

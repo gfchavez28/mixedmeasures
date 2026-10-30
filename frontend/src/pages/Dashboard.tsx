@@ -256,7 +256,8 @@ export default function Dashboard() {
   const whoBlocker = whoIsYouBlocker(askWhoYouAre, whoIsYou)
   // #1258 — the mode PRESSED, which the wait's words and the busy button key on.
   // They keyed on `existing_project` (the file's project exists here), so *Import
-  // as new copy* said "Replacing your copy… then it is replaced" while it made a
+  // as new copy* (now *Import as an independent project*, #1508 a) said "Replacing
+  // your copy… then it is replaced" while it made a
   // copy and left the project untouched.
   const [importMode, setImportMode] = useState<ProjectImportMode | null>(null)
   // #1258 — the pressed button, kept in view when the wait panel opens above the
@@ -619,7 +620,8 @@ export default function Dashboard() {
                         A copy of <strong>{importPreview.manifest.project_name}</strong> already
                         exists here as <strong>{importPreview.existing_project.name}</strong>.
                         <strong> Merge</strong> a colleague's codings into it, <strong>overwrite</strong> your
-                        copy (replaced — a safety backup is saved first), or import a separate <strong>new</strong> copy?
+                        copy (replaced — a safety backup is saved first), or import it as an{' '}
+                        <strong>independent project</strong>?
                       </p>
                       {/* #482: refusal-end clarity — merge/overwrite are identity-scoped. */}
                       <p className="text-xs text-mm-text-muted">
@@ -765,7 +767,9 @@ export default function Dashboard() {
                     aria-disabled={importLoading || undefined}
                     aria-busy={(importLoading && importMode === 'new') || undefined}
                   >
-                    {importLoading && importMode === 'new' ? 'Importing…' : 'Import as new copy'}
+                    {/* #1508 (a): mode `new` has ONE name — the fresh-identity
+                        dialog's, CHANGELOG #1321's and the server refusal's. */}
+                    {importLoading && importMode === 'new' ? 'Importing…' : 'Import as an independent project'}
                   </Button>
                   <Button
                     ref={busyRef('overwrite')}

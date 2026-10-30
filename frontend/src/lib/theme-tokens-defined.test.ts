@@ -102,3 +102,56 @@ describe('mm-* theme utilities resolve to a defined token (#1001)', () => {
     ).toEqual([])
   }, SOURCE_SCAN_TIMEOUT_MS)
 })
+
+/**
+ * #1493 — the same silence one layer down: a `var(--mm-…)` inside a BRACKETED
+ * value (`fill-[hsl(var(--mm-accent))]`, `bg-[hsl(var(--mm-blue)/0.2)]`) never
+ * reaches the utility scan above, because the utility's value is the bracket, not
+ * an `mm-*` name. `--mm-accent` was referenced 13 times in four files from
+ * 2026-02-24 and defined nowhere: the declaration was invalid at computed-value
+ * time, so a scatter plot's points fell back to black (invisible in dark mode), a
+ * selected option drew no tint, and a select's border took `currentColor`.
+ *
+ * Scoped to the house namespace (`--mm-`): Radix (`--radix-*`), Tailwind
+ * (`--radius`, `--font-mono`, `--color-*`) and layout variables set from inline
+ * styles (`--crosswalk-*`, `--recon-cols`) are defined elsewhere by design.
+ */
+const MM_VARS_DEFINED = new Set([...CSS.matchAll(/(--mm-[a-z0-9-]+)\s*:/g)].map(m => m[1]))
+const MM_VAR_REFERENCE = /var\(\s*(--mm-[a-z0-9-]+)/g
+
+function undefinedMmVars(src: string): string[] {
+  return [...new Set([...src.matchAll(MM_VAR_REFERENCE)].map(m => m[1]))]
+    .filter(name => !MM_VARS_DEFINED.has(name))
+}
+
+describe('every var(--mm-…) names a variable index.css defines (#1493)', () => {
+  it('the predicate flags a missing name and passes a real one (falsifier)', () => {
+    expect(MM_VARS_DEFINED.has('--mm-blue')).toBe(true)
+    expect(MM_VARS_DEFINED.has('--mm-text')).toBe(true)
+    expect(undefinedMmVars('className="fill-[hsl(var(--mm-accent))] bg-[hsl(var(--mm-blue)/0.2)]"'))
+      .toEqual(['--mm-accent'])
+    // A defined name's prefix does not excuse a longer undefined one.
+    expect(undefinedMmVars('stroke-[hsl(var(--mm-blue-nonesuch))]')).toEqual(['--mm-blue-nonesuch'])
+    // An ASSIGNMENT is not a reference (SELECTION_TEXT_FLOOR re-points tokens this way).
+    expect(undefinedMmVars('[--mm-text-muted:var(--mm-text-secondary)]')).toEqual([])
+  })
+
+  it('🔴 no var(--mm-…) anywhere in src names an undefined variable', () => {
+    const found = new Set<string>()
+    let references = 0
+    for (const abs of sourceFiles({ ext: 'both', floor: 300 })) {
+      const src = stripComments(readFileSync(abs, 'utf8'), abs)
+      references += [...src.matchAll(MM_VAR_REFERENCE)].length
+      for (const name of undefinedMmVars(src)) found.add(`${srcRel(abs)} ${name}`)
+    }
+    // Population self-check: the scan reached the bracketed values (280 before
+    // comments are stripped, 2026-10-29).
+    expect(references).toBeGreaterThan(150)
+    expect(
+      [...found].sort(),
+      'A var(--mm-…) names a variable index.css does not define, so the declaration is '
+      + 'invalid and the property silently falls back. Use a defined token — never define '
+      + 'a token to fit a name.',
+    ).toEqual([])
+  }, SOURCE_SCAN_TIMEOUT_MS)
+})

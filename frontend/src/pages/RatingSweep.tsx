@@ -133,8 +133,25 @@ export default function RatingSweep() {
    * the coder recorded survives a filter change and comes back correct if they
    * filter back.
    */
+  /**
+   * 🔴 #1480 — the filter the coder is on NOW, for an answer that lands late.
+   * Written here and only here, because this handler is the only place the
+   * filter changes (a ref written while rendering is what the React Compiler
+   * lint refuses).
+   */
+  const filterRef = useRef<number | null>(null)
   const changeCodeFilter = useCallback((next: number | null) => {
+    // The chip already selected changes nothing — it must not restart the walk
+    // on a passage this pass has already rated.
+    if (next === filterRef.current) return
+    filterRef.current = next
     setCodeFilter(next)
+    // 🔴 #1480 — the walk is re-TAKEN on a filter change, never resumed. Kept,
+    // it survived a round trip whose middle answer never landed (All → a code
+    // still loading → All) and came back at its first passage — one this pass
+    // had rated. Cleared, the snapshot rule above takes it from this filter's
+    // answer, or waits for a stale one's re-read (D8).
+    setWalk(null)
     setCursor(0)
   }, [])
 
@@ -148,9 +165,16 @@ export default function RatingSweep() {
    * first passage back on screen for the length of the request.
    */
   const loadNextBatch = useCallback(() => {
+    const asked = codeFilter
     void refetch().then(result => {
+      // 🔴 #1480 — `refetch()` resolves with the observer's CURRENT result
+      // (TanStack 5.100.5, `queryObserver.js:168-175`): after a filter change
+      // that is the NEW filter's answer, which this stored under the old one and
+      // walked from its first passage. An answer for a filter the coder has
+      // left is dropped; it is in the cache, and going back re-takes the walk.
+      if (filterRef.current !== asked) return
       if (result.status !== 'success') return   // the page renders the failure
-      setWalk({ filter: codeFilter, entries: result.data.entries })
+      setWalk({ filter: asked, entries: result.data.entries })
       setCursor(0)
     })
   }, [refetch, codeFilter])

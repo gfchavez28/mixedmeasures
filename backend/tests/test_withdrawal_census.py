@@ -53,6 +53,7 @@ from app.models.conversation import Conversation
 from app.models.dataset import ColumnType, Dataset, DatasetColumn, DatasetRow, DatasetValue
 from app.models.excerpt import Excerpt
 from app.models.metric import MetricDefinition
+from app.models.note import Note
 from app.models.participant import Participant
 from app.models.project import Project
 from app.models.segment import Segment
@@ -83,6 +84,7 @@ SENTINELS = (
     "JULIET",     # a quote deleted BEFORE the withdrawal, whose canvas embed stayed
     "KILO",       # a survey answer quoted on the canvas
     "LIMA",       # a turn merged and unmerged (leaves an orphan combined speaker)
+    "MIKE",       # a survey answer whose quote was deleted BEFORE, its embed kept (#1473)
     "NOVEMBER",   # an audit entry of an action no list would name
     "Zelenka",    # their name — speaker name, labels, combined speakers
     "ROLESENT",   # their role
@@ -505,19 +507,30 @@ def census():
         score = DatasetColumn(dataset_id=ds.id, column_code="SCORE", column_text="Score",
                               column_name="Score", column_type=ColumnType.NUMERIC,
                               sequence_order=3, display_order=3)
-        db.add_all([q1, q2, job, score]); db.flush()
+        q3 = DatasetColumn(dataset_id=ds.id, column_code="Q3", column_text="Q3", column_name="Q3",
+                           column_type=ColumnType.OPEN_TEXT, sequence_order=4, display_order=4)
+        db.add_all([q1, q2, job, score, q3]); db.flush()
         r_m = DatasetRow(dataset_id=ds.id, participant_id=mid, row_identifier=IDENTIFIER)
         r_s = DatasetRow(dataset_id=ds.id, participant_id=sid_, row_identifier="P08")
         db.add_all([r_m, r_s]); db.flush()
         v_q1 = DatasetValue(row_id=r_m.id, column_id=q1.id, value_text="ECHO answer")
         v_q2 = DatasetValue(row_id=r_m.id, column_id=q2.id, value_text="KILO thoughts")
+        v_q3 = DatasetValue(row_id=r_m.id, column_id=q3.id, value_text="MIKE private answer")
         db.add_all([
-            v_q1, v_q2,
+            v_q1, v_q2, v_q3,
             DatasetValue(row_id=r_s.id, column_id=q1.id, value_text="Sam answer"),
             DatasetValue(row_id=r_m.id, column_id=job.id, value_text="GOLFJOB pilot"),
             DatasetValue(row_id=r_s.id, column_id=job.id, value_text="Nurse"),
             DatasetValue(row_id=r_m.id, column_id=score.id, value_text="12", value_numeric=12.0),
             DatasetValue(row_id=r_s.id, column_id=score.id, value_text="15", value_numeric=15.0),
+        ])
+        db.flush()
+        # #1473 — a researcher's note and a coding on one of their ANSWERS: deleted
+        # with it, so the confirm lists them as removed and the record counts them.
+        db.add_all([
+            Note(dataset_value_id=v_q2.id, content="Researcher note on an answer.",
+                 sequence_number=1),
+            CodeApplication(dataset_value_id=v_q2.id, code_id=code.id, user_id=user_id),
         ])
         db.flush()
         freq = MetricDefinition(project_id=pid, name="Job freq", metric_type="frequency_distribution",
@@ -539,7 +552,7 @@ def census():
                    project_id=pid, details={"record": IDENTIFIER})
         db.commit()
         ids = {"pid": pid, "cid": cid, "mid": mid, "segs": segs, "v_q1": v_q1.id,
-               "v_q2": v_q2.id, "ds": ds.id, "freq": freq.id, "grouped": grouped.id,
+               "v_q2": v_q2.id, "v_q3": v_q3.id, "ds": ds.id, "freq": freq.id, "grouped": grouped.id,
                "speaker": sp_m.id}
         db.close()
 
@@ -575,6 +588,7 @@ def census():
         e_sam = ok(c.post(ex, json={"segment_id": segs[1]}, headers=H))
         e_j = ok(c.post(ex, json={"segment_id": segs[10]}, headers=H))
         e_k = ok(c.post(ex, json={"dataset_value_id": ids["v_q2"]}, headers=H))
+        e_m = ok(c.post(ex, json={"dataset_value_id": ids["v_q3"]}, headers=H))
         ok(c.post(f"/api/conversations/{cid}/notes",
                   json={"segment_id": m1, "content": "Researcher note on the merged turn."},
                   headers=H))
@@ -593,14 +607,16 @@ def census():
             "type": "doc", "content": [
                 {"type": "paragraph", "content": [{"type": "text", "text": "Prose by the researcher."}]},
                 embed(e1, cid), embed(e2, cid), embed(e_sam, cid), embed(e_j, cid),
-                embed(e_k, None),
+                embed(e_k, None), embed(e_m, None),
             ]}}, headers=H))
         ok(c.post(f"/api/projects/{pid}/canvases/{canvas}/pending-items",
                   json={"item_type": "excerpt", "source_id": e2["id"]}, headers=H))
         ok(c.post(f"/api/projects/{pid}/canvases/{canvas}/snapshots",
                   json={"name": "Before"}, headers=H))
-        # D8 — the quote is deleted BEFORE the withdrawal; its embed stays.
+        # D8 — the quote is deleted BEFORE the withdrawal; its embed stays. #1473 —
+        # the same for a quote of an answer, whose embed names no conversation.
         ok(c.delete(f"{ex}/{e_j['id']}", headers=H))
+        ok(c.delete(f"{ex}/{e_m['id']}", headers=H))
         ids.update(canvas=canvas, theme=theme, m1=m1, m2=m2["id"], m3=m3["id"],
                    children=[ch["id"] for ch in children], e_sam=e_sam["id"])
 
@@ -847,18 +863,37 @@ class TestTheReportMatchesTheOutcome:
 
     def test_quotes_notes_and_codes(self, census):
         convs = census.report["conversations"]
-        assert sum(c["excerpts"] for c in convs) == census.outcome["excerpts_deleted"] == 2
+        # #1473 (c) — the confirm counts the quotes of their turns AND of their
+        # answers ("N quotes taken from their data", `withdrawal-copy.ts::
+        # removedSummary`), and the withdrawal deletes both. Each arm is held
+        # non-zero, or the sum could agree by leaving one out.
+        turn_quotes = sum(c["excerpts"] for c in convs)
+        answer_quotes = sum(d["excerpts"] for d in census.report["datasets"])
+        assert (turn_quotes, answer_quotes) == (2, 1)
+        assert census.outcome["excerpts_deleted"] == turn_quotes + answer_quotes
         assert sum(c["notes"] for c in convs) == census.outcome["notes_for_review"] == 1
         assert (sum(c["code_applications"] for c in convs)
                 == census.outcome["code_applications_kept"])
+
+    def test_notes_and_codes_on_their_answers_are_counted_as_deleted(self, census):
+        """#1473 — a note or a code on an ANSWER goes with it. The report (what the
+        confirm lists as removed) and the record (the endpoint and the `withdrawn`
+        entry) say the same number; neither is "kept" or "for review"."""
+        sets = census.report["datasets"]
+        notes = sum(d["notes"] for d in sets)
+        codes = sum(d["code_applications"] for d in sets)
+        assert (notes, codes) == (1, 1)
+        record = json.loads(census.kept_entry["details"])
+        for said in (census.outcome, record):
+            assert (said["notes_deleted"], said["code_applications_deleted"]) == (notes, codes)
 
 
 class TestWhatTheOutcomeRecords:
     def test_the_canvas_and_the_derived_copies(self, census):
         o = census.outcome
-        # Theme: ALPHA, BRAVO, KILO by id; JULIET as an orphan (D8). The snapshot
-        # holds the same four.
-        assert o["canvas_embeds_scrubbed"] == 8
+        # Theme: ALPHA, BRAVO, KILO by id; JULIET as an orphan (D8); MIKE as an
+        # orphan of an answer (#1473). The snapshot holds the same five.
+        assert o["canvas_embeds_scrubbed"] == 10
         assert o["canvas_snapshots_rewritten"] == 1
         # The live inbox item for BRAVO, and its copy in the snapshot.
         assert o["canvas_inbox_items_removed"] == 2
@@ -871,7 +906,7 @@ class TestWhatTheOutcomeRecords:
             for n in t["content"]["content"] if n["type"] == "excerpt-embed"
         ]
         scrubbed = [a for a in embeds if a["displayText"] == BLANKED_SEGMENT_TEXT]
-        assert len(scrubbed) == 4
+        assert len(scrubbed) == 5
         assert all(a["excerptId"] is None for a in scrubbed)
         assert census.canvas_after["pending_items"] == []
 
@@ -985,6 +1020,75 @@ class TestTheOrphanRule:
         db.flush(); db.expire_all()
         attrs = json.loads(db.get(CanvasTheme, theme_id).content)["content"][0]["attrs"]
         assert attrs["displayText"] == BLANKED_SEGMENT_TEXT
+
+
+class TestTheOrphanRuleForAnswers:
+    """#1473 (a) — an embed of an ANSWER whose quote was deleted BEFORE the
+    withdrawal. Its `conversationId` is null, so D8's turn arm never saw it; it is
+    matched by equality with a wording one of their answers held."""
+
+    _canvas = TestTheOrphanRule._canvas
+
+    def _answers(self, db, theirs: str, others: str):
+        _project(db)
+        db.add(Dataset(id=1, project_id=1, name="Survey")); db.flush()
+        db.add(DatasetColumn(id=1, dataset_id=1, column_code="Q1", column_text="Q1",
+                             column_name="Q1", column_type=ColumnType.OPEN_TEXT,
+                             sequence_order=0, display_order=0))
+        db.add_all([DatasetRow(id=1, dataset_id=1, participant_id=1),
+                    DatasetRow(id=2, dataset_id=1, participant_id=2)])
+        db.flush()
+        db.add_all([DatasetValue(id=1, row_id=1, column_id=1, value_text=theirs),
+                    DatasetValue(id=2, row_id=2, column_id=1, value_text=others)])
+        db.flush()
+
+    def _embeds_after(self, db, *embeds):
+        theme_id = self._canvas(db, *embeds)
+        apply_withdrawal(db, db.get(Participant, 1))
+        db.flush(); db.expire_all()
+        return [n["attrs"] for n in json.loads(db.get(CanvasTheme, theme_id).content)["content"]]
+
+    def test_an_orphan_of_their_answer_is_found(self, db_session):
+        db = db_session
+        self._answers(db, "Wren's private answer.", "Ola's answer.")
+        theirs, olas = self._embeds_after(
+            db,
+            {"excerptId": 77, "displayText": "Wren's private answer.", "conversationId": None},
+            {"excerptId": 78, "displayText": "Ola's answer.", "conversationId": None},
+        )
+        assert theirs["displayText"] == BLANKED_SEGMENT_TEXT and theirs["excerptId"] is None
+        assert olas == {"excerptId": 78, "displayText": "Ola's answer.", "conversationId": None}
+
+    def test_an_orphan_of_their_answer_before_an_edit_is_found(self, db_session):
+        """The quote was of the answer's EARLIER wording; the edit's audit entry
+        (`value_updated`'s `old_value`) is where those words still were."""
+        db = db_session
+        self._answers(db, "New answer.", "Ola's answer.")
+        log_action(db, action="value_updated", entity_type="dataset_value", entity_id=1,
+                   project_id=1, details={"dataset_id": 1, "column_id": 1,
+                                          "old_value": "Old private answer.",
+                                          "new_value": "New answer."})
+        (attrs,) = self._embeds_after(
+            db, {"excerptId": 77, "displayText": "Old private answer.", "conversationId": None})
+        assert attrs["displayText"] == BLANKED_SEGMENT_TEXT
+
+    def test_an_answer_is_matched_whole_and_never_from_a_clip_or_a_live_quote(self, db_session):
+        """Equality, not containment: someone else's deleted quote of a short answer
+        ("No") inside one of theirs stays. A clip's text is a label, never theirs.
+        A live quote of someone else's answer saying the same words stays."""
+        db = db_session
+        self._answers(db, "No, never again.", "No, never again.")
+        olas = Excerpt(project_id=1, dataset_value_id=2); db.add(olas); db.flush()
+        short, clip, live = self._embeds_after(
+            db,
+            {"excerptId": 90, "displayText": "No", "conversationId": None},
+            {"excerptId": 91, "displayText": "No, never again.", "conversationId": None,
+             "observationId": 5},
+            {"excerptId": olas.id, "displayText": "No, never again.", "conversationId": None},
+        )
+        assert short["displayText"] == "No" and short["excerptId"] == 90
+        assert clip["displayText"] == "No, never again." and clip["excerptId"] == 91
+        assert live["displayText"] == "No, never again." and live["excerptId"] == olas.id
 
 
 class TestAnEarlierWithdrawnEntryKeepsItsIdentifier:

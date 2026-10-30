@@ -345,10 +345,12 @@ describe('#1091 — what else the panel must survive', () => {
    * 🔴 #1320 — the server rewrote the canvas copies of their quotes and deleted the
    * quotes. A canvas left in the cache would hand its OLD content to the next
    * Writing view, whose editor binds content once and autosaves it — writing their
-   * words straight back. So the canvas content is RESET (no data at all), and every
-   * other surface showing their quotes or words is invalidated.
+   * words straight back. So the canvas content is gone (no data at all), and no
+   * other surface showing their quotes or words is served as current.
+   * #1474: every page not on screen is now FORGOTTEN (removed), the rest refetch —
+   * the full population is `ParticipantsPage.withdrawal-cache.test.tsx`.
    */
-  it('#1320: a withdrawal drops cached canvas content and marks quote and search caches stale', async () => {
+  it('#1320: a withdrawal drops cached canvas content and quote and search caches', async () => {
     withdraw.mockResolvedValue({ identifier: 'P001', backup_filename: 'b.mmbackup', documents_unlinked: 0 })
     renderPage(people())
     await screen.findByText('P001')
@@ -359,8 +361,6 @@ describe('#1091 — what else the panel must survive', () => {
       ['conversation', 1, 3], ['speakers', 1], ['segments', 3],
     ]
     for (const key of [...reset, ...stale]) lastClient.setQueryData(key, { cached: true })
-    // A key from ANOTHER project: the prefixes are project-scoped.
-    lastClient.setQueryData(['canvas', 2, 4], { cached: true })
 
     fireEvent.click(screen.getByRole('button', { name: "Remove P001's data (withdrawal request)" }))
     const confirm = await screen.findByRole('button', { name: /Back up and remove/ })
@@ -372,9 +372,9 @@ describe('#1091 — what else the panel must survive', () => {
       for (const key of reset) expect(lastClient.getQueryData(key), JSON.stringify(key)).toBeUndefined()
     })
     for (const key of stale) {
-      expect(lastClient.getQueryState(key)?.isInvalidated, JSON.stringify(key)).toBe(true)
+      const state = lastClient.getQueryState(key)
+      expect(state === undefined || state.isInvalidated, JSON.stringify(key)).toBe(true)
     }
-    expect(lastClient.getQueryData(['canvas', 2, 4])).toEqual({ cached: true })
   })
 })
 

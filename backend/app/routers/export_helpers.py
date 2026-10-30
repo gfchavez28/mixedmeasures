@@ -11,6 +11,7 @@ from ..models.code_application import CodeApplication
 from ..models.code_category import CodeCategory
 from ..services.code_analysis import build_code_cooccurrence_matrix as _build_cooccurrence
 from ..services.coding_layers import non_consensus_filter, project_scoped_segments
+from ..services.xml_text import xml_safe_text
 from .helpers import visible_segment_filter
 
 # ── Rounding precision constants ─────────────────────────────────────────────
@@ -58,14 +59,21 @@ def csv_safe(value):
 
 
 def excel_set_safe(cell, value):
-    """openpyxl-safe value assign that defangs '=' formula-tagging.
+    """openpyxl-safe value assign: XML-illegal characters cleaned, and '='
+    formula-tagging defanged.
 
-    Sets the value, then forces data_type='s' for strings starting with '='
-    (which openpyxl's _bind_value would otherwise tag as 'f'/formula). No
-    leading apostrophe is added — in xlsx the cell type is authoritative;
-    Excel renders type-'s' cells as literal text. Returns the cell for
-    chaining.
+    Cleans the value first (#1485, `services/xml_text.py`): openpyxl raises on
+    a C0 control character as it is ASSIGNED, and on U+FFFE / U+FFFF / a lone
+    surrogate at ``save`` — either way the whole workbook fails. Then sets it,
+    and forces data_type='s' for strings starting with '=' (which openpyxl's
+    _bind_value would otherwise tag as 'f'/formula). No leading apostrophe is
+    added — in xlsx the cell type is authoritative; Excel renders type-'s'
+    cells as literal text. Returns the cell for chaining.
+
+    🔴 The defang reads the CLEANED value: ``"\\x01=cmd"`` is written as
+    ``"=cmd"``, so a check on the raw value would let openpyxl tag a formula.
     """
+    value = xml_safe_text(value)
     cell.value = value
     if isinstance(value, str) and len(value) > 1 and value.startswith("="):
         cell.data_type = "s"

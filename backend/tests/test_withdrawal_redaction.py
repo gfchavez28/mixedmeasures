@@ -311,6 +311,31 @@ class TestTheOutcomeIsAnHonestRecord:
         assert hasattr(out, "notes_for_review")
         assert hasattr(out, "memos_for_review")
 
+    def test_notes_and_codes_on_their_answers_are_deleted_and_counted(self, focus_group):
+        """#1473 — a note and a code on THEIR answer go with it and are counted;
+        Sam's on his answer, and the code on their TURN, stay (the controls).
+        The report counts the same two, which is what the confirm lists as removed."""
+        from app.models.note import Note
+        from app.services.withdrawal_report import build_withdrawal_report
+        db = focus_group
+        db.add_all([
+            Note(id=1, dataset_value_id=1, content="On Maria's answer.", sequence_number=1),
+            Note(id=2, dataset_value_id=2, content="On Sam's answer.", sequence_number=1),
+            CodeApplication(id=3, dataset_value_id=1, code_id=1, user_id=1),
+            CodeApplication(id=4, dataset_value_id=2, code_id=1, user_id=1),
+        ])
+        db.flush()
+        (ds,) = build_withdrawal_report(db, db.get(Participant, 1)).datasets
+        out = apply_withdrawal(db, db.get(Participant, 1))
+        db.flush(); db.expire_all()
+        assert (ds.notes, ds.code_applications) == (1, 1)
+        assert (out.notes_deleted, out.code_applications_deleted) == (1, 1)
+        assert out.notes_for_review == 0
+        assert out.code_applications_kept == 1  # the code on their turn
+        assert db.get(Note, 1) is None and db.get(CodeApplication, 3) is None
+        assert db.get(Note, 2) is not None and db.get(CodeApplication, 4) is not None
+        assert db.get(CodeApplication, 1) is not None
+
     def test_a_participant_with_nothing_attached_is_handled(self, db_session):
         db = db_session
         db.add(Project(id=1, name="P", user_id=1)); db.flush()

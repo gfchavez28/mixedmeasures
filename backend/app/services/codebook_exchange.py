@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from ..models import Code, CodeCategory, CodeSet, Project
 from ..services import magnitude
 from ..services.backup import APP_VERSION
+from ..services.xml_text import xml_safe_text
 
 logger = logging.getLogger(__name__)
 
@@ -271,9 +272,11 @@ def export_codebook_qdc(db: Session, project_id: int) -> str:
         ))
 
     def build_code_element(code) -> ET.Element:
+        # #1485: ElementTree writes an XML-illegal character without a word,
+        # and the file then opens nowhere — MM's own import included.
         attrs = {
             "guid": make_guid(code, "code"),
-            "name": code.name,
+            "name": xml_safe_text(code.name, line_break=" "),
             "isCodable": "true",
         }
         color = _safe_color(code.color)
@@ -282,13 +285,13 @@ def export_codebook_qdc(db: Session, project_id: int) -> str:
         el = ET.Element("Code", attrs)
         if code.description:
             desc = ET.SubElement(el, "Description")
-            desc.text = code.description
+            desc.text = xml_safe_text(code.description)
         return el
 
     def build_category_element(cat) -> ET.Element:
         attrs = {
             "guid": make_guid(cat, "category"),
-            "name": cat.name,
+            "name": xml_safe_text(cat.name, line_break=" "),
             "isCodable": "false",
         }
         color = _safe_color(cat.color)

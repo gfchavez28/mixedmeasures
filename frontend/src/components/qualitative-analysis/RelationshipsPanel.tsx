@@ -208,7 +208,7 @@ export function RelationshipsSidebar({ qa, demoFilters, setSrAnnouncement }: Rel
                       value={qa.groupBy ?? '_none'}
                       onValueChange={v => qa.setGroupBy(v === '_none' ? null : v)}
                     >
-                      <SelectTrigger className="h-7 text-xs border-2 border-[hsl(var(--mm-accent)/0.4)] bg-[hsl(var(--mm-accent)/0.05)]">
+                      <SelectTrigger className="h-7 text-xs">
                         <SelectValue placeholder="Select variable..." />
                       </SelectTrigger>
                       <SelectContent>

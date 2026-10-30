@@ -69,7 +69,7 @@ describe('#1035 — the overwrite import says its wait and cannot be closed unde
     expect(working).not.toBeDisabled()
     expect(working).toHaveAttribute('aria-disabled', 'true')
     fireEvent.click(working)
-    fireEvent.click(screen.getByRole('button', { name: 'Import as new copy' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Import as an independent project' }))
     expect(api.importProject).toHaveBeenCalledTimes(1)
     finish({ project_id: 9, project_name: 'Ferncrest', metrics_marked_stale: 0, tests_marked_stale: 0 })
     await waitFor(() => expect(toast.success).toHaveBeenCalled())
@@ -86,7 +86,7 @@ describe('#1035 — the overwrite import says its wait and cannot be closed unde
     const working = screen.getByRole('button', { name: 'Working…' })
     expect(working).toHaveAttribute('aria-busy', 'true')
     // The button NOT pressed keeps its own words and claims no wait.
-    expect(screen.getByRole('button', { name: 'Import as new copy' })).not.toHaveAttribute('aria-busy')
+    expect(screen.getByRole('button', { name: 'Import as an independent project' })).not.toHaveAttribute('aria-busy')
     expect(scrolled.mock.contexts).toContain(working)
     finish({ project_id: 9, project_name: 'Ferncrest', metrics_marked_stale: 0, tests_marked_stale: 0 })
     await waitFor(() => expect(toast.success).toHaveBeenCalled())
@@ -102,14 +102,15 @@ describe('#1035 — the overwrite import says its wait and cannot be closed unde
   })
 })
 
-describe('#1258 — *Import as new copy* never says the project is being replaced', () => {
+// #1508 (a): the button was *Import as new copy*; mode `new` has one name now.
+describe('#1258 — *Import as an independent project* never says the project is being replaced', () => {
   it('says it imports a separate project, puts the busy word on its own button, and keeps it in view', async () => {
     const scrolled = vi.fn()
     Element.prototype.scrollIntoView = scrolled
     let finish!: (v: unknown) => void
     api.importProject.mockReturnValue(new Promise(r => { finish = r }))
     await openOverwrite()
-    fireEvent.click(screen.getByRole('button', { name: 'Import as new copy' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Import as an independent project' }))
     expect(await screen.findByText(/imported as a separate project; your copy here is not changed/)).toBeInTheDocument()
     expect(screen.queryByText('Replacing your copy…')).not.toBeInTheDocument()
     expect(screen.queryByText(/then it is replaced/)).not.toBeInTheDocument()

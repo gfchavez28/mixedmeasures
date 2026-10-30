@@ -238,6 +238,19 @@ export function removedSummary(r: WithdrawalReport | null): string[] {
   if (quotes > 0) {
     out.push(`${quotes} quote${quotes === 1 ? '' : 's'} taken from their data`)
   }
+  // #1473 — a note or a code on an ANSWER hangs off it, so it goes with it (a
+  // turn's stay, below). This list said nothing of them, and the kept list
+  // called the notes kept, while the withdrawal deleted both.
+  const answerNotes = r.datasets.reduce((n, d) => n + d.notes, 0)
+  if (answerNotes > 0) {
+    out.push(answerNotes === 1
+      ? 'The note you wrote on one of their survey responses'
+      : `${answerNotes} notes you wrote on their survey responses`)
+  }
+  const answerCodes = r.datasets.reduce((n, d) => n + d.code_applications, 0)
+  if (answerCodes > 0) {
+    out.push(`${answerCodes} code${answerCodes === 1 ? '' : 's'} applied to their survey responses`)
+  }
   return out
 }
 
@@ -267,8 +280,10 @@ export function keptSummary(r: WithdrawalReport | null): string[] {
   if (codes > 0) {
     out.push(`${codes} code${codes === 1 ? '' : 's'} you applied to those turns — your analysis, not their data`)
   }
+  // #1473 — a dataset's `notes` are on their ANSWERS and are deleted with them
+  // (`removedSummary`); only the record's memos stay.
   const notes = r.conversations.reduce((n, c) => n + c.notes, 0)
-    + r.datasets.reduce((n, d) => n + d.notes + d.memos, 0)
+    + r.datasets.reduce((n, d) => n + d.memos, 0)
   if (notes > 0) {
     out.push(`${notes} note${notes === 1 ? '' : 's'} and memo${notes === 1 ? '' : 's'} you wrote — review these yourself`)
   }

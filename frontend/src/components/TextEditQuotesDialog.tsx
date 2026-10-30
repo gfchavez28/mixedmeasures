@@ -8,7 +8,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { buttonVariants } from '@/components/ui/button'
 import { DIALOG_FITS_VIEWPORT } from '@/components/ConfirmDialog'
 import type { TextEditOutcome, TextEditPlan } from '@/lib/api/segments'
 import { canKeepAsShown, flaggedQuotes } from '@/lib/text-edit-quotes'
@@ -109,10 +108,15 @@ export function TextEditQuotesDialog({ plan, onChoose }: TextEditQuotesDialogPro
             </div>
           </AlertDialogDescription>
         </AlertDialogHeader>
-        <AlertDialogFooter>
+        {/* #1492 (b): three no-wrap actions are wider than a `max-w-lg` box, and the
+            content's `overflow-y-auto` then scrolls x too — so this footer wraps
+            (a gap, because `space-x` would indent a wrapped row; unconditional,
+            because the stacked footer below `sm` has none and two actions touch). */}
+        <AlertDialogFooter className="gap-2 sm:flex-wrap sm:space-x-0">
           <AlertDialogCancel>Cancel</AlertDialogCancel>
+          {/* #1492 (a): the variant is a prop, never `buttonVariants` in className. */}
           <AlertDialogAction
-            className={keepable ? buttonVariants({ variant: 'outline' }) : undefined}
+            variant={keepable ? 'outline' : undefined}
             onClick={() => onChoose('remove')}
           >
             {removeLabel}

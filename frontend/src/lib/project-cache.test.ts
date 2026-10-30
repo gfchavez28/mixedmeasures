@@ -2,7 +2,8 @@
  * #1206 — `forgetCachedProjectPages`, the cache half on its own. The doors that
  * call it are pinned by `pages/Dashboard.forget-cache.test.tsx`,
  * `pages/MergeProject.upload.test.tsx` and `MergeProject.run-failure.test.tsx`,
- * and the source delete doors (#1226) by `pages/source-delete-forget-cache.*`.
+ * the source delete doors (#1226) by `pages/source-delete-forget-cache.*`, and the
+ * withdrawal (#1474) by `pages/ParticipantsPage.withdrawal-cache.test.tsx`.
  *
  * ⚠️ The fixture's conversation id (31) is NOT the project id (9): a removal keyed
  * on the project id passes a fixture where the two coincide.

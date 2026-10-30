@@ -5,6 +5,7 @@ rebase (#1319)."""
 import difflib
 import math
 import re
+import unicodedata
 
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import func
@@ -1325,6 +1326,29 @@ def _is_word(text: str, i: int) -> bool:
     return 0 <= i < len(text) and not text[i].isspace()
 
 
+def _is_word_char(ch: str) -> bool:
+    """A character that makes a word LONGER when glued onto one (#1477): anything but
+    whitespace and punctuation — letters, digits, marks (a decomposed accent, an Indic
+    vowel sign) and symbols (an emoji, its skin tone). Unicode categories, so CJK and
+    Thai count with no list of scripts."""
+    return not ch.isspace() and not unicodedata.category(ch).startswith("P")
+
+
+def _glued_word_reach(text: str, start: int, end: int, step: int) -> int | None:
+    """Within ``text[start:end]`` — a change's NEW text, read outward from the quote's
+    edge (``step`` +1 after the end, -1 before the start) up to its first whitespace —
+    the position of the farthest word character, or None when only punctuation is
+    glued there: "no" -> "nothing" glues a word, "help" -> "help." does not, and
+    "can" -> "can't" does (the apostrophe is crossed, the 't' is reached)."""
+    reach = None
+    i = start if step > 0 else end - 1
+    while start <= i < end and not text[i].isspace():
+        if _is_word_char(text[i]):
+            reach = i
+        i += step
+    return reach
+
+
 def _text_edit_runs(old: str, new: str) -> tuple[list[_EditRun], bool]:
     """The changed stretches between ``old`` and ``new``, in CODE POINTS.
 
@@ -1398,16 +1422,21 @@ def _text_edit_runs(old: str, new: str) -> tuple[list[_EditRun], bool]:
 
 
 def _rebase_one_quote(
-    runs: list[_EditRun], excerpt_id: int, s: int, e: int,
+    runs: list[_EditRun], excerpt_id: int, s: int, e: int, old: str, new: str,
 ) -> QuoteRebase:
-    """One quote's outcome — the four cases D5 names, decided on the runs alone.
+    """One quote's outcome — the four cases D5 names, decided on the runs (and, for
+    a change abutting an edge, the characters it glues on).
 
     - **silent** — both ends sit in unchanged text. A change wholly INSIDE the quote
-      is absorbed (the quote keeps its words, with the change), and a pure insertion
-      exactly AT an edge stays OUTSIDE it: text typed before a quote's first word is
+      is absorbed (the quote keeps its words, with the change), and a change exactly
+      AT an edge stays OUTSIDE it when whitespace or only punctuation separates it
+      from the quote's edge character: text typed before a quote's first word is
       not something the researcher marked.
     - **edge** — a change touches an edge from inside (a typo in the quote's last
-      word). Proposed span: the quote with that change.
+      word), or — #1477 — abuts it from outside and GLUES a word character onto the
+      edge's word ("no" -> "nothing", "able" -> "unable", "cat" -> "cats"), which
+      would leave the quote marking part of a new word. Proposed span: the quote
+      with that change (for a glued word, the quote over the whole new word).
     - **straddle** — a change crosses an edge. Proposed span: WIDENED to cover the
       change, so no marked word is dropped (a deletion crossing an edge narrows it to
       what survives, by the same rule).
@@ -1423,7 +1452,8 @@ def _rebase_one_quote(
     for r in runs:
         delta = (r.new_end - r.new_start) - (r.old_end - r.old_start)
         if r.old_end <= s:
-            # Wholly before — a pure insertion AT s included, so it stays outside.
+            # Wholly before — a pure insertion AT s included, so it stays outside
+            # (unless it glues a word onto the quote's first word: #1477, below).
             start_shift += delta
         if r.old_end <= e and r.old_start < e:
             # Every run before the end moves it — except a pure insertion AT e.
@@ -1447,6 +1477,26 @@ def _rebase_one_quote(
     new_end = crossed_end if crossed_end is not None else e + end_shift
     if new_end <= new_start or (covered == e - s and covered_by_wider_change):
         return QuoteRebase(excerpt_id, REBASE_GONE, s, e, None, None)
+
+    # #1477: a change abutting an edge from OUTSIDE leaves both ends in unchanged
+    # text, so on the runs alone it is silent — while "said no" kept over "said
+    # nothing" marks part of a word that now says the opposite. When it glues a word
+    # character onto a word-character edge, with no whitespace between, it touches
+    # the edge: ask, and propose the quote over the whole new word. The run's new
+    # text begins exactly at the quote's new end (or ends at its new start), because
+    # runs never overlap — which is also why no run here can cross that edge (a
+    # `crossed_end is None` guard was mutation-proven redundant).
+    for r in runs:
+        if r.old_start == e and _is_word_char(old[e - 1]):
+            reach = _glued_word_reach(new, r.new_start, r.new_end, 1)
+            if reach is not None:
+                new_end = reach + 1
+                touches_edge = True
+        if r.old_end == s and _is_word_char(old[s]):
+            reach = _glued_word_reach(new, r.new_start, r.new_end, -1)
+            if reach is not None:
+                new_start = reach
+                touches_edge = True
     if crossed_start is not None or crossed_end is not None:
         outcome = REBASE_STRADDLE
     elif touches_edge:
@@ -1475,7 +1525,7 @@ def plan_text_edit_rebase(
         if not (0 <= s < e <= len(old)):
             out.append(QuoteRebase(excerpt_id, REBASE_SILENT, s, e, s, e))
             continue
-        out.append(_rebase_one_quote(runs, excerpt_id, s, e))
+        out.append(_rebase_one_quote(runs, excerpt_id, s, e, old, new))
     return RebasePlan(out, capped)
 
 

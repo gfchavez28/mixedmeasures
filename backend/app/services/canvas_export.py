@@ -18,6 +18,7 @@ from docx.oxml.ns import qn
 
 from ..models.canvas import Canvas, CanvasTheme, CanvasThemeRelationship
 from ..config import get_media_dir
+from .xml_text import xml_safe_text, xml_safe_tree
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +317,11 @@ def _render_tiptap_content(
         parsed = json.loads(content) if isinstance(content, str) else content
     except (json.JSONDecodeError, TypeError):
         return
+    # #1485: python-docx refuses an XML-illegal character as the run is added,
+    # failing the whole document. Clean the WHOLE tree once, here, so every
+    # node type and every attr a renderer reads — today's and a new one's — is
+    # covered without a call at each `add_run`.
+    parsed = xml_safe_tree(parsed)
     for node in parsed.get("content", []):
         _render_node(doc, node, project_id, chart_images, chart_tables)
 
@@ -335,20 +341,34 @@ def export_canvas_docx(
     image; otherwise it renders as ``chart_tables``' entry — the table the
     client shaped, the one its Markdown and HTML exports print (#1406 D5) —
     and with neither, as "Chart data unavailable".
+
+    Every string reaches the document through ``services/xml_text.py`` (#1485):
+    the Tiptap tree in ``_render_tiptap_content``, the rest here. ⚠️ Cleaned
+    into LOCALS — never assign a cleaned value back to ``canvas`` or a theme:
+    the router commits after the export, so it would be written to the project.
     """
     doc = Document()
+    if chart_tables:
+        chart_tables = {
+            mid: ChartTable(
+                headers=[xml_safe_text(h) for h in t.headers],
+                rows=[[xml_safe_text(c) for c in r] for r in t.rows],
+                too_large=t.too_large,
+            )
+            for mid, t in chart_tables.items()
+        }
 
     # Title
-    doc.add_heading(canvas.name, level=0)
+    doc.add_heading(xml_safe_text(canvas.name), level=0)
 
     # Themes in doc_order
     themes = sorted(canvas.themes, key=lambda t: t.doc_order)
-    theme_names: dict[int, str] = {t.id: t.name for t in themes}
+    theme_names: dict[int, str] = {t.id: xml_safe_text(t.name) for t in themes}
 
     for theme in themes:
         # Heading level based on nesting
         level = 2 if theme.parent_theme_id is not None else 1
-        doc.add_heading(theme.name, level=level)
+        doc.add_heading(theme_names[theme.id], level=level)
 
         # Render prose content
         _render_tiptap_content(doc, theme.content, project_id, chart_images, chart_tables)
@@ -370,8 +390,8 @@ def export_canvas_docx(
             src = theme_names.get(rel.source_theme_id, "Unknown")
             tgt = theme_names.get(rel.target_theme_id, "Unknown")
             arrow = "\u2194" if rel.is_bidirectional else "\u2192"
-            type_str = "" if rel.relationship_type == "custom" else rel.relationship_type
-            label_str = rel.label or ""
+            type_str = "" if rel.relationship_type == "custom" else xml_safe_text(rel.relationship_type)
+            label_str = xml_safe_text(rel.label or "")
             desc = ""
             if type_str and label_str:
                 desc = f": {type_str} \u00b7 {label_str}"

@@ -22,11 +22,20 @@ reuse it would copy an unrelated quote into the embed (#1192).
 | a snapshot's inbox entry for a removed quote | dropped |
 | a live inbox item (`CanvasPendingItem`) for a removed quote | DELETED — left in place, the next quote given that id would appear in its place (#1192) |
 | an ORPHAN embed (its quote deleted before the withdrawal) in a conversation where they spoke, whose text is inside one of their turns | the same rewrite (decision D8) |
+| an ORPHAN embed of an ANSWER — no conversation and no clip — whose text EQUALS a wording one of their answers held (#1473) | the same rewrite |
 
 An embed is an orphan when its `excerptId` names no live quote, or names a live
 quote that no longer says what the embed shows (the id was reused). One bound to a
 live quote saying exactly its words is someone's current quote and is left alone,
-even when the same words also occur in a withdrawn turn.
+even when the same words also occur in a withdrawn turn or answer.
+
+⚠️ **An answer is matched by EQUALITY, a turn by containment.** A quote of a turn
+can be a slice of it (char-range); a quote of an answer is always the WHOLE answer
+(`excerpt_text_from` ignores offsets on a value), so its embed shows exactly a
+wording the answer once held. Containment would also take someone else's deleted
+quote of a short answer ("No") that happens to sit inside one of theirs. The embed
+carries no value id, which is why it is text at all: its `conversationId` is null
+and nothing else names the answer.
 
 ⛔ **It never raises "softly".** A theme or snapshot it cannot read might hold the
 words, so it raises `CanvasScrubError` and the withdrawal rolls back — the
@@ -123,19 +132,25 @@ def scrub_excerpt_embeds(
     *,
     replacement_text: str,
     words_by_conversation: dict[int, list[str]] | None = None,
+    answer_words=None,
 ) -> EmbedScrubOutcome:
     """Rewrite every canvas copy of the quotes in `excerpt_ids` (see the module).
 
     `excerpt_ids` are quotes the caller is removing (on segments AND on dataset
     values). `words_by_conversation` maps a conversation id to the texts the
     withdrawn person's turns held BEFORE they were blanked — what an orphan embed is
-    matched against (D8). Call it after the quotes are deleted; it flushes and does
-    not commit.
+    matched against (D8). `answer_words` are the wordings their ANSWERS held (each
+    answer's text, and its edits' old and new values) — what an orphan embed with no
+    conversation is matched against, by equality (#1473). Call it after the quotes
+    are deleted; it flushes and does not commit.
     """
     removed = {i for i in (_as_int(x) for x in excerpt_ids) if i is not None}
     words = {
         conv: [t for t in texts if t]
         for conv, texts in (words_by_conversation or {}).items()
+    }
+    answers = {
+        a.strip() for a in (answer_words or ()) if isinstance(a, str) and a.strip()
     }
     out = EmbedScrubOutcome()
 
@@ -200,14 +215,24 @@ def scrub_excerpt_embeds(
         eid = _as_int(attrs.get("excerptId"))
         if eid is not None and eid in removed:
             return True
-        texts = words.get(_as_int(attrs.get("conversationId")))
         shown = attrs.get("displayText")
         shown = shown.strip() if isinstance(shown, str) else ""
-        if not texts or not shown:
+        if not shown:
+            return False
+        conversation = _as_int(attrs.get("conversationId"))
+        if conversation is not None:
+            # D8: a quote of a turn, inside one of their turns in that conversation.
+            theirs = any(shown in t for t in words.get(conversation, ()))
+        elif _as_int(attrs.get("observationId")) is None:
+            # #1473: a quote of an answer is the whole answer — equal, not inside.
+            theirs = shown in answers
+        else:
+            theirs = False  # a clip's text is the researcher's label, never theirs
+        if not theirs:
             return False
         if eid is not None and eid in live and live[eid].strip() == shown:
             return False  # someone's current quote, saying exactly this
-        return any(shown in t for t in texts)
+        return True
 
     def _scrub(doc) -> int:
         hits = 0

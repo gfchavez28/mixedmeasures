@@ -552,8 +552,11 @@ export function extractCrossTabParams(
 /**
  * #1406 — which groups a grouped embed shows, read ONCE for the renderer and
  * the export, so the canvas figure and its exported table name the same
- * groups. `hidden_group_values` is what `AnalysisView` saves; the dumbbell and
- * frequency-table arms already honoured it, the bar arms and the export did not.
+ * groups. `hidden_group_values` is what `AnalysisView` saves. 🔴 #1479 — EVERY
+ * arm of `InlineChartRenderer` and of the export's `convertMetrics` takes it from
+ * here (`InlineChartRenderer.hidden-groups-1479.test.tsx` holds a row per
+ * `ChartType`); #1406 reached the bar arms and the export, and the horizontal
+ * frequency, heatmap, stacked and line embeds kept drawing a hidden group.
  * ⚠️ The saved `sort` is NOT read here: no canvas arm honours it for bars
  * either (pre-existing), and ordering groups alone would be half of it.
  */

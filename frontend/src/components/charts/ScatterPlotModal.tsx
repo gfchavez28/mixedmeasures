@@ -144,7 +144,9 @@ export default function ScatterPlotModal({
                 cx={scaleX(xVal + jx)}
                 cy={scaleY(pair.y[i] + jy)}
                 r={3.5}
-                className="fill-[hsl(var(--mm-accent))]"
+                // #1493: the same token as the matrix's points (4.34:1 light,
+                // 6.75:1 dark at this opacity) — see ScatterMatrix.
+                className="fill-mm-text"
                 opacity={0.65}
               />
             )

@@ -227,3 +227,121 @@ describe('#1456 — re-reading the queue after a rating', () => {
     expect(getRatingQueue).toHaveBeenCalledTimes(1)
   })
 })
+
+/**
+ * #1480 — a queue answer that lands for a filter the coder has LEFT. `refetch()`
+ * resolves with the observer's CURRENT result (TanStack 5.100.5,
+ * `queryObserver.js:168-175`), which after a filter change is the NEW key's, and
+ * the handler stored it under the OLD filter and reset the cursor. Each case
+ * holds one request open and releases it after the coder has moved.
+ */
+type Held = { release: () => void }
+function holdNext(): Held {
+  const h: Held = { release: () => { throw new Error('the held request was never made') } }
+  getRatingQueue.mockImplementationOnce((_pid: unknown, opts?: { codeId?: number; limit?: number }) =>
+    new Promise(res => { h.release = () => res(serve(opts?.codeId, opts?.limit)) }))
+  return h
+}
+const shown = () => document.querySelector('blockquote')?.textContent
+async function settle(release: () => void) {
+  await act(async () => { release(); await Promise.resolve() })
+  // TanStack notifies observers on a timer (magnitude-coding.md §11).
+  await new Promise(r => setTimeout(r, 30))
+}
+
+describe('#1480 — a late queue answer never moves the coder', () => {
+  beforeEach(() => {
+    serverBatch = 2
+    unrated = [entry(51), entry(52), entry(53), ...[90, 91, 92].map(s => entry(s, 9))]
+  })
+
+  it('🔴 LOAD THE NEXT BATCH, then another code before it lands: the coder stays where they are in the new code', async () => {
+    renderSweep()
+    await rateCurrent('Passage 51.')
+    await rateCurrent('Passage 52.')
+    expect(await screen.findByText(/That batch is done/)).toBeInTheDocument()
+    const batch = holdNext()
+    fireEvent.click(screen.getByRole('button', { name: /load the next batch/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Pacing adherence 3$/ }))
+    await rateCurrent('Passage 90.')
+    expect(shown()).toBe('Passage 91.')
+    await settle(batch.release)
+    expect(shown()).toBe('Passage 91.')
+    expect(screen.getByText(/^2 of 2 in this batch$/)).toBeInTheDocument()
+  })
+
+  it('🔴 …and the late answer is never walked under ANOTHER filter (All codes walks All’s answer)', async () => {
+    renderSweep()
+    await screen.findByText('Passage 51.')
+    fireEvent.click(screen.getByRole('button', { name: /^Pacing adherence 3$/ }))
+    await screen.findByText('Passage 90.')
+    fireEvent.click(screen.getByRole('button', { name: /^All codes 6$/ }))
+    await rateCurrent('Passage 51.')
+    await rateCurrent('Passage 52.')
+    unrated = unrated.filter(e => e.segment_id !== 90)        // rated on a workbench meanwhile
+    const batch = holdNext()
+    const nine = holdNext()
+    fireEvent.click(await screen.findByRole('button', { name: /load the next batch/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Pacing adherence/ }))
+    await settle(batch.release)
+    fireEvent.click(screen.getByRole('button', { name: /^All codes/ }))
+    await new Promise(r => setTimeout(r, 30))
+    expect(shown()).toBe('Passage 53.')                         // never 90, which the server no longer lists
+    await settle(nine.release)
+    expect(shown()).toBe('Passage 53.')
+  })
+
+  it('🔴 a filter ROUND TRIP whose middle answer never landed does not restart the old walk on a rated passage', async () => {
+    renderSweep()
+    await rateCurrent('Passage 51.')
+    expect(shown()).toBe('Passage 52.')
+    const nine = holdNext()
+    fireEvent.click(screen.getByRole('button', { name: /^Pacing adherence 3$/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^All codes/ }))
+    await waitFor(() => expect(shown()).toBeDefined())
+    expect(shown()).toBe('Passage 52.')
+    expect(screen.queryByText(/^Recorded /)).not.toBeInTheDocument()
+    await settle(nine.release)
+    expect(shown()).toBe('Passage 52.')
+  })
+
+  it('🔴 a re-read that REPLACES the batch request (an invalidation) does not put the old batch back on screen', async () => {
+    const client = renderSweep()
+    await rateCurrent('Passage 51.')
+    await rateCurrent('Passage 52.')
+    expect(await screen.findByText(/That batch is done/)).toBeInTheDocument()
+    const batch = holdNext()
+    const reread = holdNext()
+    fireEvent.click(screen.getByRole('button', { name: /load the next batch/i }))
+    // The codebook slide-out's code edit — `refetchQueries` cancels a fetch in flight.
+    act(() => { invalidateDerivedCounts(client, 1) })
+    await settle(() => {})
+    expect(shown()).not.toBe('Passage 51.')
+    expect(shown()).not.toBe('Passage 52.')
+    await settle(reread.release)
+    await settle(() => { try { batch.release() } catch { /* cancelled before it was answered */ } })
+    expect(shown()).not.toBe('Passage 51.')
+    expect(shown()).not.toBe('Passage 52.')
+  })
+
+  it('pressing the chip that is ALREADY selected does not restart the walk', async () => {
+    renderSweep()
+    await rateCurrent('Passage 51.')
+    fireEvent.click(screen.getByRole('button', { name: /^All codes/ }))
+    await new Promise(r => setTimeout(r, 30))
+    expect(shown()).toBe('Passage 52.')
+  })
+
+  it('control: the batch lands BEFORE the filter changes — the new code’s walk is untouched', async () => {
+    renderSweep()
+    await rateCurrent('Passage 51.')
+    await rateCurrent('Passage 52.')
+    fireEvent.click(await screen.findByRole('button', { name: /load the next batch/i }))
+    await screen.findByText('Passage 53.')
+    expect(screen.getByText(/^1 of 2 in this batch$/)).toBeInTheDocument()   // 53 and 90: All's answer
+    fireEvent.click(screen.getByRole('button', { name: /^Pacing adherence 3$/ }))
+    await rateCurrent('Passage 90.')
+    await new Promise(r => setTimeout(r, 30))
+    expect(shown()).toBe('Passage 91.')
+  })
+})

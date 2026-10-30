@@ -94,6 +94,32 @@ describe('what the screen says will happen', () => {
     expect(keptSummary(report()).join(' | ')).toMatch(/review these yourself/)
   })
 
+  /**
+   * #1473 — a note or a code on an ANSWER is deleted with the answer
+   * (`withdrawal_redaction.py`), so it is listed as removed. The kept list
+   * counted those notes as "notes … you wrote — review these yourself", while
+   * the withdrawal deleted them. A turn's note (1) and the record's memo (1) do
+   * stay: the control, and the reason the kept count is 2, not 5.
+   */
+  it('lists the notes and codes on their answers as removed, not kept', () => {
+    const r = report({
+      datasets: [{ dataset_id: 1, name: 'Survey', rows: 1, responses: 12,
+                   code_applications: 4, excerpts: 0, notes: 3, memos: 1, row_scores: 0 }],
+    })
+    const removed = removedSummary(r).join(' | ')
+    expect(removed).toMatch(/3 notes you wrote on their survey responses/)
+    expect(removed).toMatch(/4 codes applied to their survey responses/)
+    expect(keptSummary(r).join(' | ')).toMatch(/(^| \| )2 notes and memos you wrote/)
+    const one = removedSummary(report({
+      datasets: [{ dataset_id: 1, name: 'Survey', rows: 1, responses: 1,
+                   code_applications: 1, excerpts: 0, notes: 1, memos: 0, row_scores: 0 }],
+    })).join(' | ')
+    expect(one).toMatch(/The note you wrote on one of their survey responses/)
+    expect(one).toMatch(/1 code applied to their survey responses/)
+    // None on their answers: neither line (the same two phrases matched above).
+    expect(removedSummary(report()).join(' | ')).not.toMatch(/you wrote on|applied to their survey/)
+  })
+
   it('says nothing about turns or responses when there are none', () => {
     const empty = report({ conversations: [], datasets: [] })
     expect(removedSummary(empty)).toEqual([

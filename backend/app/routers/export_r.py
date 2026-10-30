@@ -7,6 +7,7 @@ from sqlalchemy import func
 import io
 import csv
 import json
+import math
 import re
 import zipfile
 from datetime import datetime, timezone
@@ -33,7 +34,7 @@ from ..services.coding_layers import (
     non_consensus_filter,
     visible_target_filter,
 )
-from ..services.metrics import resolve_input_source_labels
+from ..services.metrics import VALID_OPERATORS, resolve_input_source_labels
 from ..services.scale_scores import scale_score_metrics  # #1177
 from ..services.statistical_tests import _order_columns_by_domain_sequence  # #1244
 from ..services.grouping import load_grouping_values, order_value_labels
@@ -69,22 +70,86 @@ def _slugify(text: str, max_len: int = 60) -> str:
 
 
 def _escape_r_string(text: str) -> str:
-    """Escape a string for safe interpolation into R string literals."""
+    """Escape a string for an R string literal OR a `#` comment.
+
+    🔴 #1468: every piece of user text the script carries goes through here —
+    a literal and a comment alike. A newline ends a comment, so the next line
+    RUNS (R has `system()`); `source()` also reads a lone CR as a line end
+    (measured, R 4.3.3), so CR is dropped. No other character ends a comment
+    (form feed, VT, NEL, U+2028/9 measured). NUL is dropped too: `source()`
+    refuses the whole file over one (`embedded nul in string`).
+    """
     s = text.replace("\\", "\\\\")
     s = s.replace('"', '\\"')
     s = s.replace("'", "\\'")
     s = s.replace("\n", "\\n")
     s = s.replace("\r", "")
+    s = s.replace("\x00", "")
     return s
 
 
+def _r_number(value, default: float | None = None) -> str | None:
+    """A saved setting as an R numeric literal — or `default`'s, or None.
+
+    🔴 #1468: a chart's `formatting` and a proportion's threshold arrive from
+    the material's JSON config, which a `.mmproject` copies verbatim, and were
+    interpolated RAW into live code (`base_size = 12); system(…)`). Only a real,
+    finite number qualifies: never a string (even a numeric one — the app's
+    controls write numbers), never a bool, never NaN or ±Infinity (Python's json
+    reads both, and `nan` is an R symbol that does not exist — the script
+    halted there). Rendered `12`, not `12.0`, as before.
+    """
+    for candidate in (value, default):
+        if isinstance(candidate, bool) or not isinstance(candidate, (int, float)):
+            continue
+        try:
+            f = float(candidate)
+        except OverflowError:  # an int too large for a float
+            continue
+        if not math.isfinite(f):
+            continue
+        return str(int(f)) if f.is_integer() and abs(f) < 1e15 else repr(f)
+    return None
+
+
+# The app's proportion operators (`metrics.VALID_OPERATORS`) in R. `=` is the
+# app's equality (`metrics._compare`); in R it would NAME AN ARGUMENT —
+# `sum(x_valid = 4)` is 4, not a count. Anything else is not emitted (#1468).
+_R_PROPORTION_OPERATORS = {
+    op: ("==" if op == "=" else op) for op in VALID_OPERATORS
+}
+
+
+# R's reserved words (`?Reserved`, R 4.3.3). None is a syntactic name, so a
+# slug equal to one stops the WHOLE script from parsing — `list(function = …)`
+# is `unexpected '='`, `data$next` is `unexpected 'next'` — and no line runs
+# (#1482). `_slugify` lowercases and drops dots, so only the nine lowercase
+# words can come out of it; the rest are listed so this is R's list, not a
+# guess about which members the slug can reach.
+_R_RESERVED_WORDS = frozenset({
+    "if", "else", "repeat", "while", "function", "for", "in", "next", "break",
+    "TRUE", "FALSE", "NULL", "Inf", "NaN", "NA",
+    "NA_integer_", "NA_real_", "NA_complex_", "NA_character_",
+})
+
+
 def _make_r_identifier(name: str) -> str:
-    """Make a valid R identifier from a name."""
+    """Make a syntactic R name from a name.
+
+    🔴 #1482: a reserved word takes a trailing `_` (`function_`, `next_`). The
+    suffix is applied HERE, where the name is made, so the CSV header and every
+    script line that reads it change together — never backticks at the use
+    sites, which are dozens (`data$`, `list()`, dplyr verbs, formulas, composed
+    object names like `<name>_valid`). No other slug can end in `_` (`_slugify`
+    strips it), so the suffixed form cannot meet a real name's slug.
+    """
     s = _slugify(name)
     if not s:
         return "col"
     if s[0].isdigit():
         s = "x_" + s
+    if s in _R_RESERVED_WORDS:
+        s += "_"
     return s
 
 
@@ -117,6 +182,11 @@ def _dataset_r_prefix(ds_name: str) -> str:
     refuses the whole script before one line runs (a dataset is named after its
     file by default, so `2023_survey.csv` is the ordinary case), and a wholly
     non-ASCII name slugified to `""`, giving `__q1`.
+
+    ⚠️ #1482: no reserved-word check, ON PURPOSE. The prefix never reaches R
+    bare — it is always `<prefix>__<column>`, `<prefix>_subset` or
+    `<prefix>_means` — so a dataset named *Function* already parses, and a
+    suffix here would rename every column of a working export.
     """
     s = _slugify(ds_name, max_len=20)
     if not s:
@@ -505,13 +575,23 @@ def _emit_domain_aggregate_r_lines(
         slug = _dataset_r_prefix(ds_name)
         members_str = ", ".join(f'"{n}"' for n in r_names)
         ds_name_escaped = _escape_r_string(ds_name)
-        lines.append(f"# {ds_name} subset")
+        lines.append(f"# {_escape_r_string(ds_name)} subset")
         lines.append(
             f"{slug}_subset <- data[data$dataset == \"{ds_name_escaped}\", c({members_str})]"
         )
         lines.append(f"{slug}_means <- colMeans(.mm_num({slug}_subset), na.rm = TRUE)")
         lines.append(f"mean({slug}_means)")
     return lines
+
+
+# How every CSV this export ships is read back (#1483): ONLY a blank cell is
+# missing. Each writer in `export_r_data` blanks a missing value itself —
+# `_text_cell` for a missing or declared-missing answer, `""` for an absent
+# number, score, rating, participant or coder engagement — and none writes the
+# text `NA` for one. So an `NA` in a cell is a real answer (Namibia, North
+# America, an ID), and readr's `na = c("", "NA")` turned it into a missing value
+# the app counts. `tests/test_export_r_na_text.py` holds the writers to this.
+_READ_CSV_NA = 'na = ""'
 
 
 def _build_r_script(
@@ -590,19 +670,26 @@ def _build_r_script(
     # Read data
     toc_sections.append("Read data")
     r_lines.append("# ---- Read data ----")
+    # #533: identifier columns are join keys — force character so readr can't
+    # numeric-guess "007" into 7 and break joins on external data.
+    # #1483 (b): so is every column whose CELL is text (`_emits_text_cell`, the
+    # predicate the row writer and the factor levels share, #765). Guessed, a
+    # demographic `45,000` became the number 45000, an all-`F` column the
+    # logical FALSE and a `1.0` the number 1 — none matches its text level, so
+    # `factor()` made every such cell NA, silently.
+    char_cols = [m["r_name"] for m in identifier_cols or []] + [
+        m["r_name"] for m in col_meta.values() if _emits_text_cell(m["col"])
+    ]
+    if char_cols:
+        char_spec = ", ".join(f"`{n}` = col_character()" for n in char_cols)
+        r_lines.append(f'data <- read_csv("{project_slug}_data.csv", {_READ_CSV_NA},')
+        r_lines.append(f"                 col_types = cols(.default = col_guess(), {char_spec}))")
+    else:
+        r_lines.append(f'data <- read_csv("{project_slug}_data.csv", {_READ_CSV_NA})')
     if identifier_cols:
-        # #533: identifier columns are join keys — force character so readr
-        # can't numeric-guess "007" into 7 and break joins on external data.
-        id_spec = ", ".join(
-            f"`{m['r_name']}` = col_character()" for m in identifier_cols
-        )
-        r_lines.append(f'data <- read_csv("{project_slug}_data.csv", na = c("", "NA"),')
-        r_lines.append(f"                 col_types = cols(.default = col_guess(), {id_spec}))")
         id_names = ", ".join(m["r_name"] for m in identifier_cols)
         r_lines.append(f"# Identifier column(s) ({id_names}) are participant/record IDs kept as")
         r_lines.append("# character for joining external data; no statistics are computed on IDs.")
-    else:
-        r_lines.append(f'data <- read_csv("{project_slug}_data.csv", na = c("", "NA"))')
     r_lines.append("")
 
     # Helper: coerce (ordered) factor columns back to numeric for numeric
@@ -1185,7 +1272,7 @@ def _build_r_script(
             metric_lines.append(f"# {_escape_r_string(pe_name)}")
             if skipped_ids:
                 metric_lines.append(
-                    f"# Note: skipped deleted references: {skipped_ids}"
+                    f"# Note: skipped deleted references: {_escape_r_string(str(skipped_ids))}"
                 )
 
             for r_name in target_r_names:
@@ -1272,8 +1359,18 @@ def _build_r_script(
                         if _is_domain_ref(r_name) else f"{r_name}_valid"
                     )
                     if p_mode == "numeric":
-                        op = prop_cfg.get("operator", ">=")
-                        thresh = prop_cfg.get("threshold_numeric", 0)
+                        # 🔴 #1468: both were interpolated raw into live code.
+                        # One the app could not compute either is not emitted —
+                        # a default would print a number the app never showed.
+                        r_op = _R_PROPORTION_OPERATORS.get(prop_cfg.get("operator", ">="))
+                        thresh = _r_number(prop_cfg.get("threshold_numeric", 0))
+                        if r_op is None or thresh is None:
+                            metric_lines.append(
+                                "# Skipped: this proportion's operator or threshold"
+                                " is not one the app can compute."
+                            )
+                            metric_lines.append("")
+                            continue
                     else:
                         vals = prop_cfg.get("threshold_values", [])
                         vals_str = ", ".join(f'"{_escape_r_string(v)}"' for v in vals)
@@ -1285,7 +1382,7 @@ def _build_r_script(
                     )
                     if p_mode == "numeric":
                         metric_lines.append(
-                            f"count_meeting <- sum({valid_obj} {op} {thresh})"
+                            f"count_meeting <- sum({valid_obj} {r_op} {thresh})"
                         )
                     else:
                         metric_lines.append(
@@ -1427,7 +1524,7 @@ def _build_r_script(
                     items.append([meta["r_name"]])
                 if not dom_name or len(items) < 2:
                     test_lines.append(
-                        f"# Skipped {st.test_type}: domain {st.target_id} "
+                        f"# Skipped {st.test_type}: domain {_escape_r_string(str(st.target_id))} "
                         "not found or has fewer than 2 items"
                     )
                     test_lines.append("")
@@ -1487,7 +1584,7 @@ def _build_r_script(
                 target_metric = db.query(MetricDefinition).get(st.target_id)
                 if not target_metric:
                     test_lines.append(
-                        f"# Skipped {st.test_type}: metric {st.target_id} not found"
+                        f"# Skipped {st.test_type}: metric {_escape_r_string(str(st.target_id))} not found"
                     )
                     test_lines.append("")
                     continue
@@ -1560,7 +1657,10 @@ def _build_r_script(
         if pe.source_tab == "correlations":
             col_ids = pe_cfg.get("column_ids") or []
             dom_ids = pe_cfg.get("domain_ids") or []
-            corr_type = pe_cfg.get("corr_type", "pearson")
+            # 🔴 #1468: the saved setting went raw into `method = "…"`. The
+            # service's own rule decides (`correlations.py`: Spearman when it
+            # says so, otherwise Pearson), so a stray value reproduces the app.
+            corr_method = "spearman" if pe_cfg.get("corr_type") == "spearman" else "pearson"
             bonf = pe_cfg.get("bonferroni", False)
 
             var_r_names, skipped = _resolve_ids_to_r(col_ids)
@@ -1584,11 +1684,11 @@ def _build_r_script(
             vars_str = ", ".join(f'"{v}"' for v in var_r_names)
             rc_lines.append(f"cor_vars <- c({vars_str})")
             rc_lines.append(
-                f'cor(.mm_num(data[, cor_vars]), use = "pairwise.complete.obs", method = "{corr_type}")'
+                f'cor(.mm_num(data[, cor_vars]), use = "pairwise.complete.obs", method = "{corr_method}")'
             )
             if needs_psych:
                 rc_lines.append(
-                    f'psych::corr.test(.mm_num(data[, cor_vars]), method = "{corr_type}"'
+                    f'psych::corr.test(.mm_num(data[, cor_vars]), method = "{corr_method}"'
                     + (', adjust = "bonferroni"' if bonf else '')
                     + ')'
                 )
@@ -1599,7 +1699,7 @@ def _build_r_script(
                 rc_lines.append(
                     "    ct <- cor.test(.mm_num(data[[cor_vars[i]]], cor_vars[i]),"
                     " .mm_num(data[[cor_vars[j]]], cor_vars[j]),"
-                    f' method = "{corr_type}")'
+                    f' method = "{corr_method}")'
                 )
                 rc_lines.append(
                     '    cat(cor_vars[i], "vs", cor_vars[j], ": r =", ct$estimate, ", p =", ct$p.value, "\\n")'
@@ -1619,7 +1719,7 @@ def _build_r_script(
                 rc_lines.append("# Correlation heatmap")
                 rc_lines.append(
                     f"cor_mat <- cor(.mm_num(data[, cor_vars]),"
-                    f' use = "pairwise.complete.obs", method = "{corr_type}")'
+                    f' use = "pairwise.complete.obs", method = "{corr_method}")'
                 )
                 rc_lines.append("cor_long <- as.data.frame(as.table(cor_mat))")
                 rc_lines.append('names(cor_long) <- c("Var1", "Var2", "r")')
@@ -1665,7 +1765,8 @@ def _build_r_script(
             grp_r = _col_r(compare_by)
             if not grp_r:
                 rc_lines.append(
-                    f"# Skipped comparison: grouping column {compare_by} not found"
+                    f"# Skipped comparison: grouping column"
+                    f" {_escape_r_string(str(compare_by))} not found"
                 )
                 rc_lines.append("")
                 continue
@@ -1819,7 +1920,8 @@ def _build_r_script(
         col_r = _col_r(xtab_col_id)
         if not row_r or not col_r:
             xtab_lines.append(
-                f"# Skipped cross-tab: column IDs {col_ids[0]}/{xtab_col_id} not found"
+                f"# Skipped cross-tab: column IDs {_escape_r_string(str(col_ids[0]))}"
+                f"/{_escape_r_string(str(xtab_col_id))} not found"
             )
             xtab_lines.append("")
             continue
@@ -1910,13 +2012,16 @@ def _build_r_script(
         exclude_vals = pe_cfg.get("exclude_values") or []
         display = pe_cfg.get("display", "percentage")
         heatmap_preset = fmt.get("heatmapPreset", "green")
-        base_size = fmt.get("axisFontSize", 12)
+        # 🔴 #1468: every number below is interpolated into LIVE code, and the
+        # config is JSON a `.mmproject` copies verbatim — so each is a finite
+        # number or its default (the client's DEFAULT_FORMATTING), never text.
+        base_size = _r_number(fmt.get("axisFontSize"), 12)
         title_size = fmt.get("titleFontSize", 16)
-        bar_size = fmt.get("barSize", 24)
-        point_size = fmt.get("pointSize", 5)
-        ref_line = fmt.get("referenceLine")
-        x_min = fmt.get("xAxisMin")
-        x_max = fmt.get("xAxisMax")
+        bar_size = float(_r_number(fmt.get("barSize"), 24))
+        point_size = _r_number(fmt.get("pointSize"), 5)
+        ref_line = _r_number(fmt.get("referenceLine"))   # None: no line
+        x_min = _r_number(fmt.get("xAxisMin"))           # None: automatic
+        x_max = _r_number(fmt.get("xAxisMax"))
 
         try:
             chart_lines.append(f"# ---- Chart: {_escape_r_string(pe_name)} ----")
@@ -2203,8 +2308,8 @@ def _build_r_script(
                         if is_horiz:
                             chart_lines.append("  coord_flip() +")
                         if x_min is not None or x_max is not None:
-                            lo = str(x_min) if x_min is not None else "NA"
-                            hi = str(x_max) if x_max is not None else "NA"
+                            lo = x_min if x_min is not None else "NA"
+                            hi = x_max if x_max is not None else "NA"
                             chart_lines.append(
                                 f"  scale_y_continuous(limits = c({lo}, {hi})) +"
                             )
@@ -2340,7 +2445,7 @@ def _build_r_script(
                     # Proportion/frequency line and domain-only targets fall back
                     # to the values already emitted in the metric section.
                     chart_lines.append(
-                        f"# Line chart for metric_type '{mt}' not plotted;"
+                        f"# Line chart for metric_type '{_escape_r_string(str(mt))}' not plotted;"
                         " see the metric computation section for the values"
                     )
                     chart_lines.append("")
@@ -2424,7 +2529,7 @@ def _build_r_script(
 
             else:
                 chart_lines.append(
-                    f"# Chart type '{chart_type}' with metric_type '{mt}'"
+                    f"# Chart type '{chart_type}' with metric_type '{_escape_r_string(str(mt))}'"
                     " not yet supported for R export"
                 )
                 chart_lines.append("")
@@ -2506,7 +2611,7 @@ def _build_r_script(
         r_lines.append("#   bootstrap over units (R's RNG would give a different one), and")
         r_lines.append("#   kappa's needs psych::cohen.kappa. The point estimates below are")
         r_lines.append("#   what this script reproduces.")
-        r_lines.append(f'irr_raw <- read_csv("{project_slug}_irr.csv", na = c("", "NA"))')
+        r_lines.append(f'irr_raw <- read_csv("{project_slug}_irr.csv", {_READ_CSV_NA})')
         r_lines.append(f"irr_coder_cols <- c({coder_cols_r})")
         r_lines.append("for (cid in unique(irr_raw$code_id)) {")
         r_lines.append("  rows_c <- irr_raw[irr_raw$code_id == cid, , drop = FALSE]")
@@ -2547,7 +2652,7 @@ def _build_r_script(
         r_lines.append("# rated. One alpha per code, never pooled: each code is its own")
         r_lines.append("# instrument with its own range. Reproduces the app's Reliability tab.")
         r_lines.append("# NOTE: as above, the app's confidence intervals are not recomputed here.")
-        r_lines.append(f'irr_mag_raw <- read_csv("{project_slug}_irr_magnitude.csv", na = c("", "NA"))')
+        r_lines.append(f'irr_mag_raw <- read_csv("{project_slug}_irr_magnitude.csv", {_READ_CSV_NA})')
         r_lines.append(f"irr_mag_coder_cols <- c({coder_cols_r})")
         r_lines.append("for (cid in unique(irr_mag_raw$code_id)) {")
         r_lines.append("  rows_c <- irr_mag_raw[irr_mag_raw$code_id == cid, , drop = FALSE]")
@@ -2608,7 +2713,7 @@ def _build_r_script(
         r_lines.append("# NOTE: where a set has no variance to agree about, the app reports the")
         r_lines.append("#   coefficient as undefined and this script still prints kripp.alpha's")
         r_lines.append("#   value for it. The app's reason is the honest reading of that case.")
-        r_lines.append(f'irr_set_raw <- read_csv("{project_slug}_irr_code_sets.csv", na = c("", "NA"))')
+        r_lines.append(f'irr_set_raw <- read_csv("{project_slug}_irr_code_sets.csv", {_READ_CSV_NA})')
         r_lines.append(f"irr_set_coder_cols <- c({coder_cols_r})")
         r_lines.append("for (sid in unique(irr_set_raw$set_id)) {")
         r_lines.append("  rows_s <- irr_set_raw[irr_set_raw$set_id == sid, , drop = FALSE]")
@@ -2708,10 +2813,14 @@ def _build_r_script(
                     # dataset-value/response targets count) — label them per
                     # the #500 wording, never "seg"/"segments", which is the
                     # Codebook view's different (facilitator-excluded) figure.
-                    r_lines.append(f"{indent}{cat.name} ({cat_total} uses)")
+                    # 🔴 #1468: a name is text from a file (`.qdc` keeps `&#10;`
+                    # as a real newline) — a newline here ended the comment.
+                    r_lines.append(f"{indent}{_escape_r_string(cat.name)} ({cat_total} uses)")
                     for code in cat_codes_map.get(cat.id, []):
                         uses = code_seg_counts.get(code.id, 0)
-                        r_lines.append(f"{indent}    - {code.name} ({uses} uses)")
+                        r_lines.append(
+                            f"{indent}    - {_escape_r_string(code.name)} ({uses} uses)"
+                        )
                     write_category_tree(cat.id, indent_level + 1)
 
             write_category_tree(None, 0)
@@ -2722,7 +2831,7 @@ def _build_r_script(
             r_lines.append("#   Universal Codes:")
             for code in universals:
                 uses = code_seg_counts.get(code.id, 0)
-                r_lines.append(f"#       - {code.name} ({uses} uses)")
+                r_lines.append(f"#       - {_escape_r_string(code.name)} ({uses} uses)")
 
         # Uncategorized codes
         uncategorized = [c for c in qual_codes if not c.is_universal and c.category_id is None]
@@ -2730,7 +2839,7 @@ def _build_r_script(
             r_lines.append("#   Uncategorized:")
             for code in uncategorized:
                 uses = code_seg_counts.get(code.id, 0)
-                r_lines.append(f"#       - {code.name} ({uses} uses)")
+                r_lines.append(f"#       - {_escape_r_string(code.name)} ({uses} uses)")
 
         r_lines.append("")
 

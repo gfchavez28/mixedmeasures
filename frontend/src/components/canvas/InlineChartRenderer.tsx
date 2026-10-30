@@ -555,12 +555,17 @@ function ChartRouter({
     )
   }
 
+  // #1406 — the groups this embed shows; the export reads the same function.
+  // 🔴 #1479 — and EVERY arm takes them: the horizontal frequency, heatmap,
+  // stacked and line arms drew a hidden group (and so did the PNG captured from
+  // them) while the exported table under it left the group out. Read once,
+  // here; no arm re-reads `content.hidden_group_values`.
+  const groupOpts = extractGroupDisplayOptions(content)
   const shapeOpts = {
     hiddenLabels: hiddenResponseOptions.length > 0 ? hiddenResponseOptions : undefined,
     reverseScale: reverseScale || undefined,
+    ...groupOpts,
   }
-  // #1406 — the groups this embed shows; the export reads the same function.
-  const groupOpts = extractGroupDisplayOptions(content)
 
   switch (chartType) {
     case 'horizontal_bar': {
@@ -573,6 +578,7 @@ function ChartRouter({
             formatting={formatting}
             hiddenLabels={shapeOpts.hiddenLabels}
             reverseScale={reverseScale}
+            hiddenGroupValues={groupOpts.hiddenGroupValues}
             chartN={nInfo.chartN}
           />
         )
@@ -621,7 +627,7 @@ function ChartRouter({
 
     case 'vertical_bar': {
       if (metricType === 'frequency_distribution' && metrics.length > 0) {
-        const freq = shapeFrequencyBarFigure(metrics, { ...shapeOpts, ...groupOpts })
+        const freq = shapeFrequencyBarFigure(metrics, shapeOpts)
         const nInfo = computeFreqBarChartN(metrics)
         if (freq.kind === 'grouped') {
           return (
@@ -677,7 +683,10 @@ function ChartRouter({
     }
 
     case 'line': {
-      const lineData = shapeLineChart(metrics)
+      // #1479 — a hidden group's SERIES is dropped, as the Analysis view drops it
+      // (`AnalysisChartRenderer`'s line arm); one group left visible is still a
+      // grouped line, named in the legend (`LineChart`'s `isGrouped`).
+      const lineData = shapeLineChart(metrics, undefined, undefined, groupOpts)
       const nInfo = computeLineChartN(lineData)
       return (
         <LineChartComponent
@@ -719,9 +728,7 @@ function ChartRouter({
     // here for three of them; only the cross-tab needed a second request.
 
     case 'dumbbell': {
-      const dumbbellData = shapeDumbbellRows(metrics, undefined, {
-        hiddenGroupValues: (content.hidden_group_values as string[]) ?? undefined,
-      })
+      const dumbbellData = shapeDumbbellRows(metrics, undefined, groupOpts)
       const nInfo = computeDumbbellChartN(dumbbellData)
       return (
         <DumbbellChart
@@ -753,7 +760,7 @@ function ChartRouter({
           formatting={formatting}
           reverseScale={reverseScale}
           hiddenLabels={shapeOpts.hiddenLabels}
-          hiddenGroupValues={(content.hidden_group_values as string[]) ?? undefined}
+          hiddenGroupValues={groupOpts.hiddenGroupValues}
         />
       )
 

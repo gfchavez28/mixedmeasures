@@ -121,6 +121,51 @@ PROBE_TABLE = [
      "the unhelpfull staff", "the unhelpful staff", "helpfull", REBASE_EDGE, "helpful"),
     ("a quote edge mid-word, the change elsewhere in the word",
      "the unhelpfull staff", "the unhelpful staff", "unhelp", REBASE_SILENT, "unhelp"),
+    # #1477 — a change abutting an edge from OUTSIDE that glues a word character onto
+    # it lengthens the edge word: it asks, proposing the quote over the whole new word.
+    ("#1477 letters glued after the last word: no -> nothing",
+     "He said no more", "He said nothing more", "said no", REBASE_EDGE, "said nothing"),
+    ("#1477 letters glued before the first word: able -> unable",
+     "They were able to help", "They were unable to help", "able to help", REBASE_EDGE,
+     "unable to help"),
+    ("#1477 one letter glued: cat -> cats",
+     "I like cat videos", "I like cats videos", "like cat", REBASE_EDGE, "like cats"),
+    ("#1477 a REPLACEMENT abutting the end glues a letter: cat. -> cats!",
+     "I like cat. Videos", "I like cats! Videos", "like cat", REBASE_EDGE, "like cats"),
+    ("#1477 a REPLACEMENT abutting the start glues letters: (able -> unable",
+     "They were (able to help", "They were unable to help", "able to help", REBASE_EDGE,
+     "unable to help"),
+    ("#1477 an apostrophe is crossed to the letter: can -> can't",
+     "I can do it", "I can't do it", "I can", REBASE_EDGE, "I can't"),
+    ("#1477 a hyphen is crossed to the word: help -> help-desk",
+     "call help now", "call help-desk now", "call help", REBASE_EDGE, "call help-desk"),
+    ("#1477 both edges at once",
+     "were able to help us", "were unable to helpful us", "able to help", REBASE_EDGE,
+     "unable to helpful"),
+    ("#1477 a one-character quote, glued after",
+     "a b c", "a bx c", "b", REBASE_EDGE, "bx"),
+    ("#1477 a one-character quote, glued before",
+     "a b c", "a xb c", "b", REBASE_EDGE, "xb"),
+    ("#1477 text with no spaces: a character glued after",
+     "我喜欢猫。", "我喜欢猫咪。", "喜欢猫", REBASE_EDGE, "喜欢猫咪"),
+    ("#1477 an astral modifier glued after",
+     "she said \U0001F44D ok", "she said \U0001F44D\U0001F3FD ok", "said \U0001F44D", REBASE_EDGE,
+     "said \U0001F44D\U0001F3FD"),
+    ("#1477 a combining accent glued after",
+     "un cafe noir", "un café noir", "un cafe", REBASE_EDGE, "un café"),
+    # ...and what stays silent: punctuation alone adds no word.
+    ("#1477 punctuation appended after the quote stays outside",
+     "they did help", "they did help.", "did help", REBASE_SILENT, "did help"),
+    ("#1477 punctuation prepended before the quote stays outside",
+     "they did help", "they did (help", "help", REBASE_SILENT, "help"),
+    ("#1477 a quote ending in punctuation, punctuation added",
+     "he said no. More", "he said no.. More", "said no.", REBASE_SILENT, "said no."),
+    ("#1477 a quote ending in punctuation, a word typed against it: a missing space",
+     "he said no. More", "he said no.Then More", "said no.", REBASE_SILENT, "said no."),
+    ("#1477 a quote starting with punctuation, a word typed against it",
+     "it was (not) good", "it was so(not) good", "(not)", REBASE_SILENT, "(not)"),
+    ("#1477 text with no spaces: punctuation appended",
+     "我喜欢猫", "我喜欢猫。", "喜欢猫", REBASE_SILENT, "喜欢猫"),
 ]
 
 
@@ -236,6 +281,81 @@ def test_the_cap_is_not_reached_by_an_ordinary_long_turn():
     plan = plan_text_edit_rebase(old, new, [(1, 2_000, 2_010)])
     assert plan.capped is False
     assert plan.quotes[0].outcome == REBASE_SILENT
+
+
+def _shifted_span(old: str, new: str, s: int, e: int) -> tuple[int, int]:
+    """The span a quote keeps when the edit only SHIFTS it (the SILENT rule)."""
+    runs, _ = ops._text_edit_runs(old, new)
+    d = [(r, (r.new_end - r.new_start) - (r.old_end - r.old_start)) for r in runs]
+    return (s + sum(x for r, x in d if r.old_end <= s),
+            e + sum(x for r, x in d if r.old_end <= e and r.old_start < e))
+
+
+def test_a_silent_outcome_never_moves_an_edge_into_a_word():
+    """#1477's property, over random edits (the 2026-10-29 audit's F3 harness, extended).
+
+    A SILENT quote whose edge sat between words before the edit must not sit inside a
+    word after it — reading outward from the edge over non-space characters, no letter,
+    digit, mark or symbol may have arrived. The one shape left silent ON PURPOSE is a
+    word typed beyond punctuation that already followed the edge, unchanged
+    ("no," -> "no,and"): a missing space, not a longer word.
+    """
+    import unicodedata
+
+    def word(c):
+        return not c.isspace() and not unicodedata.category(c).startswith("P")
+
+    def chunk(text, i, step):
+        out = []
+        while 0 <= i < len(text) and not text[i].isspace():
+            out.append(text[i])
+            i += step
+        return out  # outward order
+
+    def glued(text, edge_char_at, i, step):
+        return (0 <= edge_char_at < len(text) and word(text[edge_char_at])
+                and any(word(c) for c in chunk(text, i, step)))
+
+    def behind_same_punctuation(old, o, new, n, step):
+        a, b = chunk(old, o, step), chunk(new, n, step)
+        return bool(a and b and a[0] == b[0] and not word(a[0]))
+
+    words = ["the", "staff", "were", "not", "helpful", "it's", "ok.", "no,", "猫", "(help)",
+             "\U0001F642", "naïve", "50%"]
+    inserts = ["", "x", "s", "un", "ly", "n't", ".", "!", "really ", " ", "咪", "́", "\U0001F600"]
+    rng = random.Random(1477)
+    silent = shapes = 0
+    examples = []
+    for _ in range(4000):
+        old = "".join(rng.choice(words) + rng.choice([" ", " ", "  ", ", "])
+                      for _ in range(rng.randrange(1, 10))).rstrip()
+        a = rng.randrange(0, len(old) + 1)
+        new = old[:a] + rng.choice(inserts) + old[min(len(old), a + rng.randrange(0, 6)):]
+        if not new:
+            continue
+        quotes = [(k, s, rng.randrange(s + 1, len(old) + 1))
+                  for k, s in enumerate(rng.randrange(0, len(old)) for _ in range(4))]
+        for q in plan_text_edit_rebase(old, new, quotes).quotes:
+            if q.outcome == REBASE_GONE:
+                continue
+            silent += q.outcome == REBASE_SILENT
+            s, e = q.old_start, q.old_end
+
+            def into_a_word(ns, ne):
+                after = not glued(old, e - 1, e, 1) and glued(new, ne - 1, ne, 1)
+                before = not glued(old, s, s - 1, -1) and glued(new, ns, ns - 1, -1)
+                return (after and not behind_same_punctuation(old, e, new, ne, 1)) or (
+                    before and not behind_same_punctuation(old, s - 1, new, ns - 1, -1))
+
+            # The population: quotes whose edges, merely SHIFTED by the edit (what
+            # SILENT does), would land inside a word — whatever the planner decided.
+            shapes += into_a_word(*_shifted_span(old, new, s, e))
+            if q.outcome == REBASE_SILENT and into_a_word(q.new_start, q.new_end):
+                examples.append((old, new, old[s:e], new[q.new_start:q.new_end]))
+    # Population self-checks: the walk saw many silent quotes, and the generator does
+    # produce the glued shape (else zero violations would prove nothing).
+    assert silent > 5000 and shapes > 100, (silent, shapes)
+    assert examples == [], (len(examples), examples[:5])
 
 
 def test_a_quote_already_out_of_range_is_left_where_it_is():
@@ -607,6 +727,29 @@ def test_keep_as_shown_places_a_flagged_quote_at_the_span_it_was_shown(door, cli
     assert client.get(f"/api/projects/{pid}/excerpts/{eid}").json()["excerpt_text"] == "not helpful"
 
 
+def test_a_word_lengthened_at_the_edge_asks_and_keeps_the_whole_word(door, client, project):
+    """#1477 through both doors: "said no" kept over "said nothing" was saved with no
+    dialog. Now the preview asks, an unanswered save changes nothing, and keeping it
+    as shown marks the whole new word."""
+    pid, headers = project
+    old, new = "He said no more about it.", "He said nothing more about it."
+    d, (sid,) = door([old])
+    eid = _quote(client, pid, headers, sid, old, "said no")
+    plan = d.preview(sid, new).json()
+    [item] = plan["quotes"]
+    assert plan["needs_confirmation"] is True
+    assert (item["outcome"], item["new_text"]) == ("edge", "said nothing")
+
+    assert d.save(sid, new).status_code == 409
+    assert _segment_text(sid) == old
+
+    resp = d.save(sid, new, excerpt_offsets=[
+        {"excerpt_id": eid, "start_offset": item["new_start"], "end_offset": item["new_end"]},
+    ])
+    assert resp.status_code == 200, resp.text
+    assert client.get(f"/api/projects/{pid}/excerpts/{eid}").json()["excerpt_text"] == "said nothing"
+
+
 def _collision_fixture(door, client, project):
     """Two quotes that land on ONE span: 'not helpfull' (an edge quote) proposes
     'not helpful', where the second quote already sits — `ix_excerpt_segment_range`."""
@@ -711,15 +854,20 @@ def _redo(d, sid, new_text, report, recreated_ids=()):
 
 
 def test_undo_restores_exact_offsets_where_the_planner_alone_would_not(door, client, project):
-    """Single run. The edit fixes 'helpfull' and the researcher keeps the quote as
-    shown ('not helpful'). Reversing the edit by planning alone re-adds the 'l' AT
-    the quote's end — an insertion at an edge stays outside — so the quote would come
-    back one character short. The captured offsets put it back exactly."""
+    """Single run. The edit deletes the comma the quote ends on and the researcher
+    keeps the quote as shown ('not helpful'). Reversing the edit by planning alone
+    re-adds the comma AT the quote's end — punctuation glued at an edge stays outside
+    — so the quote would come back one character short. The captured offsets put it
+    back exactly.
+
+    ⚠️ It was a LETTER ('helpfull' -> 'helpful') until #1477: re-adding a letter at
+    the edge now glues a word on, which asks and proposes the whole word — the
+    original span — so that fixture stopped discriminating."""
     pid, headers = project
-    old = "Honestly, it was not helpfull at all."
+    old = "Honestly, it was not helpful, at all."
     new = "Honestly, it was not helpful at all."
     d, (sid,) = door([old])
-    eid = _quote(client, pid, headers, sid, old, "not helpfull")
+    eid = _quote(client, pid, headers, sid, old, "not helpful,")
     original = _offsets(eid)
     [item] = d.preview(sid, new).json()["quotes"]
     act = d.save(sid, new, excerpt_offsets=[

@@ -773,8 +773,13 @@ function convertMetrics(
     }
 
     if (chartType === 'line') {
-      const data = shapeLineChart(metrics)
-      if (data.series.length <= 1) {
+      // #1479 — the hidden groups' series are dropped, as the embed drops them.
+      const data = shapeLineChart(metrics, undefined, undefined, groupOpts)
+      // Grouped by `LineChart`'s own rule: ONE series left visible is still a
+      // group and keeps its name as the column — the old `length <= 1` test
+      // printed group A's numbers under "Value", saying nothing of A.
+      const grouped = data.series.some(s => s.groupValue != null)
+      if (!grouped) {
         const headers = ['Metric', 'Value', 'N']
         const rows = (data.series[0]?.points ?? []).map(p => [
           p.label, fmtScalar(p.value, p.undefinedReason), String(p.n ?? ''),

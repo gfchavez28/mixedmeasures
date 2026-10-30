@@ -42,9 +42,12 @@ import type { QueryClient } from '@tanstack/react-query'
  * inactive, which is what the removal needs. The doors are found by what they
  * CALL — `pages/source-delete-forget-cache.test.ts`.
  *
- * `refreshActive` is for a caller INSIDE a project (Merge): the page on screen
+ * `refreshActive` is for a caller INSIDE a project (Merge; a withdrawal, #1474,
+ * which deletes and blanks a person's data across every page): the page on screen
  * keeps its queries, and they are invalidated so they refetch rather than removed
- * from under their observers.
+ * from under their observers. ⚠️ An invalidated query keeps serving its old data
+ * until the refetch lands, so a caller whose page on screen must NOT show the old
+ * copy for even that long resets it as well (the withdrawal's canvas, #1320).
  */
 export function forgetCachedProjectPages(
   queryClient: QueryClient,

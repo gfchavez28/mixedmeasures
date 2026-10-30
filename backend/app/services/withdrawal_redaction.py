@@ -33,8 +33,9 @@ that one walk and this function acts on it, so the two cannot disagree.
 | a combined speaker ("Maria & Sam") | renamed from the turns' history ("Withdrawn participant 3 & Sam"), or re-pointed to a row already called that; an unreferenced one naming them is deleted | its name is their name, on no participant link |
 | `Excerpt` on any reached turn or response | DELETED | a quote is a POINTER INTO the text — after blanking its offsets address nothing, and a quote of removed words is exactly what a withdrawal is about |
 | a canvas copy of such a quote | rewritten: embed text blanked, its link cleared, in themes AND snapshots; inbox items deleted (`canvas_embed_scrub`) | an embed is a snapshot of the words, not a pointer |
-| `CodeApplication` | KEPT | the researcher's analysis, not the participant's personal data — and deleting it would silently change every κ/α figure other coders' work feeds |
-| `Note` / `Memo` | KEPT and REPORTED | researcher-authored prose that may QUOTE the person; a machine cannot judge that, so it is surfaced for human review rather than guessed at |
+| `CodeApplication` on any reached TURN | KEPT | the researcher's analysis, not the participant's personal data — and deleting it would silently change every κ/α figure other coders' work feeds |
+| `Note` on their turns, `Memo` on their records | KEPT and REPORTED | researcher-authored prose that may QUOTE the person; a machine cannot judge that, so it is surfaced for human review rather than guessed at |
+| `Note` and `CodeApplication` on their ANSWERS | DELETED and counted (`notes_deleted`, `code_applications_deleted`, #1473) | they hang off the answer, which is deleted — a note's only parent is it — so the confirm lists them as removed, not kept |
 | audit `details` of every entry keyed on their record, speakers, reached turns, rows, responses or quotes | every string nulled, `"redacted": "withdrawal"` added, the entry kept (D9) | the trail keeps that something happened; the Excel Audit Trail exported their words |
 | the `withdrawn` entry | written AFTER that pass by the endpoint, and keeps the identifier (D9) | it is the record that the request was honoured |
 | a `removal_tombstones` row per removed or blanked thing, and their identifier as a HASH (#1190) | WRITTEN under the project's uuid, no foreign key (decision D8), and carried in every later `.mmproject` | a merge of an older copy, an import, a link or a typed create must not bring them back (`services/tombstones.py`); the hash is not anonymisation — a guessed identifier confirms against it |
@@ -174,6 +175,11 @@ class RedactionOutcome:
     computed_results_deleted: int = 0
     #: #1320 (D9) — audit entries whose details were stripped (entries kept).
     audit_entries_redacted: int = 0
+    #: #1473 — the researcher's notes and the codings on their ANSWERS. Unlike a
+    #: turn's, these are DELETED with the answer they hang off, so they are not
+    #: "for review" and `code_applications_kept` / `notes_for_review` do not hold them.
+    notes_deleted: int = 0
+    code_applications_deleted: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -413,7 +419,13 @@ def _audit_entries_keyed_on(
 _EDIT_WORDING_KEYS = ("old_text", "new_text")
 
 
-def _edit_wording_in(raw: str | None) -> list[str]:
+#: The same for an answer's audit `details` (`value_updated`, `routers/dataset.py`):
+#: what an orphan embed of an answer is matched against, beside its current text
+#: (#1473).
+_ANSWER_WORDING_KEYS = ("old_value", "new_value")
+
+
+def _edit_wording_in(raw: str | None, keys=_EDIT_WORDING_KEYS) -> list[str]:
     try:
         parsed = json.loads(raw) if raw else None
     except (TypeError, ValueError):
@@ -421,7 +433,7 @@ def _edit_wording_in(raw: str | None) -> list[str]:
     if not isinstance(parsed, dict):
         return []
     return [
-        v for k in _EDIT_WORDING_KEYS
+        v for k in keys
         if isinstance(v := parsed.get(k), str) and v
     ]
 
@@ -591,7 +603,12 @@ def apply_withdrawal(db: Session, participant: Participant) -> RedactionOutcome:
         removed.add(tomb.DATASET_ROW, r.uuid)
     value_ids: list[int] = []
     value_excerpt_ids: list[int] = []
+    # What an ORPHAN canvas embed of an answer is matched against (#1473): each
+    # answer's text, and its edits' wording — read BEFORE the answers go.
+    answer_words: list[str] = []
     responses_deleted = 0
+    notes_deleted = 0
+    code_applications_deleted = 0
     row_scores_deleted = 0
     memos_for_review = 0
     computed_results_deleted = 0
@@ -618,15 +635,26 @@ def apply_withdrawal(db: Session, participant: Participant) -> RedactionOutcome:
                     removed.add(tomb.EXCERPT, u)
                 for (u,) in db.query(Note.uuid).filter(Note.dataset_value_id.in_(chunk)):
                     removed.add(tomb.NOTE, u)
+                answer_words += [
+                    t for (t,) in db.query(DatasetValue.value_text).filter(
+                        DatasetValue.id.in_(chunk)) if t
+                ]
+            for entry in _audit_entries_keyed_on(
+                db, project_id, {AUDIT_ENTITY_VALUE: set(value_ids)},
+            ):
+                answer_words += _edit_wording_in(entry.details, _ANSWER_WORDING_KEYS)
             # Delete what hangs off the responses BEFORE the responses, so no FK
             # is left addressing a row that is going away in the same flush.
             db.query(Excerpt).filter(
                 Excerpt.dataset_value_id.in_(value_ids)
             ).delete(synchronize_session=False)
-            db.query(Note).filter(
+            # A note or a coding on an answer cannot outlive it (the note's parent
+            # IS the answer), so unlike their turns' these are DELETED — and counted,
+            # from the statement that deletes them (#1473 d4).
+            notes_deleted = db.query(Note).filter(
                 Note.dataset_value_id.in_(value_ids)
             ).delete(synchronize_session=False)
-            db.query(CodeApplication).filter(
+            code_applications_deleted = db.query(CodeApplication).filter(
                 CodeApplication.dataset_value_id.in_(value_ids)
             ).delete(synchronize_session=False)
             responses_deleted = (
@@ -709,6 +737,7 @@ def apply_withdrawal(db: Session, participant: Participant) -> RedactionOutcome:
         db, project_id, removed_excerpt_ids,
         replacement_text=BLANKED_SEGMENT_TEXT,
         words_by_conversation=words_by_conversation,
+        answer_words=answer_words,
     )
 
     # ── The audit trail: strip the words, keep the entries (D9) ───────────
@@ -735,7 +764,9 @@ def apply_withdrawal(db: Session, participant: Participant) -> RedactionOutcome:
         identifier=report.identifier,
         speaker_label=speaker_label,
         segments_blanked=segments_blanked,
-        excerpts_deleted=len(turn_excerpt_ids),
+        # #1473 — every quote deleted: of their turns AND of their answers, the
+        # count the confirm's "N quotes taken from their data" promised.
+        excerpts_deleted=len(turn_excerpt_ids) + len(value_excerpt_ids),
         dataset_rows_deleted=len(row_ids),
         responses_deleted=responses_deleted,
         row_scores_deleted=row_scores_deleted,
@@ -752,6 +783,8 @@ def apply_withdrawal(db: Session, participant: Participant) -> RedactionOutcome:
         ),
         computed_results_deleted=computed_results_deleted,
         audit_entries_redacted=redacted,
+        notes_deleted=notes_deleted,
+        code_applications_deleted=code_applications_deleted,
     )
 
     project_uuid = db.query(Project.project_uuid).filter(Project.id == project_id).scalar()
