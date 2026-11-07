@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services import magnitude_rollup, metrics, reliability_intervals
+from app.services import comparison_basis, magnitude_rollup, metrics, reliability_intervals
 
 CI_LABEL_TS = (
     Path(__file__).resolve().parents[2]
@@ -38,9 +38,10 @@ CI_LABEL_TS = (
 #: fall-through this file exists to prevent, reached from a direction the file
 #: did not previously cover. Row 45 (iii) added a THIRD: the participant
 #: score's interval over a person's own passages lives in `magnitude_rollup`,
-#: beside the number it qualifies. A new module that mints a `CI_METHOD_*` or a
-#: `CI_UNAVAILABLE_*` MUST be added here.
-_VOCABULARY_MODULES = (metrics, reliability_intervals, magnitude_rollup)
+#: beside the number it qualifies. #1323's D3 added a FOURTH: the code-by-group
+#: comparison's Δ interval (Newcombe, unadjusted) lives in `comparison_basis`.
+#: A new module that mints a `CI_METHOD_*` or a `CI_UNAVAILABLE_*` MUST be added here.
+_VOCABULARY_MODULES = (metrics, reliability_intervals, magnitude_rollup, comparison_basis)
 
 
 def _server_methods() -> dict[str, str]:
@@ -83,8 +84,8 @@ def test_the_server_declares_its_vocabulary_as_constants():
     vacuously — the failure mode a fail-closed scan is most prone to.
     """
     found = _server_methods()
-    assert len(found) >= 7, (
-        f"expected at least the seven known ci_method constants, found {sorted(found)}"
+    assert len(found) >= 8, (
+        f"expected at least the eight known ci_method constants, found {sorted(found)}"
     )
     # Literals, not a set built from the same call: these are the fixed points
     # the rest of the test triangulates against. One per module, so a walk that
@@ -92,6 +93,7 @@ def test_the_server_declares_its_vocabulary_as_constants():
     assert "wilson_per_category" in found.values()
     assert "alpha_bootstrap_units" in found.values()
     assert "passage_level_t" in found.values()
+    assert "newcombe_hybrid_score" in found.values()
 
     reasons = _server_unavailable_reasons()
     assert len(reasons) >= 5, f"found only {sorted(reasons)}"
@@ -100,7 +102,7 @@ def test_the_server_declares_its_vocabulary_as_constants():
 
 
 def test_the_vocabulary_does_not_collide_across_modules():
-    """Three modules, one wire field. Two constants with one VALUE would be two
+    """Four modules, one wire field. Two constants with one VALUE would be two
     claims rendered with one sentence — and the walk above, keyed by NAME,
     would report both as covered."""
     methods = list(_server_methods().values())

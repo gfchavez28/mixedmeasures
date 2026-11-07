@@ -315,7 +315,8 @@ class TestAMachineNeverEntersAReliabilityAggregate:
         machine = _coder(db, "GPT-Coder", CODER_TYPE_MACHINE)
         colleague = _coder(db, "Colleague", CODER_TYPE_HUMAN)
 
-        coder_ids, *_rest = gather_coder_applications(db, project.id)
+        coder_ids, *_rest = gather_coder_applications(
+            db, project.id, include_facilitator_turns=False, collapse_groups=True)
         assert machine.id not in coder_ids
         assert colleague.id in coder_ids
 
@@ -327,7 +328,8 @@ class TestAMachineNeverEntersAReliabilityAggregate:
         colleague = _coder(db, "Colleague", CODER_TYPE_HUMAN)
 
         coder_ids, *_rest = gather_coder_applications(
-            db, project.id, coder_ids=[machine.id, colleague.id]
+            db, project.id, coder_ids=[machine.id, colleague.id],
+            include_facilitator_turns=False, collapse_groups=True,
         )
         assert machine.id not in coder_ids
         assert colleague.id in coder_ids

@@ -186,6 +186,7 @@ NOTHING = {
     "sources": [], "source_count": 0, "participants": [], "participant_count": 0,
     "datasets": [], "dataset_count": 0, "records": [], "record_count": 0,
     "quotes": 0, "notes": 0, "memos": 0, "withdrawn_participants": 0, "withdrawn_items": 0,
+    "withdrawn_here": [],
 }
 
 
@@ -212,6 +213,8 @@ def test_it_names_what_was_deleted_here_and_counts_the_rest(client):
         "quotes": 1, "notes": 1, "memos": 1,
         # P07: her record, and the quote of her answer — left out, by count.
         "withdrawn_participants": 1, "withdrawn_items": 2,
+        # #1470 — withdrawn HERE, so this project no longer holds her: nothing to refuse.
+        "withdrawn_here": [],
     }
 
 

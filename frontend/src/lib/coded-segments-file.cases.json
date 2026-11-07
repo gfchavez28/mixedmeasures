@@ -1,0 +1,103 @@
+{
+  "about": "#1535 (1.5.9, D111-D115) - the analysis page's Exports > Segments CSV against the screen, one table for both suites. Each case is a page selection; `file` is what lib/qual-comparison.ts::codedSegmentsFileRequest must build for the Segments CSV (null = the door does nothing, D114), `screen` is what codeFrequenciesFileRequest builds for the Descriptives summary table's read (#1528 D87: the Frequencies CSV IS that table). lib/coded-segments-file.test.ts holds both functions EQUAL to this table; backend/tests/test_coded_segments_selection_1535.py sends `file.query` to GET /export/coded-segments and `screen` to POST /code-analysis/source-frequencies over HTTP, and requires the file's distinct (code, unit) pairs per source kind to EQUAL the screen's counts. Ids are the backend fixture's: conversations C1 101 / C2 102, documents D1 201 (linked to P2) / D2 202 (no one), observation O1 301, questions T1 401 / T2 402, participants P1 501 / P2 502, codes A 601 / B 602 / Unclear 603 (universal), second coder 9002.",
+  "cases": [
+    {
+      "name": "nothing_selected_all",
+      "selection": { "codes": [], "conversations": [], "textColumns": [], "documents": [], "observations": [] },
+      "mode": "all", "excludeFacilitator": true, "participantIds": [], "coderIds": null,
+      "file": { "query": { "exclude_facilitator": "true" }, "answersLeftOut": false },
+      "screen": { "exclude_facilitator": true }
+    },
+    {
+      "name": "nothing_selected_conversations",
+      "selection": { "codes": [], "conversations": [], "textColumns": [], "documents": [], "observations": [] },
+      "mode": "conversations", "excludeFacilitator": true, "participantIds": [], "coderIds": null,
+      "file": { "query": { "exclude_facilitator": "true" }, "answersLeftOut": false },
+      "screen": { "exclude_facilitator": true, "text_column_ids": [] }
+    },
+    {
+      "name": "nothing_selected_text",
+      "selection": { "codes": [], "conversations": [], "textColumns": [], "documents": [], "observations": [] },
+      "mode": "text", "excludeFacilitator": true, "participantIds": [], "coderIds": null,
+      "file": null,
+      "screen": { "exclude_facilitator": true, "conversation_ids": [], "document_ids": [], "observation_ids": [] }
+    },
+    {
+      "name": "c1_only",
+      "selection": { "codes": [], "conversations": [101], "textColumns": [], "documents": [], "observations": [] },
+      "mode": "conversations", "excludeFacilitator": true, "participantIds": [], "coderIds": null,
+      "file": { "query": { "conversation_ids": "101", "document_ids": "", "observation_ids": "", "exclude_facilitator": "true" }, "answersLeftOut": false },
+      "screen": { "exclude_facilitator": true, "conversation_ids": [101], "text_column_ids": [], "document_ids": [], "observation_ids": [] }
+    },
+    {
+      "name": "d1_only",
+      "selection": { "codes": [], "conversations": [], "textColumns": [], "documents": [201], "observations": [] },
+      "mode": "conversations", "excludeFacilitator": true, "participantIds": [], "coderIds": null,
+      "file": { "query": { "conversation_ids": "", "document_ids": "201", "observation_ids": "", "exclude_facilitator": "true" }, "answersLeftOut": false },
+      "screen": { "exclude_facilitator": true, "conversation_ids": [], "text_column_ids": [], "document_ids": [201], "observation_ids": [] }
+    },
+    {
+      "name": "o1_only",
+      "selection": { "codes": [], "conversations": [], "textColumns": [], "documents": [], "observations": [301] },
+      "mode": "conversations", "excludeFacilitator": true, "participantIds": [], "coderIds": null,
+      "file": { "query": { "conversation_ids": "", "document_ids": "", "observation_ids": "301", "exclude_facilitator": "true" }, "answersLeftOut": false },
+      "screen": { "exclude_facilitator": true, "conversation_ids": [], "text_column_ids": [], "document_ids": [], "observation_ids": [301] }
+    },
+    {
+      "name": "c1_and_d1",
+      "selection": { "codes": [], "conversations": [101], "textColumns": [], "documents": [201], "observations": [] },
+      "mode": "conversations", "excludeFacilitator": true, "participantIds": [], "coderIds": null,
+      "file": { "query": { "conversation_ids": "101", "document_ids": "201", "observation_ids": "", "exclude_facilitator": "true" }, "answersLeftOut": false },
+      "screen": { "exclude_facilitator": true, "conversation_ids": [101], "text_column_ids": [], "document_ids": [201], "observation_ids": [] }
+    },
+    {
+      "name": "t1_only_text_mode",
+      "selection": { "codes": [], "conversations": [], "textColumns": [401], "documents": [], "observations": [] },
+      "mode": "text", "excludeFacilitator": true, "participantIds": [], "coderIds": null,
+      "file": null,
+      "screen": { "exclude_facilitator": true, "conversation_ids": [], "text_column_ids": [401], "document_ids": [], "observation_ids": [] }
+    },
+    {
+      "name": "c1_beside_t1",
+      "selection": { "codes": [], "conversations": [101], "textColumns": [401], "documents": [], "observations": [] },
+      "mode": "all", "excludeFacilitator": true, "participantIds": [], "coderIds": null,
+      "file": { "query": { "conversation_ids": "101", "document_ids": "", "observation_ids": "", "exclude_facilitator": "true" }, "answersLeftOut": true },
+      "screen": { "exclude_facilitator": true, "conversation_ids": [101], "text_column_ids": [401], "document_ids": [], "observation_ids": [] }
+    },
+    {
+      "name": "everything_participant_p2",
+      "selection": { "codes": [], "conversations": [101, 102], "textColumns": [], "documents": [201, 202], "observations": [301] },
+      "mode": "conversations", "excludeFacilitator": true, "participantIds": [502], "coderIds": null,
+      "file": { "query": { "conversation_ids": "101,102", "document_ids": "201,202", "observation_ids": "301", "exclude_facilitator": "true", "participant_ids": "502" }, "answersLeftOut": false },
+      "screen": { "exclude_facilitator": true, "participant_ids": [502], "conversation_ids": [101, 102], "text_column_ids": [], "document_ids": [201, 202], "observation_ids": [301] }
+    },
+    {
+      "name": "nothing_selected_participant_p1",
+      "selection": { "codes": [], "conversations": [], "textColumns": [], "documents": [], "observations": [] },
+      "mode": "conversations", "excludeFacilitator": true, "participantIds": [501], "coderIds": null,
+      "file": { "query": { "exclude_facilitator": "true", "participant_ids": "501" }, "answersLeftOut": false },
+      "screen": { "exclude_facilitator": true, "participant_ids": [501], "text_column_ids": [] }
+    },
+    {
+      "name": "c1_interviewer_included",
+      "selection": { "codes": [], "conversations": [101], "textColumns": [], "documents": [], "observations": [] },
+      "mode": "conversations", "excludeFacilitator": false, "participantIds": [], "coderIds": null,
+      "file": { "query": { "conversation_ids": "101", "document_ids": "", "observation_ids": "", "exclude_facilitator": "false" }, "answersLeftOut": false },
+      "screen": { "exclude_facilitator": false, "conversation_ids": [101], "text_column_ids": [], "document_ids": [], "observation_ids": [] }
+    },
+    {
+      "name": "c1_code_a_only",
+      "selection": { "codes": [601], "conversations": [101], "textColumns": [], "documents": [], "observations": [] },
+      "mode": "conversations", "excludeFacilitator": true, "participantIds": [], "coderIds": null,
+      "file": { "query": { "conversation_ids": "101", "document_ids": "", "observation_ids": "", "exclude_facilitator": "true", "code_ids": "601" }, "answersLeftOut": false },
+      "screen": { "exclude_facilitator": true, "code_ids": [601], "conversation_ids": [101], "text_column_ids": [], "document_ids": [], "observation_ids": [] }
+    },
+    {
+      "name": "c1_and_d1_second_coder_only",
+      "selection": { "codes": [], "conversations": [101], "textColumns": [], "documents": [201], "observations": [] },
+      "mode": "conversations", "excludeFacilitator": true, "participantIds": [], "coderIds": "9002",
+      "file": { "query": { "conversation_ids": "101", "document_ids": "201", "observation_ids": "", "exclude_facilitator": "true", "coder_ids": "9002" }, "answersLeftOut": false },
+      "screen": { "exclude_facilitator": true, "coder_ids": [9002], "conversation_ids": [101], "text_column_ids": [], "document_ids": [201], "observation_ids": [] }
+    }
+  ]
+}

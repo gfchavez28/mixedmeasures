@@ -104,17 +104,25 @@ export async function downloadFromApi(
     })
     downloadBlob(res.data as Blob, extractFilename(res.headers, fallbackName))
   } catch (err) {
-    if (isRequestTimeout(err)) {
-      toast.error(
-        `${what} is taking longer than ${Math.round(EXPORT_TIMEOUT_MS / 60_000)} minutes.`,
-        {
-          description:
-            'It may still be running on the server. Try exporting fewer sections, ' +
-            'or a smaller set of datasets.',
-        },
-      )
-      return
-    }
-    toast.error(err instanceof ApiError ? err.message : `${what} failed. Please try again.`)
+    reportExportFailure(err, what)
   }
+}
+
+/**
+ * An export's failure, said ONCE — `downloadFromApi`'s, and an export written in the browser
+ * from a read (#1528's Frequencies CSV). A timeout is not a server error (#820).
+ */
+export function reportExportFailure(err: unknown, what: string): void {
+  if (isRequestTimeout(err)) {
+    toast.error(
+      `${what} is taking longer than ${Math.round(EXPORT_TIMEOUT_MS / 60_000)} minutes.`,
+      {
+        description:
+          'It may still be running on the server. Try exporting fewer sections, ' +
+          'or a smaller set of datasets.',
+      },
+    )
+    return
+  }
+  toast.error(err instanceof ApiError ? err.message : `${what} failed. Please try again.`)
 }

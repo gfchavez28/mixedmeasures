@@ -1,5 +1,17 @@
 import { useState, useRef, useEffect, useCallback, type RefObject } from 'react'
-import { charOffsetInElement, codePointLength } from '@/lib/text-offsets'
+import { toast } from 'sonner'
+import { charOffsetInElement, codePointLength, renderedTextMatches } from '@/lib/text-offsets'
+
+/**
+ * #1324 — what the researcher is told when a selection is refused because the passage
+ * on screen is not its saved text. Neither renderer reaches it as built: the property
+ * test in `SegmentRow.quote-overlap.test.tsx` holds the conversation row to "each
+ * character once", and the document row draws its text plain (#1512 — no highlight
+ * yet). It is the tripwire for the next renderer, so it says what to do, not what went
+ * wrong inside.
+ */
+export const SELECTION_TEXT_MISMATCH =
+  'This passage is shown differently from its saved text, so the selection was not used. Nothing was changed — reload the page and select again.'
 
 export interface SplitableSegment {
   id: number
@@ -42,7 +54,7 @@ export function useTextSplitSelection(
 } {
   const [splitSelection, setSplitSelection] = useState<SplitSelection | null>(null)
   const [announcement, setAnnouncement] = useState<string | null>(null)
-  const splitDragAnchorRef = useRef<{ segmentId: number; offset: number } | null>(null)
+  const splitDragAnchorRef = useRef<{ segmentId: number; offset: number; textMatches: boolean } | null>(null)
 
   // Drag-to-select tracking refs
   const isDraggingRef = useRef(false)
@@ -128,14 +140,23 @@ export function useTextSplitSelection(
     // suite still green. For a defect this silent that was the worst place to hide it.
     const computeCharOffset = charOffsetInElement
 
-    // Resolve a mouse position to a segment ID + character offset
-    const resolvePosition = (clientX: number, clientY: number): { segmentId: number; offset: number } | null => {
+    // Resolve a mouse position to a segment ID + character offset.
+    //
+    // #1324: `textMatches` records whether the element rendered EXACTLY the stored
+    // text when the offset was read — the producer's precondition. It is checked at
+    // READ time (the anchor at mousedown, the end at mouseup), because the DOM can
+    // change between the two; the refusal itself waits for a real selection, so a
+    // plain click never raises it.
+    const resolvePosition = (clientX: number, clientY: number): { segmentId: number; offset: number; textMatches: boolean } | null => {
       const caret = getCaretFromPoint(clientX, clientY)
       if (!caret) return null
       const textInfo = findTextElement(caret.node)
       if (!textInfo) return null
       const offset = computeCharOffset(textInfo.textEl, caret.node, caret.offset)
-      return { segmentId: textInfo.segmentId, offset }
+      const stored = adjacencySegments.find(s => s.id === textInfo.segmentId)?.text
+        ?? segments.find(s => s.id === textInfo.segmentId)?.text
+      const textMatches = stored === undefined || renderedTextMatches(textInfo.textEl, stored)
+      return { segmentId: textInfo.segmentId, offset, textMatches }
     }
 
     const handleMouseDown = (e: MouseEvent) => {
@@ -259,6 +280,16 @@ export function useTextSplitSelection(
         if (!endPos) {
           setSplitSelection(null)
           setAnnouncement(null)
+          return
+        }
+
+        // #1324: an offset read from text that is not the stored text addresses
+        // other words. Refuse — never correct — and say so in both channels.
+        if (!anchor.textMatches || !endPos.textMatches) {
+          setSplitSelection(null)
+          setAnnouncement(SELECTION_TEXT_MISMATCH)
+          toast.error(SELECTION_TEXT_MISMATCH)
+          sel.removeAllRanges()
           return
         }
 

@@ -54,20 +54,18 @@ export function normalityCaveat(n: number): string | null {
 }
 
 /**
- * Groups that are in the COMPARISON but not meaningfully in LEVENE'S TEST (#525b).
+ * Groups that are in the COMPARISON but not in LEVENE'S TEST (#525b, #1329).
  *
- * Two distinct cases, and neither was reported before:
+ * Two distinct cases, both NAMED — exactly as the normality line names what
+ * Shapiro-Wilk could not test, because a count that quietly shrinks reads as a
+ * complete one:
  *
- * - **empty** — dropped from the test outright, so the p-value describes fewer
- *   groups than the panel shows.
- * - **singleton** — included, but its deviation from its own median is exactly
- *   0 by construction. That reads as perfect homogeneity when it is really an
- *   absence of evidence. Measured: `levene([1.0], [1,2,3,4], center="median")`
- *   returns a confident-looking `p = 0.219` resting on that structural zero.
- *
- * Neither justifies refusing the statistic — dropping a group would test a
- * different model from the one the panel ran — so both are NAMED, exactly as
- * the normality line already names what Shapiro-Wilk could not test.
+ * - **empty** — nothing to test.
+ * - **singleton** — a single value. Until 1.5.9 it stayed IN the test, where
+ *   its deviation from its own median is 0 by construction and reads as perfect
+ *   homogeneity (measured: `levene([1.0], [1,2,3,4], center="median")` gave a
+ *   confident `p = 0.219` resting on that point). Since #1329 (D51) every test
+ *   of the row leaves it out, Levene included, so it is named as left out.
  */
 export function leveneCaveat(
   v: { excluded_groups?: string[]; singleton_groups?: string[] } | null | undefined,
@@ -77,7 +75,7 @@ export function leveneCaveat(
   const singles = v.singleton_groups ?? []
   const parts: string[] = []
   if (excluded.length) parts.push(`${excluded.length} empty, not in the test (${excluded.join(', ')})`)
-  if (singles.length) parts.push(`${singles.length} with a single observation (${singles.join(', ')})`)
+  if (singles.length) parts.push(`${singles.length} with a single value, not in the test (${singles.join(', ')})`)
   return parts.length ? parts.join('; ') : null
 }
 

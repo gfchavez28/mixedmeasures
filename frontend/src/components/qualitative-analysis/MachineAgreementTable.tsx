@@ -8,6 +8,9 @@ import { formatPercent, formatStat } from '@/lib/stat-format'
 import { describeProvenance } from '@/lib/machine-coder'
 import { bandWord } from '@/lib/reliability-band'
 import {
+  describeUnitBasis, verdictShortfall, verdictWithheldNote, verdictWithheldWord,
+} from '@/lib/reliability-basis'
+import {
   MACHINE_AGREEMENT_COVERAGE_NOTE,
   MACHINE_AGREEMENT_EXPLAINER,
   MACHINE_AGREEMENT_NO_PROVENANCE,
@@ -80,11 +83,36 @@ export default function MachineAgreementTable({ projectId, humanId }: {
     )
   }
 
+  // #1333 / #1334 — the unit basis this table SHARES with the Reliability tab,
+  // read off the payload (the stated-basis family: displayed, never inferred).
+  // `null` for a payload from before the field, which renders as it used to.
+  const unitSentence = describeUnitBasis(data.unit_basis)
+  // #1505 (D43) — the human table's verdict floor, one table over: the server's
+  // constant (never restated here), and the reason said once below the pairs.
+  const floor = data.verdict_min_units
+  const verdictNotes = [...new Set(
+    data.pairs
+      .flatMap(p => p.per_code.map(r => verdictWithheldNote(r.verdict_withheld_reason, floor)))
+      .filter((note): note is string => note != null),
+  )]
+
   return (
     <section className="space-y-3">
       <Heading />
       <p className="text-xs text-mm-text-muted max-w-3xl">{MACHINE_AGREEMENT_EXPLAINER}</p>
-      {data.pairs.map(pair => <Pair key={`${pair.human_id}-${pair.machine_id}`} pair={pair} />)}
+      {unitSentence && (
+        <p className="text-xs text-mm-text-muted max-w-3xl" data-testid="machine-agreement-unit-basis">
+          {unitSentence}
+        </p>
+      )}
+      {data.pairs.map(pair => (
+        <Pair key={`${pair.human_id}-${pair.machine_id}`} pair={pair} floor={floor} />
+      ))}
+      {verdictNotes.map(note => (
+        <p key={note} className="text-xs text-mm-text-muted max-w-3xl" data-testid="machine-agreement-verdict-note">
+          {note}
+        </p>
+      ))}
     </section>
   )
 }
@@ -98,7 +126,18 @@ function Heading() {
   )
 }
 
-function Pair({ pair }: { pair: MachinePairAgreement }) {
+/** `"Kappa 0.47, fair."` · `"Kappa 0.47, too few to judge (3 of the 18 units a
+ *  verdict needs)."` · `"Kappa is not defined here."` — the row name's κ clause. */
+function kappaClause(row: MachinePairAgreement['per_code'][number], floor?: number | null): string {
+  if (row.kappa == null) return 'Kappa is not defined here.'
+  const band = row.kappa_interpretation ? `, ${bandWord(row.kappa_interpretation)}` : ''
+  const withheld = verdictWithheldWord(row.verdict_withheld_reason)
+  const shortfall = verdictShortfall(row.verdict_withheld_reason, row.n_units, floor)
+  const verdict = withheld ? `, ${withheld}${shortfall ? ` (${shortfall})` : ''}` : ''
+  return `Kappa ${formatStat(row.kappa)}${band}${verdict}.`
+}
+
+function Pair({ pair, floor }: { pair: MachinePairAgreement; floor?: number | null }) {
   const caption =
     `${pair.machine_name} compared with ${pair.human_name}, `
     + `over ${pair.n_units} units they both worked on`
@@ -144,9 +183,7 @@ function Pair({ pair }: { pair: MachinePairAgreement }) {
                     `${row.code_name}: ${pair.human_name} applied it to ${row.human_applied} `
                     + `of ${row.n_units} units, ${pair.machine_name} to ${row.machine_applied}, `
                     + `both to ${row.both_applied}. `
-                    + (row.kappa != null
-                      ? `Kappa ${formatStat(row.kappa)}${row.kappa_interpretation ? `, ${bandWord(row.kappa_interpretation)}` : ''}.`
-                      : 'Kappa is not defined here.')
+                    + kappaClause(row, floor)
                   }
                 >
                   {row.code_name}
@@ -166,10 +203,25 @@ function Pair({ pair }: { pair: MachinePairAgreement }) {
                 <td className="py-1.5 pr-3 text-right tabular-nums text-mm-text-muted">
                   {row.prevalence != null ? formatStat(row.prevalence) : '—'}
                 </td>
-                <td className="py-1.5 text-right tabular-nums text-mm-text">
-                  {/* 🔴 An undefined statistic is a REASON, never 0.0 (#689). */}
+                <td
+                  className="py-1.5 text-right tabular-nums text-mm-text"
+                  title={verdictShortfall(row.verdict_withheld_reason, row.n_units, floor) ?? undefined}
+                >
+                  {/* 🔴 An undefined statistic is a REASON, never 0.0 (#689).
+                      #1505 (D43) — a κ over too few units keeps its number and
+                      says so in the cell as well as the row's name: no band word
+                      is shown here, so without it a κ over 3 units and one over
+                      300 would look alike to the eye while a reader hears them
+                      apart. */}
                   {row.kappa != null
-                    ? formatStat(row.kappa)
+                    ? <>
+                      {formatStat(row.kappa)}
+                      {verdictWithheldWord(row.verdict_withheld_reason) && (
+                        <><span className="sr-only"> </span><span className="ml-1 text-xs text-mm-text-muted">
+                          {verdictWithheldWord(row.verdict_withheld_reason)}
+                        </span></>
+                      )}
+                    </>
                     : <span className="text-mm-text-muted">
                       {row.undefined_reason === 'no_variance'
                         ? 'no variation'

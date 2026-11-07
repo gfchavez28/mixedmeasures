@@ -1875,8 +1875,12 @@ export interface SummaryStatsRow {
    * #823(e): this row's `n` counts VALUES, not respondents — a `mean` whose
    * input is a variable GROUP pools every member's values into one list. True
    * of the statistic, invisible in a bare five-digit number beside a mean.
+   * #1330 (D53/D54): a pooled PROPORTION pools them the same way.
    */
   pooledAcrossDomain?: boolean
+  /** #1330 (D53): how many records the pooled values came from — the payload's
+   *  `record_count`, absent on a result computed before 1.5.9. */
+  recordCount?: number | null
   /** #1406 — the group this row describes; `null` on an ungrouped payload. */
   groupValue?: string | null
 }
@@ -1914,9 +1918,16 @@ export function shapeSummaryStats(
       const n = r.valid_n
       const mean = rd.mean ?? rd.aggregate_value ?? rd.percentage ?? null
 
-      // Standard Error computation
+      // Standard Error computation.
+      // #1330 (D53/D54): a variable group's pooled mean or proportion STATES its
+      // standard error over records (`std_error`); the `sd / √n` derived below
+      // would treat each pooled answer as a different person — the error the
+      // interval beside it no longer makes. A stated value wins, a real 0
+      // included; a result from before 1.5.9 states none and is derived as before.
       let se: number | null = null
-      if (metricType === 'proportion' && rd.percentage != null && n > 0) {
+      if (typeof rd.std_error === 'number' && Number.isFinite(rd.std_error)) {
+        se = rd.std_error
+      } else if (metricType === 'proportion' && rd.percentage != null && n > 0) {
         const p = rd.percentage / 100
         se = Math.sqrt(p * (1 - p) / n) * 100
       } else if ((metricType === 'mean' || metricType === 'domain_aggregate') && rd.std_dev != null && n > 0) {
@@ -1944,7 +1955,9 @@ export function shapeSummaryStats(
         // ⚠️ Keyed on the INPUT SOURCE, not on the metric type: `domain_aggregate`
         // has its own honest label (#693) and a `mean` over a single COLUMN
         // pools nothing. It is the pairing that makes the number ambiguous.
-        pooledAcrossDomain: metricType === 'mean' && m.input_source_type === 'dataset_domain',
+        pooledAcrossDomain: (metricType === 'mean' || metricType === 'proportion')
+          && m.input_source_type === 'dataset_domain',
+        recordCount: typeof rd.record_count === 'number' ? rd.record_count : null,
         groupValue: grouped ? r.group_value : null,
       }
     })

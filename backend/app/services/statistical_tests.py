@@ -20,6 +20,7 @@ from ..models.dataset import DatasetColumn
 from ..models.equivalence_group import EquivalenceGroup
 from .grouping import order_value_labels
 from .reliability_basis import RELIABILITY_FACET_ITEMS
+from .testable_groups import MIN_VALUES_PER_GROUP_PARAMETRIC, split_testable
 from .undefined_stats import finite_or_none
 from .metrics import (
     domain_record_scores,
@@ -636,13 +637,22 @@ def compute_one_way_anova(db: Session, test: StatisticalTest) -> dict:
             f"Use independent t-test for 2 groups."
         )
 
-    # Validate each group has n >= 2
-    for label, values in group_values.items():
-        if len(values) < 2:
-            raise ValueError(f"Group '{label}' has fewer than 2 observations ({len(values)})")
-
     sorted_labels = order_value_labels(group_values.keys())  # #406
-    group_arrays = [group_values[label] for label in sorted_labels]
+
+    # #1329 (D51): a group with one value is LISTED (its n and mean, no SD) and
+    # left out of the test — the comparison panel's rule, decided by the same
+    # function. This used to refuse the whole test, a third rule beside the
+    # panel's two. Fewer than two groups left is still a refusal.
+    tested_labels, untested_labels = split_testable(
+        group_values, sorted_labels, MIN_VALUES_PER_GROUP_PARAMETRIC,
+    )
+    if len(tested_labels) < 2:
+        raise ValueError(
+            "One-way ANOVA needs at least 2 groups with 2 or more observations; "
+            f"{len(tested_labels)} have that "
+            f"({', '.join(f'{lbl}: {len(group_values[lbl])}' for lbl in sorted_labels)})."
+        )
+    group_arrays = [group_values[label] for label in tested_labels]
 
     f_stat, p_value = f_oneway(*group_arrays)
 
@@ -686,8 +696,9 @@ def compute_one_way_anova(db: Session, test: StatisticalTest) -> dict:
         vals = group_values[label]
         groups_info.append({
             "label": label,
-            "mean": round(statistics.mean(vals), STATS_PRECISION),
-            "sd": round(statistics.stdev(vals), STATS_PRECISION),
+            "mean": round(statistics.mean(vals), STATS_PRECISION) if vals else None,
+            # One value has no SD (D51) — `None`, never the 0 a constant group has.
+            "sd": round(statistics.stdev(vals), STATS_PRECISION) if len(vals) >= 2 else None,
             "n": len(vals),
         })
 
@@ -700,6 +711,8 @@ def compute_one_way_anova(db: Session, test: StatisticalTest) -> dict:
         "omega_squared": round(omega_sq, STATS_PRECISION),
         "effect_size_label": _classify_effect_eta_squared(eta_squared),
         "groups": groups_info,
+        # D51 — listed in `groups`, not in the F. Always present.
+        "untested_groups": untested_labels,
         "significant": float(p_value) < 0.05,
     }
 

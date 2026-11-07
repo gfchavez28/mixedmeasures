@@ -194,7 +194,7 @@ def test_all_document_surfaces_agree(project_with_coded_document, db_session):
         get_document(project_id=620, document_id=620, user=user, db=db_session)
     ).coded_segment_count
 
-    summary = _run(get_project_summary(project_id=620, user=user, db=db_session))
+    summary = get_project_summary(project_id=620, user=user, db=db_session)  # `def` since #1463
     recent_count = next(
         d.coded_segment_count for d in summary.recent_documents if d.id == 620
     )

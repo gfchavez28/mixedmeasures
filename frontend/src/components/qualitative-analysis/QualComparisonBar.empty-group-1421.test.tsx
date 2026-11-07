@@ -30,14 +30,14 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 const data: DemographicComparisonResponse = {
   groups: ['Interviewed', 'Survey only'],
   group_totals: {
-    Interviewed: { total_segments: 4, total_word_count: 4 },
-    'Survey only': { total_segments: 0, total_word_count: 0 },
+    Interviewed: { n: 1, participants: 1, total_segments: 4, total_word_count: 4 },
+    'Survey only': { n: 0, participants: 0, total_segments: 0, total_word_count: 0 },
   },
   codes: [{
     code_id: 1, code_name: 'Cost', category_name: null,
     by_group: {
-      Interviewed: { count: 1, proportion: 0.25, undefined_reason: null },
-      'Survey only': { count: 0, proportion: null, undefined_reason: 'no_segments' },
+      Interviewed: { count: 1, proportion: 0.25, undefined_reason: null, passages: 1 },
+      'Survey only': { count: 0, proportion: null, undefined_reason: 'no_segments', passages: 0 },
     },
     delta_proportion: null, test: null,
   }],
@@ -47,7 +47,7 @@ describe('QualComparisonBar — a group with no segments (#1421)', () => {
   it('names the group and the reason under the chart', () => {
     render(<QualComparisonBar data={data} />)
     expect(screen.getByText('Survey only:')).toBeInTheDocument()
-    expect(screen.getByText(/No participant turns from this group in the conversations compared/))
+    expect(screen.getByText(/Nobody in this group has material in the sources compared/))
       .toBeInTheDocument()
   })
 
@@ -55,12 +55,12 @@ describe('QualComparisonBar — a group with no segments (#1421)', () => {
     const full: DemographicComparisonResponse = {
       ...data,
       codes: [{ ...data.codes[0], by_group: {
-        Interviewed: { count: 1, proportion: 0.25, undefined_reason: null },
-        'Survey only': { count: 0, proportion: 0, undefined_reason: null },
+        Interviewed: { count: 1, proportion: 0.25, undefined_reason: null, passages: 1 },
+        'Survey only': { count: 0, proportion: 0, undefined_reason: null, passages: 0 },
       } }],
     }
     render(<QualComparisonBar data={full} />)
-    expect(screen.queryByText(/No participant turns/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Nobody in this group has material/)).not.toBeInTheDocument()
   })
 
   it('the tooltip prints (—) for no share and (0.0%) for a real zero', () => {

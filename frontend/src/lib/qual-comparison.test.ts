@@ -12,16 +12,16 @@ import type { DemographicComparisonResponse } from '@/lib/api'
 const data: DemographicComparisonResponse = {
   groups: ['Interviewed', 'Phone', 'Survey only'],
   group_totals: {
-    Interviewed: { total_segments: 4, total_word_count: 4 },
-    Phone: { total_segments: 2, total_word_count: 2 },
-    'Survey only': { total_segments: 0, total_word_count: 0 },
+    Interviewed: { n: 1, participants: 1, total_segments: 4, total_word_count: 4 },
+    Phone: { n: 1, participants: 1, total_segments: 2, total_word_count: 2 },
+    'Survey only': { n: 0, participants: 0, total_segments: 0, total_word_count: 0 },
   },
   codes: [{
     code_id: 1, code_name: 'Cost', category_name: null,
     by_group: {
-      Interviewed: { count: 1, proportion: 0.25, undefined_reason: null },
-      Phone: { count: 0, proportion: 0, undefined_reason: null },
-      'Survey only': { count: 0, proportion: null, undefined_reason: 'no_segments' },
+      Interviewed: { count: 1, proportion: 0.25, undefined_reason: null, passages: 1 },
+      Phone: { count: 0, proportion: 0, undefined_reason: null, passages: 0 },
+      'Survey only': { count: 0, proportion: null, undefined_reason: 'no_segments', passages: 0 },
     },
     delta_proportion: null, test: null,
   }],

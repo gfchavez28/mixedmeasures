@@ -121,8 +121,8 @@ def test_list_codes_batch_usage_count_distinct(db_session):
 
     # Pass the Query-defaulted params explicitly (FastAPI doesn't resolve
     # dependency defaults on a direct call).
-    resp = _run(list_codes(921, include_inactive=False, category_id=None,
-                           user=user_a, db=db))
+    resp = list_codes(921, include_inactive=False, category_id=None,  # def since #1463 D67
+                      user=user_a, db=db)
     by_id = {c.id: c for c in resp.codes}
     assert by_id[9215].usage_count == 1, "one coded segment, not one-per-coder"
 

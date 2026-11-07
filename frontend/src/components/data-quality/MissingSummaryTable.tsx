@@ -1,6 +1,8 @@
 import { useState, useMemo } from 'react'
 import type { VariableMissingSummary } from '@/lib/api'
 import { TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
+import { columnSort } from '@/lib/column-sort'
+import { SortableColumnHeader } from '@/components/ui/sortable-column-header'
 
 type SortField = 'pct_missing' | 'name' | 'dataset' | 'n_missing' | 'n_total' | 'n_empty' | 'n_na'
 
@@ -70,7 +72,20 @@ export default function MissingSummaryTable({
     return arr
   }, [variables, sortBy, sortDir])
 
-  const arrow = sortDir === 'asc' ? '\u2191' : '\u2193'
+  // #1465 (D128) \u2014 every sortable header is the shared `SortableColumnHeader`, a
+  // real button in the `<th>`; until 1.6.0 each was an `onClick` on the `<th>`, so
+  // this table could not be re-sorted by keyboard. `aria-sort` now sits on the
+  // sorted column only (it said `none` on the other six).
+  const HEAD = 'px-3 py-2 font-medium text-mm-text-muted border-b-2 border-mm-border-subtle bg-mm-surface'
+  const sortable = (field: SortField, label: string, align: string) => (
+    <SortableColumnHeader
+      label={label}
+      sort={columnSort(sortBy === field, sortDir)}
+      onSort={() => handleSort(field)}
+      className={`${HEAD} ${align} select-none${field === 'name' ? ' sticky left-0 z-10' : ''}`}
+      style={field === 'name' ? { minWidth: 160 } : undefined}
+    />
+  )
 
   return (
     <div className="overflow-x-auto border rounded-lg">
@@ -79,62 +94,19 @@ export default function MissingSummaryTable({
         <thead>
           <tr>
             {/* Variable — sticky */}
-            <th
-              className="px-3 py-2 text-left font-medium text-mm-text-muted border-b-2 border-mm-border-subtle bg-mm-surface sticky left-0 z-10 cursor-pointer select-none"
-              style={{ minWidth: 160 }}
-              onClick={() => handleSort('name')}
-              aria-sort={sortBy === 'name' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
-            >
-              Variable {sortBy === 'name' && arrow}
-            </th>
-            <th
-              className="px-3 py-2 text-left font-medium text-mm-text-muted border-b-2 border-mm-border-subtle bg-mm-surface cursor-pointer select-none"
-              onClick={() => handleSort('dataset')}
-              aria-sort={sortBy === 'dataset' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
-            >
-              Dataset {sortBy === 'dataset' && arrow}
-            </th>
-            <th className="px-3 py-2 text-center font-medium text-mm-text-muted border-b-2 border-mm-border-subtle bg-mm-surface">
+            {sortable('name', 'Variable', 'text-left')}
+            {sortable('dataset', 'Dataset', 'text-left')}
+            <th scope="col" className={`${HEAD} text-center`}>
               Type
             </th>
-            <th
-              className="px-3 py-2 text-right font-medium text-mm-text-muted border-b-2 border-mm-border-subtle bg-mm-surface cursor-pointer select-none"
-              onClick={() => handleSort('n_total')}
-              aria-sort={sortBy === 'n_total' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
-            >
-              N Total {sortBy === 'n_total' && arrow}
-            </th>
-            <th className="px-3 py-2 text-right font-medium text-mm-text-muted border-b-2 border-mm-border-subtle bg-mm-surface">
+            {sortable('n_total', 'N Total', 'text-right')}
+            <th scope="col" className={`${HEAD} text-right`}>
               N Valid
             </th>
-            <th
-              className="px-3 py-2 text-right font-medium text-mm-text-muted border-b-2 border-mm-border-subtle bg-mm-surface cursor-pointer select-none"
-              onClick={() => handleSort('n_missing')}
-              aria-sort={sortBy === 'n_missing' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
-            >
-              N Missing {sortBy === 'n_missing' && arrow}
-            </th>
-            <th
-              className="px-3 py-2 text-right font-medium text-mm-text-muted border-b-2 border-mm-border-subtle bg-mm-surface cursor-pointer select-none"
-              onClick={() => handleSort('pct_missing')}
-              aria-sort={sortBy === 'pct_missing' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
-            >
-              % Missing {sortBy === 'pct_missing' && arrow}
-            </th>
-            <th
-              className="px-3 py-2 text-right font-medium text-mm-text-muted border-b-2 border-mm-border-subtle bg-mm-surface cursor-pointer select-none"
-              onClick={() => handleSort('n_empty')}
-              aria-sort={sortBy === 'n_empty' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
-            >
-              N Empty {sortBy === 'n_empty' && arrow}
-            </th>
-            <th
-              className="px-3 py-2 text-right font-medium text-mm-text-muted border-b-2 border-mm-border-subtle bg-mm-surface cursor-pointer select-none"
-              onClick={() => handleSort('n_na')}
-              aria-sort={sortBy === 'n_na' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
-            >
-              N NA {sortBy === 'n_na' && arrow}
-            </th>
+            {sortable('n_missing', 'N Missing', 'text-right')}
+            {sortable('pct_missing', '% Missing', 'text-right')}
+            {sortable('n_empty', 'N Empty', 'text-right')}
+            {sortable('n_na', 'N NA', 'text-right')}
           </tr>
         </thead>
         <tbody>

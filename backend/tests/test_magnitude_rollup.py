@@ -499,7 +499,8 @@ class TestTheSharedGather:
 
     def test_an_unknown_scope_fails_closed(self, world):
         with pytest.raises(ValueError, match="unknown segment_scope"):
-            gather_target_votes(world["db"], 1, segment_scope="whatever", min_voters=1)
+            gather_target_votes(world["db"], 1, segment_scope="whatever", min_voters=1,
+                                group_units=False)
 
     def test_the_two_scopes_differ_exactly_on_unfrozen_clips(self, world):
         """The property that makes the parameter load-bearing rather than
@@ -517,7 +518,8 @@ class TestTheSharedGather:
         world["rate"](turn, world["scaled"], 1, 3.0)
 
         def segments(scope):
-            votes = gather_target_votes(db, 1, segment_scope=scope, min_voters=1)
+            votes = gather_target_votes(db, 1, segment_scope=scope, min_voters=1,
+                                        group_units=False)
             return {b.target_id for b in votes.ballots() if b.kind == "seg"}
 
         assert segments("consensus_eligible") == {turn.id}
@@ -604,3 +606,108 @@ class TestTheVocabularyIsDeclared:
         different facts into one count."""
         from app.services import participant_resolution as pr
         assert not set(mr.EXCLUSION_REASONS) & set(pr.UNRESOLVED_REASONS)
+
+
+class TestAGroupIsOnePassage:
+    """#1334 — a SegmentGroup's members are coded (and rated) as ONE unit: the
+    apply and `_fan_out_rating` reach every visible member. Scoring each member
+    counted one judgement once per turn."""
+
+    def _group(self, world, segs):
+        from app.models.segment_group import SegmentGroup
+
+        db = world["db"]
+        group = SegmentGroup(conversation_id=world["conv"].id)
+        db.add(group)
+        db.flush()
+        for seg in segs:
+            seg.group_id = group.id
+        db.flush()
+        return group
+
+    def test_the_reviews_example(self, world):
+        """The filed example: a 4-turn group rated 5 beside three single turns
+        rated 2 is 3.714 over 7 passages per turn, and 2.75 over 4 as units."""
+        members = [world["turn"]() for _ in range(4)]
+        self._group(world, members)
+        for seg in members:                       # the apply's fan-out
+            world["rate"](seg, world["scaled"], 1, 5.0)
+        for _ in range(3):
+            world["rate"](world["turn"](), world["scaled"], 1, 2.0)
+
+        score = _only(compute_magnitude_rollup(world["db"], 1))
+        assert score.n_targets == 4
+        assert score.mean == pytest.approx(2.75)
+        assert score.mean != pytest.approx(26 / 7, abs=1e-3)
+
+    def test_a_group_decides_once_with_every_member_as_one_ballot(self, world):
+        """B rated ONE member (a door that does not fan out). As a unit, B is a
+        voter on the whole group: median(4, 2) = 3 on one passage. Per member
+        the group read as one consensus passage (3) and three sole-voter ones (4)."""
+        members = [world["turn"]() for _ in range(4)]
+        self._group(world, members)
+        for seg in members:
+            world["rate"](seg, world["scaled"], 1, 4.0)
+        world["rate"](members[2], world["scaled"], 2, 2.0)
+
+        score = _only(compute_magnitude_rollup(world["db"], 1))
+        assert score.target_ratings == (3.0,)
+        assert score.min_raters_per_target == 2
+
+    def test_two_different_ratings_from_one_coder_are_no_rating(self, world):
+        """A coder whose members disagree gave the unit two answers — not a
+        value, and never their mean (`segment_groups.merge_unit_rating`)."""
+        members = [world["turn"]() for _ in range(2)]
+        self._group(world, members)
+        world["rate"](members[0], world["scaled"], 1, 1.0)
+        world["rate"](members[1], world["scaled"], 1, 5.0)
+        world["rate"](world["turn"](), world["scaled"], 1, 2.0)
+
+        rollup = compute_magnitude_rollup(world["db"], 1)
+        score = _only(rollup)
+        assert score.target_ratings == (2.0,), "the contradictory group scores nothing"
+
+    def test_a_facilitator_member_is_excluded_once_per_judgement(self, world):
+        """The facilitator turn in a group leaves the score (as every facilitator
+        turn does) and is DISCLOSED once per coder judgement, not once per turn."""
+        prompts = [world["turn"](facilitator_turn=True) for _ in range(3)]
+        answer = world["turn"]()
+        self._group(world, prompts + [answer])
+        for seg in prompts + [answer]:
+            world["rate"](seg, world["scaled"], 1, 4.0)
+
+        rollup = compute_magnitude_rollup(world["db"], 1)
+        assert _only(rollup).target_ratings == (4.0,)
+        assert rollup.excluded_ratings == {EXCLUDED_FACILITATOR_TURN: 1}
+
+    def test_ungrouped_turns_are_unchanged(self, world):
+        """CONTROL — passes before and after."""
+        for value in (5.0, 2.0, 2.0):
+            world["rate"](world["turn"](), world["scaled"], 1, value)
+        score = _only(compute_magnitude_rollup(world["db"], 1))
+        assert score.n_targets == 3
+        assert score.mean == pytest.approx(3.0)
+
+    def test_a_group_spanning_two_people_is_one_passage_of_each(self, world):
+        """A focus-group exchange grouped across two speakers: one passage for
+        EACH participant it contains — never one passage shared, never two."""
+        db = world["db"]
+        ben = Participant(project_id=1, identifier="E-02", display_name="Ben")
+        db.add(ben)
+        db.flush()
+        ben_speaker = Speaker(project_id=1, name="Ben", participant_id=ben.id)
+        db.add(ben_speaker)
+        db.flush()
+        amara_turns = [world["turn"](), world["turn"]()]
+        ben_turn = Segment(conversation_id=world["conv"].id, speaker_id=ben_speaker.id,
+                           sequence_order=99, text="ben")
+        db.add(ben_turn)
+        db.flush()
+        self._group(world, amara_turns + [ben_turn])
+        for seg in amara_turns + [ben_turn]:
+            world["rate"](seg, world["scaled"], 1, 4.0)
+
+        rollup = compute_magnitude_rollup(db, 1)
+        by_person = {s.participant_id: s for s in rollup.scores}
+        assert by_person[world["person"].id].n_targets == 1
+        assert by_person[ben.id].n_targets == 1

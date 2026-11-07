@@ -1,7 +1,14 @@
 import { Fragment, useMemo, useState } from 'react'
-import { formatP, getSignificanceStars } from '@/lib/chart-data'
+import { formatP, formatPValue, getSignificanceStars } from '@/lib/chart-data'
 import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
 import { undefinedComparisonGroups } from '@/lib/qual-comparison'
+import {
+  COMPARISON_UNIT_PASSAGE,
+  cannotReachSignificance, comparisonMethodNote, deltaIntervalSpoken, deltaIntervalTitle, deltaIntervalVisual,
+  describeOmittedTest, unitCount,
+} from '@/lib/comparison-basis'
+import { columnSort, type SortDir } from '@/lib/column-sort'
+import { SortableColumnHeader } from '@/components/ui/sortable-column-header'
 import { QualComparisonUndefinedNote } from './QualComparisonUndefinedNote'
 import type {
   DemographicComparisonResponse,
@@ -32,9 +39,15 @@ function effectSizeBadge(value: number, type: string): { bg: string; label: stri
   if (abs >= 1.5) return { bg: 'bg-mm-bg text-mm-text-muted', label: 'small' }
   return { bg: 'bg-mm-bg text-mm-text-faint', label: '' }
 }
-type SortDir = 'asc' | 'desc'
 
 const SIG_LEVELS = { show_05: true, show_01: true, show_001: true }
+
+/** The p this table shows: the adjusted one (#1323); the raw p only for a payload
+ *  from before the basis existed. 1 when there is no test (sorts last). */
+function shownP(test: StatTestResult | null | undefined): number {
+  if (!test) return 1
+  return test.p_adjusted ?? test.p_value
+}
 
 function pColor(p: number | undefined): string {
   if (p == null) return ''
@@ -58,6 +71,18 @@ export default function QualComparisonTable({
 }: QualComparisonTableProps) {
   const { groups, group_totals, codes: allEntries } = data
   const is2Group = groups.length === 2
+  // #1323: the n is in the result's unit, named — "n=5 participants" — never a bare
+  // number a reader takes for passages (or the reverse).
+  const groupN = (g: string) => {
+    const t = group_totals[g]
+    if (!t) return '0'
+    return data.basis ? unitCount(data.basis.unit, t.n) : unitCount(COMPARISON_UNIT_PASSAGE, t.total_segments)
+  }
+  const methodNote = comparisonMethodNote(data)
+  // #1323 D8: three or more groups take the Freeman–Halton EXACT test, which has no
+  // χ² statistic — a χ² column would be "–" in every row under a header naming a
+  // test that did not run. Shown only when some result carries a statistic.
+  const hasStatistic = allEntries.some(e => e.test?.statistic != null)
 
   /**
    * #830(g): a code applied NOWHERE is not a row of this table by default.
@@ -103,11 +128,6 @@ export default function QualComparisonTable({
     }
   }
 
-  const sortIndicator = (key: SortKey) => {
-    if (sortKey !== key) return null
-    return <span className="ml-0.5 text-mm-text-faint">{sortDir === 'asc' ? '\u2191' : '\u2193'}</span>
-  }
-
   const sorted = useMemo(() => {
     const copy = [...entries]
     const dir = sortDir === 'asc' ? 1 : -1
@@ -120,7 +140,7 @@ export default function QualComparisonTable({
         case 'delta':
           return dir * (Math.abs(a.delta_proportion ?? 0) - Math.abs(b.delta_proportion ?? 0))
         case 'p':
-          return dir * ((a.test?.p_value ?? 1) - (b.test?.p_value ?? 1))
+          return dir * (shownP(a.test) - shownP(b.test))
         case 'effect':
           return dir * (Math.abs(a.test?.effect_size ?? 0) - Math.abs(b.test?.effect_size ?? 0))
         case 'count': {
@@ -171,48 +191,26 @@ export default function QualComparisonTable({
               <tr className="bg-mm-bg">
                 <ThCell colSpan={2} className="border-b border-r" />
                 {groups.map(g => (
-                  <th
-                    key={g}
-                    scope="col"
-                    colSpan={2}
-                    className="px-2 py-1.5 border-b border-r text-center font-medium"
-                    title={`n = ${group_totals[g]?.total_segments ?? 0} segments`}
-                  >
-                    {g}
-                    <span className="text-mm-text-faint font-normal ml-1">
-                      (n={group_totals[g]?.total_segments ?? 0})
-                    </span>
-                  </th>
+                  <GroupTh key={g} group={g} n={groupN(g)} passages={group_totals[g]?.total_segments ?? 0} />
                 ))}
-                <th scope="col" colSpan={showEffectSize ? 4 : 3} className="px-2 py-1.5 border-b text-center font-medium">
+                <th scope="col" colSpan={2 + (hasStatistic ? 1 : 0) + (showEffectSize ? 1 : 0)} className="px-2 py-1.5 border-b text-center font-medium">
                   Test
                 </th>
               </tr>
             )}
             <tr className="bg-mm-bg">
-              <SortableTh field="code" label="Code" current={sortKey} dir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-left min-w-[120px] border-b border-r" />
-              <SortableTh field="category" label="Category" current={sortKey} dir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-left min-w-[80px] border-b border-r" />
+              <SortableTh field="code" label="Code" current={sortKey} dir={sortDir} onSort={handleSort} className="text-left min-w-[120px] border-b border-r" />
+              <SortableTh field="category" label="Category" current={sortKey} dir={sortDir} onSort={handleSort} className="text-left min-w-[80px] border-b border-r" />
               {is2Group ? (
                 <>
                   {groups.map(g => (
-                    <th
-                      key={g}
-                      scope="col"
-                      colSpan={2}
-                      className="px-2 py-1.5 border-b border-r text-center font-medium"
-                      title={`n = ${group_totals[g]?.total_segments ?? 0} segments`}
-                    >
-                      {g}
-                      <span className="text-mm-text-faint font-normal ml-1">
-                        (n={group_totals[g]?.total_segments ?? 0})
-                      </span>
-                    </th>
+                    <GroupTh key={g} group={g} n={groupN(g)} passages={group_totals[g]?.total_segments ?? 0} />
                   ))}
-                  <SortableTh field="delta" label={'\u0394 Prop'} current={sortKey} dir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right border-b border-r" />
-                  <SortableTh field="p" label="p" current={sortKey} dir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right border-b border-r" />
+                  <SortableTh field="delta" label={'\u0394 Prop'} current={sortKey} dir={sortDir} onSort={handleSort} className="text-right border-b border-r" />
+                  <SortableTh field="p" label="p" current={sortKey} dir={sortDir} onSort={handleSort} className="text-right border-b border-r" />
                   <th scope="col" className="px-2 py-1.5 border-b border-r text-center font-medium">Sig</th>
                   {showEffectSize && (
-                    <SortableTh field="effect" label="Effect" current={sortKey} dir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-center border-b" />
+                    <SortableTh field="effect" label="Effect" current={sortKey} dir={sortDir} onSort={handleSort} className="text-center border-b" />
                   )}
                 </>
               ) : (
@@ -223,11 +221,13 @@ export default function QualComparisonTable({
                       <th scope="col" className="px-2 py-1.5 border-b border-r text-right font-medium">Prop</th>
                     </Fragment>
                   ))}
-                  <th scope="col" className="px-2 py-1.5 border-b border-r text-right font-medium">{'\u03C7\u00B2'}</th>
-                  <SortableTh field="p" label="p" current={sortKey} dir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-right border-b border-r" />
+                  {hasStatistic && (
+                    <th scope="col" className="px-2 py-1.5 border-b border-r text-right font-medium">{'\u03C7\u00B2'}</th>
+                  )}
+                  <SortableTh field="p" label="p" current={sortKey} dir={sortDir} onSort={handleSort} className="text-right border-b border-r" />
                   <th scope="col" className="px-2 py-1.5 border-b border-r text-center font-medium">Sig</th>
                   {showEffectSize && (
-                    <SortableTh field="effect" label="Effect" current={sortKey} dir={sortDir} onSort={handleSort} indicator={sortIndicator} className="text-center border-b" />
+                    <SortableTh field="effect" label="Effect" current={sortKey} dir={sortDir} onSort={handleSort} className="text-center border-b" />
                   )}
                 </>
               )}
@@ -241,6 +241,7 @@ export default function QualComparisonTable({
                 groups={groups}
                 is2Group={is2Group}
                 showEffectSize={showEffectSize}
+                showStatistic={hasStatistic}
                 onCodeClick={onCodeClick}
               />
             ))}
@@ -248,13 +249,12 @@ export default function QualComparisonTable({
         </table>
       </div>
 
-      {/* Method note */}
+      {/* Method note \u2014 #1323: every word of it read from the payload's basis. The
+          old note printed "Chi-square test." when no test had run (the rider). */}
       <p className="text-xs text-mm-text-faint mt-2">
-        {is2Group
-          ? `Test: Fisher\u2019s exact test. \u0394 Prop = ${groups[0]} \u2212 ${groups[1]}.`
-          : `Test: ${entries[0]?.test?.method === 'fisher_exact' ? "Fisher\u2019s exact" : 'Chi-square'} test.`
-        }
-        {' '}Significance: * p&lt;.05, ** p&lt;.01, *** p&lt;.001.
+        {methodNote ?? 'Method not stated by this result.'}
+        {is2Group ? ` \u0394 Prop = ${groups[0]} \u2212 ${groups[1]}.` : ''}
+        {data.basis && !data.basis.test_omitted_reason ? ' Significance: * p<.05, ** p<.01, *** p<.001 (adjusted).' : ''}
       </p>
     </div>
   )
@@ -265,16 +265,37 @@ function ComparisonRow({
   groups,
   is2Group,
   showEffectSize,
+  showStatistic,
   onCodeClick,
 }: {
   entry: CodeComparisonEntry
   groups: string[]
   is2Group: boolean
   showEffectSize?: boolean
+  showStatistic: boolean
   onCodeClick?: (codeId: number) => void
 }) {
-  const p = entry.test?.p_value
-  const stars = p != null ? getSignificanceStars(p, SIG_LEVELS) : ''
+  // #1323: the p shown, coloured and starred is the ADJUSTED one; the raw p is in
+  // the cell's description. An old payload with no adjusted p shows the raw one.
+  const p = entry.test ? shownP(entry.test) : undefined
+  const stars = p != null && entry.test?.significant ? getSignificanceStars(p, SIG_LEVELS) : ''
+  const pTitle = entry.test
+    ? `${formatPValue(entry.test.p_value)} before adjustment`
+    : describeOmittedTest(entry.test_omitted_reason) ?? undefined
+  const unreachable = cannotReachSignificance(entry.test)
+  const sigCell = (
+    <td className="px-2 py-1.5 border-b border-r text-center">
+      {stars && <span className="font-bold text-emerald-600 dark:text-emerald-400">{stars}</span>}
+      {unreachable && (
+        <span
+          className="text-[10px] text-mm-text-faint"
+          title="With these group sizes this code cannot reach p < .05 after the adjustment, whatever the data."
+        >
+          {'can\u2019t reach'}
+        </span>
+      )}
+    </td>
+  )
 
   return (
     <tr
@@ -300,19 +321,32 @@ function ComparisonRow({
               </Fragment>
             )
           })}
-          <td className="px-2 py-1.5 border-b border-r text-right tabular-nums font-medium">
+          <td
+            className="px-2 py-1.5 border-b border-r text-right tabular-nums font-medium"
+            title={deltaIntervalTitle(entry.delta_ci) ?? undefined}
+          >
             {/* #1421: \u0394 is null only when a group has no share \u2014 the note above says which. */}
-            {entry.delta_proportion != null
-              ? `${entry.delta_proportion >= 0 ? '+' : ''}${(entry.delta_proportion * 100).toFixed(1)}pp`
-              : NO_VALUE
-            }
+            {entry.delta_proportion != null ? (
+              <span className="inline-flex flex-col items-end">
+                <span>{`${entry.delta_proportion >= 0 ? '+' : ''}${(entry.delta_proportion * 100).toFixed(1)}pp`}</span>
+                {/* D3: the interval rides INSIDE the cell, on a second line \u2014 a new column
+                    would push content off a 640\u00d7360 viewport (#717/#718; IrrMatrix's rule).
+                    The bracket form is for the eye; the reader hears the spoken one. */}
+                {/* `whitespace-nowrap`: in a narrow Canvas embed the bracket broke mid-range
+                    ("[-50.5," over "79.2]" — DRIVEN 2026-10-31b); the table scrolls instead. */}
+                {entry.delta_ci && (
+                  <span className="text-[11px] font-normal text-mm-text-faint leading-tight whitespace-nowrap">
+                    <span aria-hidden="true">{deltaIntervalVisual(entry.delta_ci)}</span>
+                    <span className="sr-only"> {deltaIntervalSpoken(entry.delta_ci)}</span>
+                  </span>
+                )}
+              </span>
+            ) : NO_VALUE}
           </td>
-          <td className={`px-2 py-1.5 border-b border-r text-right tabular-nums ${pColor(p)} ${pBgColor(p)}`}>
+          <td className={`px-2 py-1.5 border-b border-r text-right tabular-nums ${pColor(p)} ${pBgColor(p)}`} title={pTitle}>
             {p != null ? formatP(p) : '\u2013'}
           </td>
-          <td className="px-2 py-1.5 border-b border-r text-center">
-            {stars && <span className="font-bold text-emerald-600 dark:text-emerald-400">{stars}</span>}
-          </td>
+          {sigCell}
           {showEffectSize && (
             <EffectSizeCell test={entry.test} />
           )}
@@ -330,15 +364,15 @@ function ComparisonRow({
               </Fragment>
             )
           })}
-          <td className="px-2 py-1.5 border-b border-r text-right tabular-nums">
-            {entry.test?.statistic != null ? entry.test.statistic.toFixed(2) : '\u2013'}
-          </td>
-          <td className={`px-2 py-1.5 border-b border-r text-right tabular-nums ${pColor(p)} ${pBgColor(p)}`}>
+          {showStatistic && (
+            <td className="px-2 py-1.5 border-b border-r text-right tabular-nums">
+              {entry.test?.statistic != null ? entry.test.statistic.toFixed(2) : '\u2013'}
+            </td>
+          )}
+          <td className={`px-2 py-1.5 border-b border-r text-right tabular-nums ${pColor(p)} ${pBgColor(p)}`} title={pTitle}>
             {p != null ? formatP(p) : '\u2013'}
           </td>
-          <td className="px-2 py-1.5 border-b border-r text-center">
-            {stars && <span className="font-bold text-emerald-600 dark:text-emerald-400">{stars}</span>}
-          </td>
+          {sigCell}
           {showEffectSize && (
             <EffectSizeCell test={entry.test} />
           )}
@@ -398,13 +432,17 @@ function ThCell({ colSpan, className, children }: { colSpan?: number; className?
   )
 }
 
+/**
+ * #1465 — a sort header is the shared `SortableColumnHeader` (a real button in
+ * the `<th>`). This was an `onClick` on the `<th>` from the table's first commit
+ * (2026-02-25) until 1.6.0, so the table could not be re-sorted by keyboard.
+ */
 function SortableTh({
   field,
   label,
   current,
   dir,
   onSort,
-  indicator,
   className = '',
 }: {
   field: SortKey
@@ -412,18 +450,37 @@ function SortableTh({
   current: SortKey
   dir: SortDir
   onSort: (key: SortKey) => void
-  indicator: (key: SortKey) => React.ReactNode
   className?: string
 }) {
   return (
+    <SortableColumnHeader
+      label={label}
+      sort={columnSort(current === field, dir)}
+      onSort={() => onSort(field)}
+      className={`px-2 py-1.5 font-medium select-none ${className}`}
+    />
+  )
+}
+
+/**
+ * A group's column header: its name, then its *n* in the result's unit.
+ *
+ * 🔴 #1465 (D130) — the space between them is a text node in the `<th>`'s OWN
+ * child list. A margin draws a gap and the name computes without one
+ * ("Clinical Services(n=0)"); a space typed INSIDE the span is trimmed away by
+ * the name computation (measured for #908 on `RatingSweep`'s chips).
+ */
+function GroupTh({ group, n, passages }: { group: string; n: string; passages: number }) {
+  return (
     <th
       scope="col"
-      className={`px-2 py-1.5 font-medium cursor-pointer select-none hover:bg-mm-surface-hover transition-colors ${className}`}
-      onClick={() => onSort(field)}
-      aria-sort={current === field ? (dir === 'asc' ? 'ascending' : 'descending') : undefined}
+      colSpan={2}
+      className="px-2 py-1.5 border-b border-r text-center font-medium"
+      title={`n = ${n} with material here (${unitCount(COMPARISON_UNIT_PASSAGE, passages)})`}
     >
-      {label}
-      {indicator(field)}
+      {group}
+      {' '}
+      <span className="text-mm-text-faint font-normal">(n={n})</span>
     </th>
   )
 }

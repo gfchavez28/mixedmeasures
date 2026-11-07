@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload, selectinload
-from sqlalchemy import func
+from sqlalchemy import func, or_
 import io
 import csv
 from datetime import datetime, timezone
@@ -19,23 +19,32 @@ from ..models.code_application import CodeApplication
 from ..models.speaker import Speaker
 from ..models.excerpt import Excerpt, segment_has_any_quote_filter
 from ..models.participant import Participant
-from ..services.code_analysis import get_code_frequencies, get_code_cooccurrence
+from ..services.code_analysis import (
+    COOCCURRENCE_RULE, COOCCURRENCE_SOURCE_LEVEL_NOTE, get_code_cooccurrence,
+)
 from ..services.magnitude import read_scale as _read_magnitude_scale
+from ..services.participant_filter import segment_passage_clause
 from ..services.coding_layers import (
     CONSENSUS_ORIGIN,
     code_usage_count_expr,
+    in_coder_scope,
+    narrow_to_coders,
     non_consensus_filter,
     project_scoped_segments,
     visible_target_filter,
 )
 from ..auth import get_current_user
 from ..schemas.common import utc_wire
-from .helpers import _get_project_or_404, parse_int_list, sanitize_content_disposition
+from .helpers import (
+    _get_project_or_404, coder_scope_filename_suffix, parse_int_list, parse_source_ids,
+    sanitize_content_disposition,
+)
 from .export_helpers import (
     EXPORT_VALUE_PRECISION,
     _build_category_tree_and_chains,
     build_code_cooccurrence_matrix,
     csv_safe,
+    file_scope_line,
     segment_source_pair,
 )
 
@@ -45,6 +54,9 @@ router = APIRouter(prefix="/api/projects/{project_id}/export", tags=["export"])
 @router.get("/csv")
 async def export_study_csv(
     project_id: int,
+    # #1530 D98 (1.5.9) — bare default (direct-call tests get real None). The
+    # Export dialog sends the effective scope while blind; absent = every coder.
+    coder_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -70,8 +82,15 @@ async def export_study_csv(
     partial — the last member of the #616/#620/#629 family. The single
     `conversation_name` column is now the honest `source_type` + `source_name`
     pair, matching every other export.
+
+    #1530 D95/D97 (1.5.9): with ``coder_ids`` a 1 is that coder's coding only —
+    the workbench's chips, not every coder's union — and the file's NAME says
+    whose (`coder_scope_filename_suffix`). Every segment keeps its row: the zero
+    rows are still the denominator. No preamble line, because this file must load
+    straight into SPSS/R/jamovi.
     """
     project = _get_project_or_404(db, project_id, user.id)
+    scope = parse_int_list(coder_ids)
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -122,7 +141,7 @@ async def export_study_csv(
         # count or per-coder breakdown (#490 latent site).
         applied_code_ids = set(
             ca.code_id for ca in segment.code_applications
-            if ca.origin != CONSENSUS_ORIGIN
+            if ca.origin != CONSENSUS_ORIGIN and in_coder_scope(ca.user_id, scope)
         )
 
         source_kind, source_name = segment_source_pair(segment)
@@ -155,7 +174,10 @@ async def export_study_csv(
         writer.writerow(row)
 
     output.seek(0)
-    filename = f"{sanitize_content_disposition(project.name)}_export_{datetime.now().strftime('%Y%m%d')}.csv"
+    filename = (
+        f"{sanitize_content_disposition(project.name)}_export_{datetime.now().strftime('%Y%m%d')}"
+        f"{coder_scope_filename_suffix(db, scope)}.csv"
+    )
 
     return StreamingResponse(
         iter([output.getvalue()]),
@@ -225,88 +247,11 @@ async def export_codebook(
 
 
 
-@router.get("/code-frequencies")
-async def export_code_frequencies_csv(
-    project_id: int,
-    code_ids: str | None = None,
-    exclude_facilitator: bool = True,
-    conversation_ids: str | None = None,
-    participant_ids: str | None = None,
-    # #499: the screen endpoint takes source/document_ids/coder_ids/layer_scope
-    # (J2-5), so its "Export CSV" must accept and honor the SAME scope — the
-    # old signature silently exported all-coder conversation numbers under an
-    # active filter. Bare defaults (not Query(...)) so direct-call tests get
-    # real None; appended after the existing params (positional stability).
-    source: str = "conversations",
-    document_ids: str | None = None,
-    coder_ids: str | None = None,
-    layer_scope: str | None = None,
-    # Appended LAST (bare-default convention) — 4c: observation scoping.
-    observation_ids: str | None = None,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Export code frequency table as CSV."""
-    project = _get_project_or_404(db, project_id, user.id)
-
-    parsed_coder_ids = parse_int_list(coder_ids)
-    result = get_code_frequencies(
-        db, project_id,
-        code_ids=parse_int_list(code_ids),
-        exclude_facilitator=exclude_facilitator,
-        conversation_ids=parse_int_list(conversation_ids),
-        participant_ids=parse_int_list(participant_ids),
-        source=source,
-        document_ids=parse_int_list(document_ids),
-        coder_ids=parsed_coder_ids,
-        layer_scope=layer_scope,
-        observation_ids=parse_int_list(observation_ids),
-    )
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    # Scope claim: when a coder/layer filter narrows the numbers, say so in
-    # the file itself — otherwise the CSV reads as project-wide.
-    if parsed_coder_ids or layer_scope == "consensus":
-        scope_bits = []
-        if layer_scope == "consensus":
-            scope_bits.append("consensus layer")
-        if parsed_coder_ids:
-            names = dict(
-                db.query(User.id, User.username)
-                .filter(User.id.in_(parsed_coder_ids))
-                .all()
-            )
-            scope_bits.append(
-                "coders: " + ", ".join(
-                    names.get(cid, str(cid)) for cid in parsed_coder_ids
-                )
-            )
-        writer.writerow([csv_safe(f"Scope: {'; '.join(scope_bits)}")])
-    writer.writerow([
-        "Code", "Category", "Segments", "% of Coded Segments",
-        "Conversations", "% of Conversations", "Participants", "% of Participants",
-    ])
-    for f in result["frequencies"]:
-        writer.writerow([
-            csv_safe(f["code_name"]),
-            csv_safe(f["category_name"] or ""),
-            f["segment_count"],
-            f"{f['segment_percentage']:.1f}%",
-            f["conversation_count"],
-            f"{f['conversation_percentage']:.1f}%",
-            f["participant_count"],
-            f"{f['participant_percentage']:.1f}%",
-        ])
-
-    output.seek(0)
-    filename = f"{sanitize_content_disposition(project.name)}_code_frequencies_{datetime.now().strftime('%Y%m%d')}.csv"
-
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+# #1528 D87 (1.5.9): there is no `GET /code-frequencies`. The Frequencies CSV is the Descriptives
+# summary table's rows, written in the browser from `POST …/code-analysis/source-frequencies`
+# (`frontend/src/components/qualitative-analysis/qual-summary-columns.ts::codeSummaryCsv`). This
+# file read `get_code_frequencies` — the payload #749 moved the table off — so it wrote zeros
+# from the Text source and counted outside the selection; it was deleted, not mended (#833).
 
 
 @router.get("/coded-segments")
@@ -316,10 +261,43 @@ async def export_coded_segments_csv(
     exclude_facilitator: bool = False,
     conversation_ids: str | None = None,
     participant_ids: str | None = None,
+    # #1530 D98 (1.5.9) — appended, bare default. The analysis page's Segments
+    # CSV sends its effective coder scope; the Export dialog sends it while blind.
+    coder_ids: str | None = None,
+    # #1535 D111 (1.5.9) — appended, bare default: the page's document and clip
+    # selection. Each source list is read by `parse_source_ids` (absent = every
+    # source of the kind, a present "" = none of it).
+    document_ids: str | None = None,
+    observation_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Export all coded segment data as CSV (one row per code application).
+
+    🔴 **#1535 (1.5.9) — the analysis page's *Exports › Segments CSV* is the passages the
+    page selected.** The page used to hand this route the `filterParams` it builds for
+    `/frequencies`, whose "nothing of a kind selected = every source of it" is that
+    endpoint's reading (#749), and the route had no document or clip parameter at all: one
+    selected document or clip exported every coded passage in the project, an interview
+    beside a document dropped the document, and a participant filter dropped every
+    document passage and clip. Now (D111–D115, the git-ignored
+    the internal design notes):
+
+    - **Sources (D111):** ``conversation_ids`` / ``document_ids`` / ``observation_ids``,
+      each through `parse_source_ids`. With none sent, every passage (the Export dialog's
+      file, unchanged); with any sent, each kind says for itself — absent = every source
+      of it, ``""`` = none. ``conversation_ids`` alone no longer means "turns only".
+    - **Codes (D112):** ``code_ids``, as before; the page now sends its selection.
+    - **Participants (D113):** as the screens apply the filter — an interview turn is
+      kept when its speaker is one of them; a document passage and a clip are always kept
+      (`get_source_frequencies` narrows only its turn arms). `test_coded_segments_selection_1535.py`
+      holds the file equal to the summary table, so the day the screens' rule changes the
+      test fails until this follows.
+    - **Name (D115):** ``_selection`` before the extension (and before ``_coder-<name>``)
+      whenever a parameter makes the file less than every coded passage: a source list,
+      ``code_ids``, ``participant_ids`` or ``exclude_facilitator=true``.
+    - Survey answers are never in this file (D114, the page's door says so): it is the
+      coding import's segments-arm input, keyed by *Unit ID* (`coding-import.md` §2).
 
     #616: three-parent scope — documents' codings had been silently absent since
     documents shipped (and clips would have been too) because the query
@@ -336,10 +314,18 @@ async def export_coded_segments_csv(
     researcher made is data, whoever spoke the turn; which turns were the
     interviewer's is now a COLUMN (`Is Facilitator`, appended), so an analysis
     that leaves them out can do so in the file. The parameter stays, as a filter.
+
+    #1530 D95/D97 (1.5.9): with ``coder_ids`` the rows are those coders'
+    applications and *Other Codes* names only their codes on the unit — a blind
+    coder's own row listed a colleague's code there. The file says whose by its
+    *Coder* column and its NAME, never a preamble line: the coding import reads
+    line 1 as the header (`services/coding_import.py`), and this file is its
+    input (row 49).
     """
     from sqlalchemy.orm import joinedload
 
     project = _get_project_or_404(db, project_id, user.id)
+    scope = parse_int_list(coder_ids)
 
     # Build query for code applications across ALL THREE segment parents
     # (project_scoped_segments — never a hand-rolled third or_, #616).
@@ -369,6 +355,7 @@ async def export_coded_segments_csv(
             non_consensus_filter(),
         )
     )
+    query = narrow_to_coders(query, scope)
 
     if exclude_facilitator:
         # Keeps speaker-less rows (documents/clips) by construction — the
@@ -376,17 +363,34 @@ async def export_coded_segments_csv(
         query = query.filter(
             (Speaker.is_facilitator == 0) | (Speaker.id == None)
         )
-    parsed_conv_ids = parse_int_list(conversation_ids)
-    if parsed_conv_ids:
-        # A conversation-scoped export stays conversation-scoped (unchanged
-        # filtered semantics; the unfiltered export is the completeness claim).
-        query = query.filter(Segment.conversation_id.in_(parsed_conv_ids))
+    # #1535 D111 — the sources, by #1297's rule (`parse_source_ids`). Nothing sent: no
+    # clause, so the Export dialog's query is the one it always was.
+    source_kinds = (
+        (Segment.conversation_id, parse_source_ids(conversation_ids)),
+        (Segment.document_id, parse_source_ids(document_ids)),
+        (Segment.observation_id, parse_source_ids(observation_ids)),
+    )
+    source_selected = any(ids is not None for _, ids in source_kinds)
+    if source_selected:
+        # Absent = every source of the kind; a present "" parses to [] and `.in_([])` is
+        # SQLAlchemy's always-false empty IN — none of it.
+        query = query.filter(or_(*(
+            parent.isnot(None) if ids is None else parent.in_(ids)
+            for parent, ids in source_kinds
+        )))
     parsed_code_ids = parse_int_list(code_ids)
     if parsed_code_ids:
         query = query.filter(CodeApplication.code_id.in_(parsed_code_ids))
     parsed_part_ids = parse_int_list(participant_ids)
     if parsed_part_ids:
-        query = query.filter(Speaker.participant_id.in_(parsed_part_ids))
+        # #1535 D113 — the screens' reading, which since #1536 (D116/D117) is ONE rule
+        # (`services/participant_filter.py`): a turn by its speaker's participant, a document
+        # passage by the participant the document is linked to, a clip never. Held equal to the
+        # screens by `test_participant_filter_1536.py` and `test_coded_segments_selection_1535.py`.
+        # `project_scoped_segments` (above) already outer-joins Document; Speaker is joined here.
+        query = query.filter(segment_passage_clause(parsed_part_ids))
+    # #1535 D115 — decided from the route's own parameters, so no client can forget it.
+    narrowed = bool(source_selected or parsed_code_ids or parsed_part_ids or exclude_facilitator)
 
     query = query.order_by(
         Code.name,
@@ -411,17 +415,16 @@ async def export_coded_segments_csv(
     # repeated a name once per coder and could include consensus rows).
     other_codes_map: dict[int, list[str]] = defaultdict(list)
     if seg_ids:
-        other_apps = (
+        other_apps = narrow_to_coders(
             db.query(CodeApplication.segment_id, Code.name)
             .join(Code, CodeApplication.code_id == Code.id)
             .filter(
                 CodeApplication.segment_id.in_(seg_ids),
                 Code.is_active == True,
                 non_consensus_filter(),
-            )
-            .distinct()
-            .all()
-        )
+            ),
+            scope,
+        ).distinct().all()
         for sid, cname in other_apps:
             other_codes_map[sid].append(cname)
 
@@ -554,7 +557,10 @@ async def export_coded_segments_csv(
         ])
 
     output.seek(0)
-    filename = f"{sanitize_content_disposition(project.name)}_coded_segments_{datetime.now().strftime('%Y%m%d')}.csv"
+    filename = (
+        f"{sanitize_content_disposition(project.name)}_coded_segments_{datetime.now().strftime('%Y%m%d')}"
+        f"{'_selection' if narrowed else ''}{coder_scope_filename_suffix(db, scope)}.csv"
+    )
 
     return StreamingResponse(
         iter([output.getvalue()]),
@@ -564,7 +570,7 @@ async def export_coded_segments_csv(
 
 
 @router.get("/code-cooccurrence")
-async def export_code_cooccurrence_csv(
+def export_code_cooccurrence_csv(  # def, not async: #1527 D89 — test_endpoint_event_loop.py::MUST_BE_SYNC
     project_id: int,
     code_ids: str | None = None,
     exclude_facilitator: bool = True,
@@ -583,47 +589,60 @@ async def export_code_cooccurrence_csv(
     layer_scope: str | None = None,
     # Appended LAST (bare-default convention) — 4c: observation scoping.
     observation_ids: str | None = None,
+    # #1527 D86 — the matrix the screen shows: its LEVEL and its question selection.
+    # Until 1.5.9 this file was always the unit-level matrix over every question.
+    level: str = "segment",
+    text_column_ids: str | None = None,
+    # #1545 (1.6.0): the panel's description of the chosen filter values, for the scope line —
+    # the server cannot derive it from `participant_ids` (D124). Appended LAST (bare default).
+    participant_filter_label: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Export code co-occurrence matrix as CSV."""
     project = _get_project_or_404(db, project_id, user.id)
+    if level not in ("segment", "source"):
+        raise HTTPException(status_code=400, detail="level must be 'segment' or 'source'")
 
     parsed_coder_ids = parse_int_list(coder_ids)
+    parsed_participant_ids = parse_int_list(participant_ids)
+    # The screen's own dispatch and source reading (#1527 D84, D86): one function, so
+    # the file and the figure cannot count differently.
     result = get_code_cooccurrence(
         db, project_id,
         code_ids=parse_int_list(code_ids),
         exclude_facilitator=exclude_facilitator,
-        conversation_ids=parse_int_list(conversation_ids),
-        participant_ids=parse_int_list(participant_ids),
+        conversation_ids=parse_source_ids(conversation_ids),
+        participant_ids=parsed_participant_ids,
         source=source,
-        document_ids=parse_int_list(document_ids),
+        document_ids=parse_source_ids(document_ids),
         coder_ids=parsed_coder_ids,
         layer_scope=layer_scope,
-        observation_ids=parse_int_list(observation_ids),
+        observation_ids=parse_source_ids(observation_ids),
+        text_column_ids=parse_source_ids(text_column_ids),
+        level=level,
     )
 
     output = io.StringIO()
     writer = csv.writer(output)
 
-    # Scope claim: when a coder/layer filter narrows the numbers, say so in
-    # the file itself — otherwise the CSV reads as project-wide (#499/#512).
-    if parsed_coder_ids or layer_scope == "consensus":
-        scope_bits = []
-        if layer_scope == "consensus":
-            scope_bits.append("consensus layer")
-        if parsed_coder_ids:
-            names = dict(
-                db.query(User.id, User.username)
-                .filter(User.id.in_(parsed_coder_ids))
-                .all()
-            )
-            scope_bits.append(
-                "coders: " + ", ".join(
-                    names.get(cid, str(cid)) for cid in parsed_coder_ids
-                )
-            )
-        writer.writerow([csv_safe(f"Scope: {'; '.join(scope_bits)}")])
+    # The file's first line says the rule its pairs were counted by (#1335, D47
+    # — every file, scoped or not), and, when a coder/layer or participant filter
+    # narrows the numbers, the scope too — otherwise the CSV reads as project-wide
+    # (#499/#512; the participant filter #1545). One builder for every such file.
+    scope = file_scope_line(
+        db, coder_ids=parsed_coder_ids, layer_scope=layer_scope,
+        participant_ids=parsed_participant_ids,
+        participant_filter_label=participant_filter_label,
+    )
+    # #1527 D86: at the source level every cell is a number of SOURCES, and a file has no
+    # caption to say so — the screen's caption does.
+    rule = (
+        f"{COOCCURRENCE_SOURCE_LEVEL_NOTE} {COOCCURRENCE_RULE}" if level == "source"
+        else COOCCURRENCE_RULE
+    )
+    first_line = f"{scope} {rule}" if scope else rule
+    writer.writerow([csv_safe(first_line)])
 
     # Header row: empty cell + code names
     header = [""] + [csv_safe(c["name"]) for c in result["codes"]]

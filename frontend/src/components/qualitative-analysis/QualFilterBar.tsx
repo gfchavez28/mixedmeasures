@@ -1,14 +1,34 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { X, Check, ChevronDown } from 'lucide-react'
 import { SELECTED_SEGMENT } from '@/lib/selection'
-import { useQuery } from '@tanstack/react-query'
-import { codeAnalysisApi, type DemographicFilter } from '@/lib/api'
+import type { DemographicFilter } from '@/lib/api'
+import {
+  NO_PARTICIPANT_MATCHES_VALUES, PARTICIPANT_FILTER_RULE, filterApplied, givenFilterNote,
+  type FilterValues, type ParticipantFilterState,
+} from '@/lib/participant-filter'
 
+/**
+ * The analysis page's *Filters* panel — CONTROLLED since #1537 (D122–D124, 1.6.0).
+ *
+ * It holds no filter of its own: the page decides what is applied (`participantFilterState`)
+ * and holds the chosen values (`useQualitativeAnalysis`'s `filterChoice`), because this panel
+ * mounts only while *Filters* is open. Before, the values were its local state and an effect
+ * rewrote the applied list from them on every mount and every change of the list — so
+ * reopening the panel cleared the researcher's filter, a filter from a link or a saved analysis
+ * was cleared the moment the panel opened, and a saved analysis loaded while it was open was
+ * overwritten with the panel's own choice. It writes only on a researcher's act.
+ */
 interface QualFilterBarProps {
-  projectId: number
-  participantIds: number[]
-  onParticipantIdsChange: (ids: number[]) => void
+  options: readonly DemographicFilter[]
+  state: ParticipantFilterState
+  /** A researcher chose or removed a value — the page resolves and applies it. */
+  onChooseValues: (values: FilterValues) => void
+  /** *Clear all* / *Clear filter*. */
+  onClear: () => void
 }
+
+const NO_VALUES: FilterValues = {}
+const EMPTY_SET: ReadonlySet<string> = new Set()
 
 function FilterDropdown({
   label,
@@ -18,7 +38,7 @@ function FilterDropdown({
 }: {
   label: string
   options: { value: string; label: string }[]
-  selectedValues: Set<string>
+  selectedValues: ReadonlySet<string>
   onChange: (values: Set<string>) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -37,19 +57,23 @@ function FilterDropdown({
 
   return (
     <div className="relative" ref={ref}>
+      {/* #1537 D127 — the trigger says whether its list is open, and its count is part of a
+          name with a space in it ("Group, 1 chosen"), not glued on ("Group1", #908's shape). */}
       <button
         className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs border rounded-md hover:bg-mm-surface-hover transition-colors ${
           activeCount > 0 ? SELECTED_SEGMENT : 'border-mm-border-medium text-mm-text-secondary'
         }`}
         onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        aria-label={activeCount > 0 ? `${label}, ${activeCount} chosen` : label}
       >
         {label}
         {activeCount > 0 && (
-          <span className="bg-mm-blue/20 text-mm-blue-text text-[11px] rounded-full px-1.5 py-0.5 leading-none">
+          <span className="bg-mm-blue/20 text-mm-blue-text text-[11px] rounded-full px-1.5 py-0.5 leading-none" aria-hidden="true">
             {activeCount}
           </span>
         )}
-        <ChevronDown className="w-3 h-3" />
+        <ChevronDown className="w-3 h-3" aria-hidden="true" />
       </button>
       {open && (
         <div className="absolute top-full left-0 mt-1 bg-mm-surface border rounded-lg shadow-lg z-50 min-w-[200px] max-h-64 overflow-y-auto py-1">
@@ -59,6 +83,8 @@ function FilterDropdown({
               <button
                 key={opt.value}
                 className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-mm-surface-hover text-left"
+                // #1537 D127 — a chosen value was a check icon only.
+                aria-pressed={selected}
                 onClick={() => {
                   const next = new Set(selectedValues)
                   if (selected) next.delete(opt.value)
@@ -68,7 +94,7 @@ function FilterDropdown({
               >
                 <span className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${
                   selected ? 'bg-mm-blue-fill border-mm-blue-fill' : 'border-mm-border-medium'
-                }`}>
+                }`} aria-hidden="true">
                   {selected && <Check className="w-3 h-3 text-mm-on-fill" />}
                 </span>
                 <span className="truncate">{opt.label}</span>
@@ -84,93 +110,75 @@ function FilterDropdown({
   )
 }
 
-export default function QualFilterBar({
-  projectId,
-  participantIds,
-  onParticipantIdsChange,
-}: QualFilterBarProps) {
-  const [demoSelections, setDemoSelections] = useState<Record<string, Set<string>>>({})
+export default function QualFilterBar({ options, state, onChooseValues, onClear }: QualFilterBarProps) {
+  // The values shown are the page's: a list with no values behind it (D124) shows none.
+  const values = state.kind === 'values' || state.kind === 'nobody' ? state.values : NO_VALUES
 
-  const { data: demoFilterData } = useQuery({
-    queryKey: ['demographic-filters', projectId],
-    queryFn: () => codeAnalysisApi.demographicFilters(projectId),
-    enabled: !!projectId,
-  })
+  const handleChange = useCallback((subtype: string) => (vals: Set<string>) => {
+    onChooseValues({ ...values, [subtype]: vals })
+  }, [onChooseValues, values])
 
-  const demographicFilters: DemographicFilter[] = useMemo(() => demoFilterData?.filters ?? [], [demoFilterData?.filters])
-
-  // Compute participant IDs from demographic selections
-  useEffect(() => {
-    const activeSubtypes = Object.entries(demoSelections).filter(([, vals]) => vals.size > 0)
-    if (activeSubtypes.length === 0) {
-      if (participantIds.length > 0) onParticipantIdsChange([])
-      return
-    }
-
-    const perSubtype: Set<number>[] = activeSubtypes.map(([subtype, selectedVals]) => {
-      const filter = demographicFilters.find(f => f.subtype === subtype)
-      if (!filter) return new Set<number>()
-      const union = new Set<number>()
-      for (const val of filter.values) {
-        if (selectedVals.has(val.value)) {
-          for (const pid of val.participant_ids) union.add(pid)
-        }
-      }
-      return union
-    })
-
-    let result = perSubtype[0]
-    for (let i = 1; i < perSubtype.length; i++) {
-      const next = new Set<number>()
-      for (const pid of result) {
-        if (perSubtype[i].has(pid)) next.add(pid)
-      }
-      result = next
-    }
-
-    const sorted = Array.from(result).sort((a, b) => a - b)
-    const prevStr = participantIds.join(',')
-    const nextStr = sorted.join(',')
-    if (prevStr !== nextStr) {
-      onParticipantIdsChange(sorted)
-    }
-  }, [demoSelections, demographicFilters, onParticipantIdsChange, participantIds])
-
-  const handleDemoChange = useCallback((subtype: string) => (vals: Set<string>) => {
-    setDemoSelections(prev => ({ ...prev, [subtype]: vals }))
-  }, [])
-
-  const totalActiveFilters = Object.values(demoSelections).reduce((sum, s) => sum + s.size, 0)
-
-  const clearAll = useCallback(() => {
-    setDemoSelections({})
-  }, [])
-
-  if (demographicFilters.length === 0) return null
+  if (options.length === 0) return null
 
   return (
-    <div className="space-y-2">
-      {demographicFilters.map(filter => (
-        <FilterDropdown
-          key={filter.subtype}
-          label={filter.label}
-          options={filter.values.map(v => ({
-            value: v.value,
-            label: `${v.value} (${v.count})`,
-          }))}
-          selectedValues={demoSelections[filter.subtype] || new Set()}
-          onChange={handleDemoChange(filter.subtype)}
-        />
-      ))}
+    <div>
+      <div className="space-y-2">
+        {options.map(filter => (
+          <FilterDropdown
+            key={filter.subtype}
+            label={filter.label}
+            options={filter.values.map(v => ({
+              value: v.value,
+              label: `${v.value} (${v.count})`,
+            }))}
+            selectedValues={values[filter.subtype] ?? EMPTY_SET}
+            onChange={handleChange(filter.subtype)}
+          />
+        ))}
+      </div>
 
-      {totalActiveFilters > 0 && (
+      {/* #1538 D125 — values no participant holds together. The status region is ALWAYS
+          mounted (and never display:none) so the sentence is announced when it appears — a
+          region that mounts with its text, or is unhidden with it, is not reliably read. Empty,
+          it has no height and no margin. */}
+      <p
+        role="status"
+        className={state.kind === 'nobody' ? 'mt-2 text-xs text-mm-text-secondary leading-snug px-1' : undefined}
+        data-testid="participant-filter-nobody"
+      >
+        {state.kind === 'nobody' ? NO_PARTICIPANT_MATCHES_VALUES : null}
+      </p>
+
+      {(state.kind === 'values' || state.kind === 'nobody') && (
         <button
-          className="inline-flex items-center gap-1 text-xs text-mm-text-muted hover:text-mm-text px-1.5 py-1"
-          onClick={clearAll}
+          className="mt-2 inline-flex items-center gap-1 text-xs text-mm-text-muted hover:text-mm-text px-1.5 py-1"
+          onClick={onClear}
         >
-          <X className="w-3 h-3" />
+          <X className="w-3 h-3" aria-hidden="true" />
           Clear all
         </button>
+      )}
+
+      {/* #1537 D124 — a list no chosen values produced (a link, a reload, a saved analysis) is
+          SAID, never cleared: opening this panel used to drop it. */}
+      {state.kind === 'given' && (
+        <div className="mt-2 px-1 space-y-1" data-testid="participant-filter-given">
+          <p className="text-xs text-mm-text-secondary leading-snug">{givenFilterNote(state.ids.length)}</p>
+          <button
+            className="inline-flex items-center gap-1 text-xs text-mm-text-muted hover:text-mm-text px-1.5 py-1 -ml-1.5"
+            onClick={onClear}
+          >
+            <X className="w-3 h-3" aria-hidden="true" />
+            Clear filter
+          </button>
+        </div>
+      )}
+
+      {/* #1536 (D119): what the filter counts, while one is applied — the server's rule, said. */}
+      {filterApplied(state) && (
+        <p className="mt-2 text-xs text-mm-text-muted leading-snug px-1" data-testid="participant-filter-rule">
+          {PARTICIPANT_FILTER_RULE}
+        </p>
       )}
     </div>
   )

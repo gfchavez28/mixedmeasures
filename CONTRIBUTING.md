@@ -8,11 +8,15 @@ but please read this guide first — a little alignment up front saves everyone 
 
 - **Open an issue first** for anything beyond a small fix. Describe the problem or
   the proposed change and wait for a thumbs-up before investing in a large PR. The
-  roadmap is opinionated, and not every good idea fits v1.0's scope.
+  roadmap is opinionated, and not every good idea fits its scope.
+- **This repository is a sync target.** Its tree is regenerated from a private
+  working repository, so a change merged here directly would be overwritten by the
+  next sync; dependency bumps are made in the private repository and arrive with the
+  next release.
 - **Scope guardrails.** Two things are deliberately *out* of the shipping product
   and PRs adding them won't be merged:
   - **AI / LLM features.** The shipping product currently has no AI, and that's
-    deliberate for v1.0 — don't add model calls or AI-assisted behavior to product
+    deliberate — don't add model calls or AI-assisted behavior to product
     code or copy in a PR. If AI is ever added it'll be a maintainer-led roadmap
     decision (opt-in and audit-trailed by design), not an unsolicited contribution.
   - **Outbound network calls.** The app is local-first and works fully offline: no
@@ -65,7 +69,7 @@ Run these before opening a PR; a contribution should leave them all green.
 
 | Check | Command (from) | Notes |
 |-------|----------------|-------|
-| Backend tests | `python -m pytest tests/` (`backend/`, venv active) | The full suite takes a few minutes. |
+| Backend tests | `python -m pytest tests/` (`backend/`, venv active) | A large suite — run a single file while you iterate (below). Tests that check numbers against R skip when `Rscript` is absent; CI installs R and sets `MM_REQUIRE_R=1`, which turns a missing R into a failure. |
 | Frontend tests | `npm test` (`frontend/`) | Vitest, one-shot. |
 | Frontend lint | `npm run lint` (`frontend/`) | ESLint flat config; should pass clean. |
 | Frontend typecheck/build | `npm run build` (`frontend/`) | `tsc` gates the build — a type error fails it. |

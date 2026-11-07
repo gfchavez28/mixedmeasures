@@ -16,7 +16,9 @@ import {
   isQualitativeMaterialConfig,
 } from '@/lib/material-kind'
 import { extractComputeParams, staleComputedInputs } from '../inline-chart-params'
-import { figureDrift, type FigureFingerprint } from '../figure-baseline'
+import {
+  CURRENT_FIGURE_EPOCH, figureDrift, figurePredatesBaseline, type FigureFingerprint,
+} from '../figure-baseline'
 import { variableViewPath } from '@/lib/dataset-routes'
 
 export default function ChartEmbedView({ node, updateAttributes, deleteNode, selected, editor }: NodeViewProps) {
@@ -38,7 +40,7 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
   const isEditable = editor?.isEditable ?? true
   const {
     materialId, config, title, materialTag, tagNote,
-    figureHash, figureHeadline, figureStampedAt,
+    figureHash, figureHeadline, figureStampedAt, figureEpoch,
   } = node.attrs
 
   const parsedContent = useMemo(() => {
@@ -128,6 +130,9 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
    * only ever claims "changed since <date>") and is what "stamp at insert"
    * means for a node whose data arrives after it mounts. It flows through
    * `updateAttributes` like any edit, so the existing save path carries it.
+   * 🔴 **Except (#1323 D12) an embed placed before its chart kind had a
+   * fingerprint** (`figurePredatesBaseline`): its figures are known to have
+   * changed, so it is NOT seeded, and the notice speaks until it is reviewed.
    *
    * ⚠️ **`useState` + a ref, not a bare setter.** The callback fires on every
    * data change, and an unconditional `setState` here re-renders in a loop —
@@ -141,17 +146,24 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
   const seededRef = useRef(false)
   useEffect(() => {
     if (!figure || figureHash || seededRef.current) return
+    // #1323 D12: an embed placed before its kind had a fingerprint must NOT adopt
+    // today's figures — they are known to have changed, and the drift notice below
+    // says so until the researcher marks them reviewed.
+    if (figurePredatesBaseline({ hash: figureHash, epoch: figureEpoch }, figure)) return
     seededRef.current = true
     updateAttributes({
       figureHash: figure.hash,
       figureHeadline: figure.headline,
       figureStampedAt: new Date().toISOString().slice(0, 10),
     })
-  }, [figure, figureHash, updateAttributes])
+  }, [figure, figureHash, figureEpoch, updateAttributes])
 
   const drift = useMemo(
-    () => figureDrift({ hash: figureHash, headline: figureHeadline, stampedAt: figureStampedAt }, figure),
-    [figureHash, figureHeadline, figureStampedAt, figure],
+    () => figureDrift(
+      { hash: figureHash, headline: figureHeadline, stampedAt: figureStampedAt, epoch: figureEpoch },
+      figure,
+    ),
+    [figureHash, figureHeadline, figureStampedAt, figureEpoch, figure],
   )
 
   const acceptFigures = useCallback(() => {
@@ -160,6 +172,7 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
       figureHash: figure.hash,
       figureHeadline: figure.headline,
       figureStampedAt: new Date().toISOString().slice(0, 10),
+      figureEpoch: CURRENT_FIGURE_EPOCH,
     })
   }, [figure, updateAttributes])
 
@@ -264,7 +277,15 @@ export default function ChartEmbedView({ node, updateAttributes, deleteNode, sel
                 <div className="flex-1 min-w-0">
                   <span className="font-medium">The figures have changed</span>
                   {drift.stampedAt ? ` since ${drift.stampedAt}.` : '.'}
-                  {drift.was && drift.now && ` ${drift.was} is now ${drift.now}.`}{' '}
+                  {/* #1529 D94 — only when the headline MOVED: a change that moves no headline
+                      (a withheld share; counts that keep the coded total) read "5 coded is now
+                      5 coded", found by driving. The marker then says only that the figures
+                      changed, which is what D94 decided it should say. */}
+                  {drift.was && drift.now && drift.was !== drift.now && ` ${drift.was} is now ${drift.now}.`}
+                  {/* #1323 D12: an embed placed before its kind had a fingerprint has no
+                      "was" — the note says what changed, and the headline what it shows now. */}
+                  {drift.note && ` ${drift.note}`}
+                  {!drift.was && drift.now && ` It now shows ${drift.now}.`}{' '}
                   Check the text around this chart still says what the data says.{' '}
                   <button
                     type="button"

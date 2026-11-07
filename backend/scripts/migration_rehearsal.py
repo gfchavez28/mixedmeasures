@@ -27,7 +27,7 @@ migrations (RELEASING §4c).
 
 Usage (from backend/, venv active, sqlcipher3 installed):
 
-    python scripts/migration_rehearsal.py --from-revision f5b2d8c47e13   # v1.5.7
+    python scripts/migration_rehearsal.py --from-revision b5d1f7a3c9e2   # v1.5.8
 
 `--from-revision` is the Alembic head of the PREVIOUS release. Find it with:
 
@@ -132,50 +132,49 @@ def _expected_after(table: str, cols: list[str], rows: list[list[str]]) -> list[
 # correctness. A DATA-REPAIR migration inverts that — the rows it is supposed to
 # rewrite MUST move, and a corpus on which it no-ops proves nothing while exiting 0.
 #
-# ── 1.5.8 (rehearsed 2026-10-25) — NO REBUILD: a backfill, a new table, a REPAIR ──
+# ── 1.6.0 (rehearsed 2026-11-07e) — NO REBUILD: an index and a data REPAIR ──────
 #
-# `--from-revision f5b2d8c47e13` — v1.5.7's head (`d1ddca8b`). THREE migrations, and
-# none rebuilds a table (each is ADD COLUMN, CREATE TABLE / INDEX, or UPDATE):
+# `--from-revision b5d1f7a3c9e2` — v1.5.8's head (`0dac5206`). TWO migrations, and
+# neither rebuilds a table:
 #
-#   c6e2a8d41f97  users.uuid — every row BACKFILLED, then a UNIQUE index     (#1352)
-#   a7c3e9f1d2b4  removal_tombstones (a new table) + a plain index          (#1190)
-#   b5d1f7a3c9e2  dataset_columns.stale := 1 on a quoted-answer formula     (#1368 D4)
+#   0a5c5d4ceb29  ix_code_applications_code_user on (code_id, user_id), NOT unique (#1463)
+#   d4e8a1c7b2f6  consensus_stale_targets += every turn of a segment group whose
+#                 turns carry codings from two or more coders                     (#1597)
 #
-# 🔴 **TWO OF THE THREE MUST CHANGE ROWS, so "nothing changed" is the wrong assertion
-# for this cut twice over** (RELEASING §4c: a gate whose only assertion is invariance
-# is inert against a migration whose job is to change something):
+# 🔴 **The repair MUST add rows, so "nothing changed" is the wrong assertion for it**
+# (RELEASING §4c). `QUEUE_EXPECTED` is the set of turns that must arrive queued, and the
+# seed builds each case the predicate decides: a group whose two coders coded DIFFERENT
+# turns (`G_SPLIT`, the state 1.5.8's per-turn rule and 1.6.0's group rule disagree
+# about — queued, both turns), a group ONE coder coded (`G_ONE_CODER` — not queued: no
+# rule reaches consensus there), and an UNGROUPED turn two coders and a stored consensus
+# row sit on (`SEG_UNGROUPED` — not queued: the per-turn rule already decides it). One of
+# `G_SPLIT`'s turns is ALREADY queued (`SEG_ALREADY_QUEUED`), so a repair without its
+# `NOT EXISTS` is refused by the marker table's partial unique index, and that marker's
+# row must come through unchanged. Every `code_applications` row stays as it was BY ID
+# (the full-row comparison): the repair marks, the sweep recomputes, never the revision.
 #
-#   * `users.uuid` MUST arrive SET on every pre-existing coder — the person, the
-#     MACHINE coder and an ARCHIVED colleague — each DISTINCT, and each a value the
-#     `.mmproject` import reads as an identity (`_file_coder_uuid`: a non-empty string
-#     of at most 36 characters; anything else is NO identity). A coder left without
-#     one is matched by NAME at the next merge, which is #1352: every install's first
-#     coder is "Researcher", so two people became one coder. A SHARED value is the
-#     same defect the other way round (the unique index refuses the upgrade outright).
-#     NULL stays LEGAL afterwards — a row written around the ORM default has no
-#     identity, and the import then falls back to the name rules — so two coders
-#     without one must still both be accepted.
-#   * the repair marks EXACTLY the computed columns whose formula compares a column
-#     with a quoted text, on either side. `REPAIR_STALE` names every computed column
-#     the seed writes with the `stale` it must arrive holding: the two shapes marked, a
-#     numeric comparison left alone, and an arithmetic formula that was ALREADY stale
-#     still stale. Its stored CELLS must not move — recomputing is the evaluator's job,
-#     on the researcher's click — so each keeps the old evaluator's values.
-#   * `removal_tombstones` MUST arrive EMPTY. A tombstone says "a withdrawal removed
-#     this", so a fabricated one makes the next merge or import leave out data nobody
-#     withdrew. Its index must NOT be unique: one project withdraws many participants.
+# The index must not exist BEFORE the upgrade (`NEW_INDEXES` is checked against the
+# seed's own index list), must cover exactly `(code_id, user_id)` in that order, and must
+# NOT be unique — two coders coding one code is the ordinary case.
 #
-# ── v1.5.3's fixtures CHANGE SIDES ────────────────────────────────────────────
+# ── 1.5.8's fixtures CHANGE SIDES ─────────────────────────────────────────────
 #
-# 🔴 `f5b2d8c47e13` IS `--from-revision`, so `code_sets`, `codes.code_set_id` and
-# `users.machine_provenance` exist BEFORE these migrations start, and the v1.5.3 cut's
-# "they arrive NULL / EMPTY" would pass VACUOUSLY. **MEASURED: the block as the v1.5.3
-# cut left it exited 0 against this cut's repair made a no-op, its backfill skipped,
-# and a tombstone fabricated for every project.** They are seeded with REAL values instead — a set with `exhaustive` RAISED
-# and two member codes, a machine coder with a recorded provenance — and asserted
-# invariant by the full-row comparison. Its behavioural checks (`exhaustive` defaults
-# to 0, a set's uuid is unique, deleting a set leaves its codes and their coding) stay,
-# as coverage of the BUILT database rather than as claims about this cut.
+# 🔴 `b5d1f7a3c9e2` IS `--from-revision`, so `users.uuid`, `removal_tombstones` and #1368
+# D4's repair all ran BELOW this cut, on the empty database the build makes — and the 1.5.8
+# block's "arrives SET / EMPTY / MARKED" would pass VACUOUSLY (an IDENTITY check over
+# NULL uuids would even FAIL for the wrong reason: raw SQL writes none). They are seeded
+# at REAL values instead and asserted invariant: every coder with a distinct uuid, one
+# withdrawal record, and the four computed columns at their POST-repair `stale` flags.
+# The 1.5.8 behavioural checks (two coders cannot share a uuid, two may hold none, a
+# project takes many withdrawals) stay, as coverage of the BUILT database.
+#
+# ── v1.5.3's fixtures ─────────────────────────────────────────────────────────
+#
+# `code_sets`, `codes.code_set_id` and `users.machine_provenance` sit further below and are
+# seeded with REAL values — a set with `exhaustive` RAISED and two member codes, a machine
+# coder with a recorded provenance — and asserted invariant by the full-row comparison. Their
+# behavioural checks (`exhaustive` defaults to 0, a set's uuid is unique, deleting a set
+# leaves its codes and their coding) stay as coverage of the BUILT database.
 #
 # ⚠️ **Not covered here: #1362's change to two OLD revisions** (`d7a2f3b8c1e9`,
 # `e8b3c1d65a04`, each backfill now one statement per table). They sit below
@@ -220,15 +219,16 @@ NOTE_SEQ_INVARIANT = [
 DC_SOURCE, DC_TARGET, DC_EQUIV, DC_PLAIN = 41, 47, 53, 61
 DC_SCORE = 67
 
-# #1368 D4's repair (`b5d1f7a3c9e2`): every computed column the seed writes — its
-# formula, the `stale` it is seeded at, and the `stale` it must arrive holding. A repair
-# that marked every computed column, or none, or only one side of the comparison, or
-# WROTE the flag instead of raising it (un-marking a column already out of date), gets
-# at least one of these wrong.
+# #1368 D4's repair (`b5d1f7a3c9e2`) ran BELOW this cut's --from-revision, so every
+# computed column is seeded at the `stale` the repair LEFT — the two quoted-answer shapes
+# marked, the numeric comparison not, the arithmetic formula still out of date — and must
+# arrive holding the same (formula, seeded, after: equal by construction this cut).
+# 1.6.0's migrations must not touch a flag: a repair that re-ran over them, or a migration
+# that cleared them, gets one of these wrong.
 DC_QUOTED, DC_QUOTED_MIRRORED, DC_NUMERIC_CMP, DC_ALREADY_STALE = 71, 73, 79, 83
 REPAIR_STALE = {
-    DC_QUOTED:          ('[Trust] == "Agree"',                0, 1),
-    DC_QUOTED_MIRRORED: ('IF("Agree" != ( [Trust] ), 1, 0)',  0, 1),
+    DC_QUOTED:          ('[Trust] == "Agree"',                1, 1),
+    DC_QUOTED_MIRRORED: ('IF("Agree" != ( [Trust] ), 1, 0)',  1, 1),
     DC_NUMERIC_CMP:     ('[Trust] == 4',                      0, 0),
     DC_ALREADY_STALE:   ('[Trust] * 2',                       1, 1),
 }
@@ -290,6 +290,38 @@ NULL_IDENTITY_CODERS = (21, 22)
 # participant's uuid, one by a hash of the identifier (`tombstones.identifier_hash`).
 TOMBSTONE_PROJECT_UUID = "7b0a7b0a-0000-4000-8000-000000001190"
 
+# 1.5.8's `users.uuid` (`c6e2a8d41f97`), BELOW --from-revision now: every seeded coder
+# carries a distinct identity at a real value, asserted invariant.
+CODER_UUIDS = {
+    1: "c0de4001-0000-4000-8000-000000000001",   # LEAD_CODER
+    4: "c0de4004-0000-4000-8000-000000000004",   # MACHINE_CODER
+    9: "c0de4009-0000-4000-8000-000000000009",   # ARCHIVED_CODER
+    6: "c0de4006-0000-4000-8000-000000000006",   # TEAM_CODER (1.6.0's second voter)
+    30: "c0de4030-0000-4000-8000-000000000030",  # CONSENSUS_CODER (the system coder)
+}
+# 1.5.8's `removal_tombstones` (`a7c3e9f1d2b4`), BELOW --from-revision now: one withdrawal
+# record a 1.5.8 install holds, asserted invariant — a migration that cleared it would let
+# the next merge bring the person back.
+TOMBSTONE_SEEDED_ID = 3
+
+# ── 1.6.0's repair (`d4e8a1c7b2f6`, #1597) — the fixture its predicate decides ─────
+#
+# A second PERSON (the voter a group needs), the global consensus coder, and three cases:
+#   G_SPLIT      turns SEG_SPLIT_A (the lead coded it) and SEG_ALREADY_QUEUED (the
+#                colleague coded it) — two coders on different turns: QUEUED, both turns.
+#                SEG_ALREADY_QUEUED carries a marker from before the upgrade.
+#   G_ONE_CODER  turns SEG_ONE_A and SEG_ONE_B, both coded by the lead only: NOT queued.
+#   SEG_UNGROUPED  no group; the lead, the colleague and a stored consensus row: NOT queued.
+TEAM_CODER, CONSENSUS_CODER = 6, 30
+G_SPLIT, G_ONE_CODER = 2, 4
+SEG_SPLIT_A, SEG_ALREADY_QUEUED, SEG_ONE_A, SEG_ONE_B, SEG_UNGROUPED = 40, 41, 43, 44, 47
+APP_SPLIT_A, APP_SPLIT_B, APP_ONE_A, APP_ONE_B = 21, 22, 23, 24
+APP_UNGROUPED_LEAD, APP_UNGROUPED_TEAM, APP_UNGROUPED_CONSENSUS = 25, 26, 27
+MARKER_SEEDED = 5
+# The turns that must hold a marker after the upgrade — every turn of G_SPLIT, and nothing
+# else. The seeded marker on SEG_ALREADY_QUEUED is one of them, and must be the SAME row.
+QUEUE_EXPECTED = (SEG_SPLIT_A, SEG_ALREADY_QUEUED)
+
 # This cut rebuilds NO table. The tables below are compared before and after anyway:
 # it costs nothing, and they are the parents of data.
 #
@@ -297,7 +329,8 @@ TOMBSTONE_PROJECT_UUID = "7b0a7b0a-0000-4000-8000-000000001190"
 # leaves a constraint unenforced and nothing else looks wrong.
 INDEXED_TABLES = (
     "codes", "code_applications", "code_category_memberships", "code_sets", "users",
-    "documents", "datasets", "dataset_columns",
+    "documents", "datasets", "dataset_columns", "removal_tombstones",
+    "consensus_stale_targets", "segment_groups", "segments",
 )
 # `PRAGMA foreign_key_list` before and after.
 FK_TABLES = ("codes", "code_applications", "code_category_memberships", "code_sets")
@@ -309,10 +342,13 @@ FULL_ROW_TABLES = (
     "codes", "users", "code_applications", "code_category_memberships",
     "code_categories", "code_equivalence_groups", "code_sets",
     "documents", "datasets", "dataset_columns", "dataset_rows",
+    "removal_tombstones", "segment_groups", "segments",
 )
 # (table, column) -> {row id: the value the repair must leave there}. The full-row
 # comparison expects these too, so a repair that moved nothing — or moved a row it
-# must not — fails there as well as in its own check below.
+# must not — fails there as well as in its own check below. 1.6.0's repair rewrites no
+# existing row (it only ADDS markers, checked by `QUEUE_EXPECTED`), and #1368 D4's flags
+# are seeded post-repair, so nothing here moves this cut.
 EXPECTED_REWRITES = {
     ("dataset_columns", "stale"): {cid: after for cid, (_, _, after) in REPAIR_STALE.items()},
 }
@@ -323,30 +359,20 @@ EXPECTED_REWRITES = {
 # identity — `project_portability._file_coder_uuid` takes a non-empty string of at most
 # 36 characters and treats anything else as NO identity.
 IDENTITY = object()
-NEW_COLUMNS = {
-    "users": {"uuid": (
-        IDENTITY,
-        "a coder without one is matched by NAME at the next merge, which is #1352: every "
-        "install's first coder is \"Researcher\", so two people would become one")},
-}
-# New tables that must arrive EMPTY, and why.
-NEW_TABLES_EMPTY = {
-    "removal_tombstones": "a tombstone says a withdrawal removed something, so a "
-                          "fabricated one makes the next merge or import leave out data "
-                          "nobody withdrew",
-}
+# This cut adds no column (1.5.8's `users.uuid` is seeded at real values above).
+NEW_COLUMNS: dict = {}
+# New tables that must arrive EMPTY, and why. This cut adds none (1.5.8's
+# `removal_tombstones` is seeded with a real withdrawal above).
+NEW_TABLES_EMPTY: dict = {}
 # New FKs: (table, column) -> (referenced table, ON DELETE). This cut adds none.
 NEW_FKS: dict = {}
-# Indexes this cut must CREATE: name -> (table, columns, must it be UNIQUE?, why).
+# Indexes this cut must CREATE: name -> (table, columns, must it be UNIQUE?, why). Each
+# must also be ABSENT before the upgrade, or its arrival proves nothing.
 NEW_INDEXES = {
-    "ix_users_uuid": (
-        "users", ("uuid",), True,
-        "two coders could hold one identity, and a merge would land one person's codings "
-        "on the other"),
-    "ix_removal_tombstones_project": (
-        "removal_tombstones", ("project_uuid", "entity_type"), False,
-        "one project withdraws many participants, so the second withdrawal's tombstone "
-        "would be refused"),
+    "ix_code_applications_code_user": (
+        "code_applications", ("code_id", "user_id"), False,
+        "two coders applying one code to one passage is the ordinary case, so a unique index "
+        "would refuse the second coder's coding"),
 }
 
 
@@ -393,6 +419,21 @@ def seed(db_path: Path) -> dict:
           "VALUES (?,'Dana',0,?,1)", (ARCHIVED_CODER, NOW))
     else:
         skipped.append("archived coder")
+    # 1.6.0's second PERSON — the voter a segment group needs — and the global consensus
+    # coder, whose rows a 1.5.8 install's saved consensus layer holds.
+    x("INSERT INTO users (id, username, is_admin, created_at) VALUES (?,'Priya',0,?)",
+      (TEAM_CODER, NOW))
+    if machine:
+        x("INSERT INTO users (id, username, is_admin, created_at, coder_type) "
+          "VALUES (?,'Consensus',0,?,'consensus')", (CONSENSUS_CODER, NOW))
+    else:
+        skipped.append("consensus coder")
+    # 1.5.8's identity backfill ran below --from-revision: every coder holds a real one.
+    if "uuid" in user_cols:
+        for uid, uuid in CODER_UUIDS.items():
+            x("UPDATE users SET uuid=? WHERE id=?", (uuid, uid))
+    else:
+        skipped.append("coder identities")
     x("INSERT INTO projects (id, user_id, name, status, created_at, updated_at) "
       "VALUES (1,1,'Rehearsal project','active',?,?), (?,1,'Second study','active',?,?)",
       (NOW, NOW, PROJECT_OTHER, NOW, NOW))
@@ -537,6 +578,50 @@ def seed(db_path: Path) -> dict:
         x("UPDATE code_applications SET magnitude_conflict=-1.0 WHERE id=?", (APP_CONFLICTED,))
     else:
         skipped.append("magnitude conflict")
+
+    # ── 1.6.0's repair (`d4e8a1c7b2f6`, #1597): the three cases its predicate decides ──
+    #
+    # Built as a 1.5.8 install holds them: grouped turns whose coders coded different turns
+    # (so 1.5.8's per-turn rule found one voter per turn and stored no consensus there), a
+    # one-coder group, and an ungrouped two-coder turn whose per-turn consensus 1.5.8 DID
+    # store — plus one turn already queued from before the upgrade.
+    queue_fixture = ("segment_groups" in have and "consensus_stale_targets" in have
+                     and "group_id" in _cols(conn, "segments")
+                     and "origin" in _cols(conn, "code_applications") and machine)
+    if queue_fixture:
+        x("INSERT INTO segment_groups (id, conversation_id, created_at) VALUES (?,1,?), (?,1,?)",
+          (G_SPLIT, NOW, G_ONE_CODER, NOW))
+        for sid, group in ((SEG_SPLIT_A, G_SPLIT), (SEG_ALREADY_QUEUED, G_SPLIT),
+                           (SEG_ONE_A, G_ONE_CODER), (SEG_ONE_B, G_ONE_CODER),
+                           (SEG_UNGROUPED, None)):
+            x("INSERT INTO segments (id, conversation_id, sequence_order, text, group_id, "
+              "created_at, is_starred, is_merge_result, is_split_result) "
+              "VALUES (?,1,?,?,?,?,0,0,0)", (sid, sid, f"turn {sid}", group, NOW))
+        for aid, sid, uid, origin in (
+            (APP_SPLIT_A, SEG_SPLIT_A, LEAD_CODER, "human"),
+            (APP_SPLIT_B, SEG_ALREADY_QUEUED, TEAM_CODER, "human"),
+            (APP_ONE_A, SEG_ONE_A, LEAD_CODER, "human"),
+            (APP_ONE_B, SEG_ONE_B, LEAD_CODER, "human"),
+            (APP_UNGROUPED_LEAD, SEG_UNGROUPED, LEAD_CODER, "human"),
+            (APP_UNGROUPED_TEAM, SEG_UNGROUPED, TEAM_CODER, "human"),
+            (APP_UNGROUPED_CONSENSUS, SEG_UNGROUPED, CONSENSUS_CODER, "consensus"),
+        ):
+            x("INSERT INTO code_applications (id, segment_id, code_id, user_id, origin, "
+              "created_at) VALUES (?,?,2,?,?,?)", (aid, sid, uid, origin, NOW))
+        x("INSERT INTO consensus_stale_targets (id, project_id, segment_id, created_at) "
+          "VALUES (?,1,?,?)", (MARKER_SEEDED, SEG_ALREADY_QUEUED, NOW))
+    else:
+        skipped.append("1.6.0 consensus queue fixture")
+
+    # 1.5.8's withdrawal record, below --from-revision: one a 1.5.8 install holds.
+    if "removal_tombstones" in have:
+        x("INSERT INTO removal_tombstones (id, project_uuid, entity_type, entity_uuid, "
+          "identifier_hash, reason, created_at) VALUES (?,?,'participant',?,NULL,"
+          "'withdrawal',?)",
+          (TOMBSTONE_SEEDED_ID, "7b0a7b0a-0000-4000-8000-000000000158",
+           "9a7e0003-0000-4000-8000-000000000003", NOW))
+    else:
+        skipped.append("withdrawal record")
 
     x("INSERT INTO excerpt (id, project_id, segment_id, start_offset, end_offset, "
       "created_at, updated_at) VALUES (1,1,10,NULL,NULL,?,?), (2,1,11,4,18,?,?)",
@@ -717,8 +802,20 @@ def seed(db_path: Path) -> dict:
         if drift:
             raise SystemExit(f"seed drift: computed columns {drift} contradict REPAIR_STALE "
                              "— fix the seed or the constant, not this check")
-        if not any(was != after for _, was, after in REPAIR_STALE.values()):
-            raise SystemExit("REPAIR_STALE moves no flag, so the repair's checks are inert")
+        # ⚠️ 1.6.0: #1368 D4's repair is below --from-revision, so REPAIR_STALE is an
+        # INVARIANCE fixture this cut and moves no flag by design. The 1.5.8 check that
+        # refused an inert fixture here now belongs to the queue fixture (below).
+    # 1.6.0's repair must have work: the expected queue is not what the seed already holds,
+    # and the seed holds exactly the one pre-existing marker it says it does.
+    if "1.6.0 consensus queue fixture" not in skipped:
+        queued = [sid for (sid,) in conn.execute(
+            "SELECT segment_id FROM consensus_stale_targets ORDER BY segment_id")]
+        if queued != [SEG_ALREADY_QUEUED]:
+            raise SystemExit(f"seed drift: consensus_stale_targets holds {queued}, not "
+                             f"[{SEG_ALREADY_QUEUED}] — fix the seed, not this check")
+        if sorted(QUEUE_EXPECTED) == queued:
+            raise SystemExit("QUEUE_EXPECTED is what the seed already holds, so the "
+                             "repair's check is inert against a repair that does nothing")
 
     conn.commit()
     snap = {
@@ -791,6 +888,11 @@ def seed(db_path: Path) -> dict:
         # silently-dropped one is caught. A dropped UNIQUE index leaves a constraint
         # unenforced and nothing else looks wrong.
         "indexes": {t: _indexes(conn, t) for t in INDEXED_TABLES if t in have},
+        # 1.6.0's repair ADDS rows here; the one seeded before the upgrade must survive.
+        "markers": conn.execute(
+            "SELECT id, project_id, segment_id, dataset_value_id, created_at "
+            "FROM consensus_stale_targets ORDER BY id").fetchall()
+            if "consensus_stale_targets" in have else [],
     }
     conn.close()
     if skipped:
@@ -974,6 +1076,42 @@ def verify(db_path: Path, before: dict) -> list[str]:
                        "'out of date' about a column that is not")
             fails.append(f"#1368 D4: `{formula}` arrived stale={got[0]!r}, not {want} — {why}")
 
+    # ── 1.6.0's REPAIR (#1597, `d4e8a1c7b2f6`): exactly G_SPLIT's turns queued ─────
+    #
+    # The saved consensus layer is recomputed only when a marker asks, so a turn missing
+    # here keeps 1.5.8's per-turn consensus under a screen that calls it current, and an
+    # extra one costs a recompute (and, on a single-coder install, creates the consensus
+    # coder). The pre-existing marker must be the SAME row: the repair adds, never rewrites.
+    if "consensus_stale_targets" in _tables(conn) and not before["markers"]:
+        fails.append("#1597's queue fixture was not seeded, so its check proves nothing — "
+                     "see the skipped list above")
+    if "consensus_stale_targets" in _tables(conn) and before["markers"]:
+        queued = x("SELECT segment_id FROM consensus_stale_targets "
+                   "WHERE segment_id IS NOT NULL ORDER BY segment_id").fetchall()
+        got = [sid for (sid,) in queued]
+        if got != sorted(QUEUE_EXPECTED):
+            missing = sorted(set(QUEUE_EXPECTED) - set(got))
+            extra = sorted(set(got) - set(QUEUE_EXPECTED))
+            fails.append(
+                f"#1597: consensus_stale_targets queues turns {got}, not {sorted(QUEUE_EXPECTED)}"
+                + (f" — MISSING {missing}: a group two coders coded keeps 1.5.8's per-turn "
+                   "consensus, and Recompute consensus calls it up to date" if missing else "")
+                + (f" — EXTRA {extra}: a one-coder group or an ungrouped turn was queued, "
+                   "which no rule changes (and which creates the consensus coder on a "
+                   "lone researcher's install)" if extra else ""))
+        if bad := x("SELECT COUNT(*) FROM consensus_stale_targets WHERE project_id != 1"
+                    ).fetchone()[0]:
+            fails.append(f"#1597: {bad} marker(s) name another project than their turn's")
+        seeded = [list(map(str, r)) for r in before["markers"]]
+        now_rows = [list(map(str, r)) for r in x(
+            "SELECT id, project_id, segment_id, dataset_value_id, created_at "
+            "FROM consensus_stale_targets WHERE id IN "
+            f"({','.join('?' * len(before['markers']))}) ORDER BY id",
+            tuple(r[0] for r in before["markers"])).fetchall()]
+        if now_rows != seeded:
+            fails.append(f"#1597: the marker queued before the upgrade changed\n"
+                         f"     before={seeded}\n     after ={now_rows}")
+
     # v1.4.0's provenance fields are BELOW --from-revision: present before this
     # release starts, so they are checked as INVARIANT, never as evidence anything ran.
     dc_cols = _cols(conn, "dataset_columns")
@@ -1011,6 +1149,10 @@ def verify(db_path: Path, before: dict) -> list[str]:
     # What this cut must CREATE: on which columns, and whether it must — or must NOT —
     # be UNIQUE. Read from the pragmas, not the statement's text.
     for name, (table, columns, unique, why) in NEW_INDEXES.items():
+        if name in before["indexes"].get(table, {}):
+            fails.append(f"index `{name}` on `{table}` existed BEFORE the upgrade, so its "
+                         "presence after proves nothing about this cut — is --from-revision "
+                         "the previous release's head?")
         listed = ({r[1]: bool(r[2]) for r in x(f"PRAGMA index_list({table})")}
                   if table in _tables(conn) else {})
         if name not in listed:

@@ -9,7 +9,7 @@ Supports three source modes:
 from collections import defaultdict
 from itertools import combinations
 from sqlalchemy.orm import Session, contains_eager, joinedload
-from sqlalchemy import func, literal, case as sa_case
+from sqlalchemy import func, select, case as sa_case
 
 from ..models.code import Code
 from ..models.code_application import CodeApplication
@@ -22,11 +22,18 @@ from ..models.speaker import Speaker
 from ..models.participant import Participant
 from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, ColumnType
 from ..models.excerpt import Excerpt, segment_has_any_quote_filter
-from .coding_layers import LAYER_CONSENSUS, layer_scope_filter
+from .coding_layers import LAYER_CONSENSUS, layer_scope_filter, narrow_to_coders
+# #1536 (D116–D118): what a participant filter keeps, per passage kind — the ONE statement.
+from . import participant_filter as pf
 from .grouping import order_value_labels
 from .missing_values import column_missing_rules, is_missing
+from .value_labels import answer_label_resolver
 from .text_analysis import substantive_text_clause, treat_as_empty_for_project
-from .undefined_stats import NO_SEGMENTS
+from .undefined_stats import NO_SEGMENTS, finite_or_none
+from . import comparison_basis as cmp_basis
+from .multiplicity import (
+    CORRECTIONS, DEFAULT_CORRECTION, adjust_p_values, best_case_adjusted, tarone_family_size,
+)
 
 # ── Rounding precision constants ─────────────────────────────────────────────
 DISPLAY_PERCENTAGE_PRECISION = 1  # round(x, 1) for display percentages (e.g. 42.9%)
@@ -49,10 +56,25 @@ SATURATION_ORDERING_IMPORT_DATE = "import_date"
 # response. Declared once because several queries must agree on it exactly: a
 # second copy that folded uncategorised codes differently would put a row's
 # counts under a key no consumer looks up, and the row would silently read zero.
+# Its one Python twin, `_effective_category_id`, builds the rows' metadata.
+#
+# 🔴 #1529 D91 (1.5.9): a UNIVERSAL code is always its own pseudo-category, whatever its
+# `category_id` — the codebook's own reading (`routers/codebook.py` draws universal codes in
+# their own group however they are filed). A unit marked only "Unclear" is not coded
+# (invariant J-A), so a category holding a universal code would count such units in a
+# theme's count (a theme read 3 → 8 on the review's probe), and the row would lose the
+# `is_universal` flag the client's coded-share rule keys on (#1526 D79). The PATCH door
+# refuses the state since D93; an install that took it before, or a `.mmproject` file
+# that carries it, still holds it — this fold is what makes every door harmless.
 _EFFECTIVE_CAT_ID = sa_case(
-    (Code.category_id.isnot(None), Code.category_id),
+    ((Code.category_id.isnot(None)) & (Code.is_universal == False), Code.category_id),  # noqa: E712
     else_=(-1 * Code.id),
 )
+
+
+def _effective_category_id(code: Code) -> int:
+    """`_EFFECTIVE_CAT_ID` for one loaded code — the fold's ONE Python twin (#1529 D91)."""
+    return code.category_id if (code.category_id and not code.is_universal) else -code.id
 
 
 def _get_universal_code_ids(db: Session, project_id: int) -> set[int]:
@@ -78,16 +100,35 @@ def _coder_filter(query, coder_ids: list[int] | None, layer_scope: str | None = 
 
     Apply ONLY to queries that count/join `CodeApplication` (frequency numerators,
     coded denominators, co-occurrence) — NEVER to the segment/participant-universe
-    denominators (e.g. total participants who spoke) or the display "what codes are
-    on this unit" queries (codes_by_seg / codes_by_dv), which must stay all-coder.
+    denominators (e.g. total participants who spoke). The display "what codes are
+    on this unit" queries (codes_by_seg / codes_by_dv) stay all-coder under a
+    coder FILTER, and follow the scope only when the caller asks — while blind
+    (#1531 D102, `_chip_filter`).
     The `~code_id.in_(universal_ids)` exclusion is orthogonal and stays put.
     """
     query = query.filter(layer_scope_filter(layer_scope))
     if layer_scope == LAYER_CONSENSUS:
         return query  # consensus is one synthetic coder — coder_ids is moot
-    if coder_ids:
-        return query.filter(CodeApplication.user_id.in_(coder_ids))
-    return query
+    return narrow_to_coders(query, coder_ids)
+
+
+def _chip_filter(query, coder_ids: list[int] | None, layer_scope: str | None,
+                 chips_follow_coder_ids: bool):
+    """The coder scope of a unit's code CHIPS on the analysis page's passage lists.
+
+    By default every coder's codes on the unit, in the selected layer — under a
+    coder FILTER the list narrows WHICH units appear and keeps the whole unit's
+    codes as context. 🔴 **#1531 D102 (1.5.9): while blind the chips are the
+    viewer's own** — `chips_follow_coder_ids` asks the passage's codes through
+    `_coder_filter`, the scope that chose the passages, because the list carries
+    bare code ids and the client's blind lens cannot narrow them (measured: a
+    blind coder's own passage listed a code only a colleague applied). The client
+    sends it only while `withholding`, so a coder filter, a single-coder install
+    and a coder who has revealed read exactly as before.
+    """
+    if chips_follow_coder_ids:
+        return _coder_filter(query, coder_ids, layer_scope)
+    return query.filter(layer_scope_filter(layer_scope))
 
 
 # ── Internal: conversation-based frequencies ─────────────────────────────────
@@ -127,8 +168,7 @@ def _get_conversation_frequencies(
         )
     if conversation_ids:
         base = base.filter(Segment.conversation_id.in_(conversation_ids))
-    if participant_ids:
-        base = base.filter(Speaker.participant_id.in_(participant_ids))
+    base = pf.narrow_to_participants(base, pf.TURN, participant_ids)
     if code_ids:
         base = base.filter(CodeApplication.code_id.in_(code_ids))
     base = _coder_filter(base, coder_ids, layer_scope)
@@ -157,8 +197,7 @@ def _get_conversation_frequencies(
         coded_seg_query = coded_seg_query.filter((Speaker.is_facilitator == 0) | (Speaker.id == None))
     if conversation_ids:
         coded_seg_query = coded_seg_query.filter(Segment.conversation_id.in_(conversation_ids))
-    if participant_ids:
-        coded_seg_query = coded_seg_query.filter(Speaker.participant_id.in_(participant_ids))
+    coded_seg_query = pf.narrow_to_participants(coded_seg_query, pf.TURN, participant_ids)
     coded_seg_query = _coder_filter(coded_seg_query, coder_ids, layer_scope)
     total_coded_segments = coded_seg_query.scalar() or 0
 
@@ -178,8 +217,7 @@ def _get_conversation_frequencies(
         total_conv_query = total_conv_query.filter((Speaker.is_facilitator == 0) | (Speaker.id == None))
     if conversation_ids:
         total_conv_query = total_conv_query.filter(Segment.conversation_id.in_(conversation_ids))
-    if participant_ids:
-        total_conv_query = total_conv_query.filter(Speaker.participant_id.in_(participant_ids))
+    total_conv_query = pf.narrow_to_participants(total_conv_query, pf.TURN, participant_ids)
     total_conv_query = _coder_filter(total_conv_query, coder_ids, layer_scope)
     total_conversations = total_conv_query.scalar() or 0
 
@@ -197,8 +235,7 @@ def _get_conversation_frequencies(
     )
     if conversation_ids:
         part_query = part_query.filter(Segment.conversation_id.in_(conversation_ids))
-    if participant_ids:
-        part_query = part_query.filter(Speaker.participant_id.in_(participant_ids))
+    part_query = pf.narrow_to_participants(part_query, pf.TURN, participant_ids)
     total_participants = part_query.scalar() or 0
 
     unlinked_query = (
@@ -234,6 +271,86 @@ def _get_conversation_frequencies(
 
 # ── Internal: comment-based frequencies ──────────────────────────────────────
 
+class CommentFrequencyOrderError(RuntimeError):
+    """An answer's rows came back after the answer closed — the read lost its ORDER BY."""
+
+
+# How many rows the text arm's frequency read fetches at a time: the tally streams them.
+_COMMENT_FREQUENCY_FETCH_BATCH = 20_000
+
+
+def _tally_comment_frequencies(
+    rows, code_ids: list[int] | None, universal_ids: set[int] | frozenset[int],
+) -> dict:
+    """#1463 (D66, 1.5.9) — the text arm's frequency count, tallied in ONE pass.
+
+    ``rows`` yields ``(answer, code, record)`` — ``CodeApplication.dataset_value_id``,
+    ``code_id`` and the answer's ``DatasetValue.row_id`` — with each answer's rows
+    ADJACENT and the answers ASCENDING (the read is ORDERED BY the answer, and that
+    ORDER BY is load-bearing). An answer is counted when the next one starts, so the
+    tally holds ONE answer's codes at a time; only RECORD ids are kept, because a
+    record spans many answers. An answer that comes back after it closed would be
+    counted twice, so a descending answer RAISES (#1335's rule for its tally).
+
+    Returns:
+
+    * ``freq_map`` — per code, ``(answers carrying it, records carrying it)``, for
+      the codes in ``code_ids`` (all codes when it is empty or None) that occur;
+    * ``total_coded_texts`` — the answers carrying at least one NON-universal code
+      (#1526 D78, 1.5.9): invariant J-A, the rule the three segment arms' segment totals
+      and every gauge apply, so an answer marked only "Unclear" or
+      "Unsubstantive/Artifact" is not a coded answer here either. It decides the
+      analysis page's ``hasCoding`` — before D78 a survey answer marked only "Unclear"
+      opened the analysis tabs where the same mark on a document did not. ⚠️ **The total
+      ignores ``code_ids``, as the old total statement did**, so it reads the same
+      whichever codes the request names. (``total_rows``, ``text_percentage`` and
+      ``row_percentage`` were deleted by D81: no reader since #749.)
+
+    ``universal_ids`` is REQUIRED (no default): a caller that forgot it would count
+    every universal-only answer again, silently.
+    """
+    wanted = set(code_ids) if code_ids else None
+    answers_by_code: dict[int, int] = defaultdict(int)
+    records_by_code: dict[int, set[int]] = defaultdict(set)
+    n_coded = 0
+    current = None
+    started = False
+    codes_here: set[int] = set()
+    coded_here = False
+
+    def _close() -> None:
+        nonlocal n_coded
+        for c in codes_here:
+            answers_by_code[c] += 1
+        if coded_here:
+            n_coded += 1
+
+    for answer, code, record in rows:
+        if answer != current:
+            if started:
+                if answer < current:
+                    raise CommentFrequencyOrderError(
+                        f"frequency rows must arrive ordered by answer: {answer} after {current}"
+                    )
+                _close()
+            started = True
+            current = answer
+            codes_here = set()
+            coded_here = False
+        if code not in universal_ids:
+            coded_here = True
+        if (wanted is None or code in wanted) and code not in codes_here:
+            codes_here.add(code)
+            records_by_code[code].add(record)
+    if started:
+        _close()
+
+    return {
+        "freq_map": {c: (n, len(records_by_code[c])) for c, n in answers_by_code.items()},
+        "total_coded_texts": n_coded,
+    }
+
+
 def _get_comment_frequencies(
     db: Session,
     project_id: int,
@@ -242,80 +359,47 @@ def _get_comment_frequencies(
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
 ) -> dict:
-    """Compute code frequency stats from comment coding only."""
-    base = (
-        db.query(
-            CodeApplication.code_id,
-            func.count(func.distinct(CodeApplication.dataset_value_id)).label("text_count"),
-            func.count(func.distinct(DatasetValue.row_id)).label("row_count"),
-        )
-        .filter(CodeApplication.dataset_value_id.isnot(None))
+    """Compute code frequency stats from comment coding only.
+
+    #1463 (D66, 1.5.9): ONE read, ordered by the answer, tallied while it streams
+    (`_tally_comment_frequencies`). It replaced three statements — per code, total
+    answers, total records — each a hand-written copy of this filter, each walking
+    every open-text cell of the project: 16.9–17.2 s on the encrypted BES copy, which
+    with the page's other requests put the Qualitative analysis page past the client's
+    30 s limit. Read through ``db.connection()`` (Core), not the Session: the ORM's
+    per-row work was ~2.4 s of the one-pass form (`_stream_core_rows`' rule, #1015).
+    The old three are kept verbatim as the oracle in `test_comment_frequency_one_pass.py`
+    (their total, before #1526 D78, counted an answer marked only with a universal code).
+    """
+    # Read BEFORE the stream opens: the stream holds this Session's connection mid-iteration.
+    universal_ids = _get_universal_code_ids(db, project_id)
+    stmt = (
+        select(CodeApplication.dataset_value_id, CodeApplication.code_id, DatasetValue.row_id)
         .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
         .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
         .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
-        .filter(
-            Dataset.project_id == project_id,
-            DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
-        )
-    )
-
-    if participant_ids:
-        base = base.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-        base = base.filter(DatasetRow.participant_id.in_(participant_ids))
-
-    if code_ids:
-        base = base.filter(CodeApplication.code_id.in_(code_ids))
-    base = _coder_filter(base, coder_ids, layer_scope)
-
-    freq_rows = base.group_by(CodeApplication.code_id).all()
-    freq_map = {row[0]: (row[1], row[2]) for row in freq_rows}
-
-    # Totals (must apply same participant filter as per-code queries)
-    total_comment_query = (
-        db.query(func.count(func.distinct(CodeApplication.dataset_value_id)))
-        .filter(CodeApplication.dataset_value_id.isnot(None))
-        .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
-        .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
-        .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
-        .filter(
-            Dataset.project_id == project_id,
-            DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
-        )
-    )
-    if participant_ids:
-        total_comment_query = (
-            total_comment_query
-            .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-            .filter(DatasetRow.participant_id.in_(participant_ids))
-        )
-    total_comment_query = _coder_filter(total_comment_query, coder_ids, layer_scope)
-    total_coded_texts = total_comment_query.scalar() or 0
-
-    total_records_query = (
-        db.query(func.count(func.distinct(DatasetValue.row_id)))
-        .join(CodeApplication, CodeApplication.dataset_value_id == DatasetValue.id)
-        .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
-        .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
-        .filter(
+        .where(
             CodeApplication.dataset_value_id.isnot(None),
             Dataset.project_id == project_id,
             DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
         )
     )
     if participant_ids:
-        total_records_query = (
-            total_records_query
-            .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-            .filter(DatasetRow.participant_id.in_(participant_ids))
+        stmt = (
+            stmt.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+            .where(pf.participant_clause(pf.ANSWER, participant_ids))
         )
-    total_records_query = _coder_filter(total_records_query, coder_ids, layer_scope)
-    total_records = total_records_query.scalar() or 0
-
-    return {
-        "freq_map": freq_map,
-        "total_coded_texts": total_coded_texts,
-        "total_rows": total_records,
-    }
+    stmt = _coder_filter(stmt, coder_ids, layer_scope)
+    stmt = (
+        stmt.order_by(CodeApplication.dataset_value_id)
+        .execution_options(yield_per=_COMMENT_FREQUENCY_FETCH_BATCH)
+    )
+    rows = (
+        row
+        for partition in db.connection().execute(stmt).partitions()
+        for row in partition
+    )
+    return _tally_comment_frequencies(rows, code_ids, universal_ids)
 
 
 # ── Internal: document-based frequencies ──────────────────────────────────
@@ -327,8 +411,13 @@ def _get_document_frequencies(
     document_ids: list[int] | None = None,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    participant_ids: list[int] | None = None,
 ) -> dict:
-    """Compute code frequency stats from document segments only."""
+    """Compute code frequency stats from document segments only.
+
+    #1536 (D116): under a participant filter, a document's passages count only when the document
+    is linked to one of the participants (`services/participant_filter.py`).
+    """
     base = (
         db.query(
             CodeApplication.code_id,
@@ -347,6 +436,7 @@ def _get_document_frequencies(
 
     if document_ids:
         base = base.filter(Segment.document_id.in_(document_ids))
+    base = pf.narrow_to_participants(base, pf.DOCUMENT, participant_ids)
     if code_ids:
         base = base.filter(CodeApplication.code_id.in_(code_ids))
     base = _coder_filter(base, coder_ids, layer_scope)
@@ -372,6 +462,7 @@ def _get_document_frequencies(
         coded_seg_query = coded_seg_query.filter(~CodeApplication.code_id.in_(universal_ids))
     if document_ids:
         coded_seg_query = coded_seg_query.filter(Segment.document_id.in_(document_ids))
+    coded_seg_query = pf.narrow_to_participants(coded_seg_query, pf.DOCUMENT, participant_ids)
     coded_seg_query = _coder_filter(coded_seg_query, coder_ids, layer_scope)
     total_coded_doc_segments = coded_seg_query.scalar() or 0
 
@@ -388,6 +479,7 @@ def _get_document_frequencies(
     )
     if document_ids:
         total_doc_query = total_doc_query.filter(Segment.document_id.in_(document_ids))
+    total_doc_query = pf.narrow_to_participants(total_doc_query, pf.DOCUMENT, participant_ids)
     total_doc_query = _coder_filter(total_doc_query, coder_ids, layer_scope)
     total_documents = total_doc_query.scalar() or 0
 
@@ -405,13 +497,15 @@ def _get_observation_frequencies(
     observation_ids: list[int] | None = None,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    participant_ids: list[int] | None = None,
 ) -> dict:
     """Compute code frequency stats from observation clips only (slab 4c).
 
     Mirrors ``_get_document_frequencies`` — clips have no speaker, so there is no
-    facilitator/participant dimension; the same ``_coder_filter`` threading gives
+    facilitator dimension; the same ``_coder_filter`` threading gives
     consensus-layer selection for free (a FROZEN observation's clips carry a
-    consensus layer since D18).
+    consensus layer since D18). #1536 (D117): an observation names no participant,
+    so under a participant filter every clip is left out.
     """
     base = (
         db.query(
@@ -431,6 +525,7 @@ def _get_observation_frequencies(
 
     if observation_ids:
         base = base.filter(Segment.observation_id.in_(observation_ids))
+    base = pf.narrow_to_participants(base, pf.CLIP, participant_ids)
     if code_ids:
         base = base.filter(CodeApplication.code_id.in_(code_ids))
     base = _coder_filter(base, coder_ids, layer_scope)
@@ -456,6 +551,7 @@ def _get_observation_frequencies(
         coded_clip_query = coded_clip_query.filter(~CodeApplication.code_id.in_(universal_ids))
     if observation_ids:
         coded_clip_query = coded_clip_query.filter(Segment.observation_id.in_(observation_ids))
+    coded_clip_query = pf.narrow_to_participants(coded_clip_query, pf.CLIP, participant_ids)
     coded_clip_query = _coder_filter(coded_clip_query, coder_ids, layer_scope)
     total_coded_clips = coded_clip_query.scalar() or 0
 
@@ -472,6 +568,7 @@ def _get_observation_frequencies(
     )
     if observation_ids:
         total_obs_query = total_obs_query.filter(Segment.observation_id.in_(observation_ids))
+    total_obs_query = pf.narrow_to_participants(total_obs_query, pf.CLIP, participant_ids)
     total_obs_query = _coder_filter(total_obs_query, coder_ids, layer_scope)
     total_observations = total_obs_query.scalar() or 0
 
@@ -480,6 +577,15 @@ def _get_observation_frequencies(
         "total_coded_clips": total_coded_clips,
         "total_observations": total_observations,
     }
+
+
+# #1526 D79 (1.5.9): a universal code's row has counts and no share of the coded total. By
+# invariant J-A a unit marked only with universal codes is not coded, so it is outside the coded
+# total "% of Coded" divides by, while a universal code's own count is made of exactly such units
+# (it read 150–200% on the #1526 review's probe). The words saying so are the client's ONE
+# statement, `frontend/src/lib/universal-share.ts::UNIVERSAL_SHARE_NOTE` — the summary table and,
+# since #1528 (1.5.9), the Frequencies CSV written from it; the server copy went with the server
+# file.
 
 
 # ── Public: get_code_frequencies ─────────────────────────────────────────────
@@ -566,6 +672,7 @@ def get_code_frequencies(
             document_ids=document_ids,
             coder_ids=coder_ids,
             layer_scope=layer_scope,
+            participant_ids=participant_ids,
         )
         obs_data = _get_observation_frequencies(
             db, project_id,
@@ -573,6 +680,7 @@ def get_code_frequencies(
             observation_ids=observation_ids,
             coder_ids=coder_ids,
             layer_scope=layer_scope,
+            participant_ids=participant_ids,
         )
 
     if source in ("text", "all"):
@@ -597,7 +705,6 @@ def get_code_frequencies(
     total_participants = conv_data["total_participants"] if conv_data else 0
     unlinked_speaker_count = conv_data["unlinked_speaker_count"] if conv_data else 0
     total_coded_texts = comment_data["total_coded_texts"] if comment_data else 0
-    total_records = comment_data["total_rows"] if comment_data else 0
 
     frequencies = []
     for code in all_codes:
@@ -617,7 +724,13 @@ def get_code_frequencies(
             obs_clip_c, obs_c = obs_data["freq_map"].get(code.id, (0, 0)) if obs_data else (0, 0)
             combined_seg = seg_c + doc_seg_c + obs_clip_c
             entry["segment_count"] = combined_seg
-            entry["segment_percentage"] = round(combined_seg / total_coded_segments * 100, DISPLAY_PERCENTAGE_PRECISION) if total_coded_segments else 0.0
+            # #1526 D79: a universal code's segments are, by J-A, outside the coded total
+            # it would be divided by — no share (`frontend/src/lib/universal-share.ts`).
+            entry["segment_percentage"] = (
+                None if code.is_universal
+                else round(combined_seg / total_coded_segments * 100, DISPLAY_PERCENTAGE_PRECISION)
+                if total_coded_segments else 0.0
+            )
             entry["conversation_count"] = conv_c
             entry["conversation_percentage"] = round(conv_c / total_conversations * 100, DISPLAY_PERCENTAGE_PRECISION) if total_conversations else 0.0
             entry["document_count"] = doc_c
@@ -628,7 +741,7 @@ def get_code_frequencies(
             entry["participant_percentage"] = round(part_c / total_participants * 100, DISPLAY_PERCENTAGE_PRECISION) if total_participants else 0.0
         else:
             entry["segment_count"] = 0
-            entry["segment_percentage"] = 0.0
+            entry["segment_percentage"] = None if code.is_universal else 0.0
             entry["conversation_count"] = 0
             entry["conversation_percentage"] = 0.0
             entry["document_count"] = 0
@@ -638,17 +751,15 @@ def get_code_frequencies(
             entry["participant_count"] = 0
             entry["participant_percentage"] = 0.0
 
+        # #1526 D81: no text or record PERCENTAGE here — nothing has read one since #749
+        # moved the summary table to `get_source_frequencies`, and their base was not J-A.
         if comment_data:
             comment_c, row_c = comment_data["freq_map"].get(code.id, (0, 0))
             entry["text_count"] = comment_c
-            entry["text_percentage"] = round(comment_c / total_coded_texts * 100, DISPLAY_PERCENTAGE_PRECISION) if total_coded_texts else 0.0
             entry["row_count"] = row_c
-            entry["row_percentage"] = round(row_c / total_records * 100, DISPLAY_PERCENTAGE_PRECISION) if total_records else 0.0
         else:
             entry["text_count"] = 0
-            entry["text_percentage"] = 0.0
             entry["row_count"] = 0
-            entry["row_percentage"] = 0.0
 
         frequencies.append(entry)
 
@@ -662,7 +773,6 @@ def get_code_frequencies(
         "total_codes_active": len(frequencies),
         "unlinked_speaker_count": unlinked_speaker_count,
         "total_coded_texts": total_coded_texts,
-        "total_rows": total_records,
         "source": source,
     }
 
@@ -683,6 +793,7 @@ def get_segments_with_context(
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
     observation_ids: list[int] | None = None,
+    chips_follow_coder_ids: bool = False,
 ) -> dict:
     """Get coded segments with surrounding context, grouped by conversation,
     document, and observation (D25 — once frequencies count clips, a Content
@@ -721,7 +832,7 @@ def get_segments_with_context(
     if conversation_ids:
         app_query = app_query.filter(Segment.conversation_id.in_(conversation_ids))
     if participant_ids:
-        app_query = app_query.filter(Speaker.participant_id.in_(participant_ids))
+        app_query = app_query.filter(pf.participant_clause(pf.TURN, participant_ids))
     app_query = _coder_filter(app_query, coder_ids, layer_scope)
 
     app_query = app_query.order_by(Segment.conversation_id, Segment.sequence_order)
@@ -784,15 +895,11 @@ def get_segments_with_context(
     # Per-segment code chips: honor the selected layer (J2-C) and de-dup per
     # coder — without distinct, a code applied by N coders yields N entries
     # (consensus inflation + the #441 duplicate-key collision downstream).
-    focal_codes = (
+    focal_codes = _chip_filter(
         db.query(CodeApplication.segment_id, CodeApplication.code_id)
-        .filter(
-            CodeApplication.segment_id.in_(focal_seg_ids),
-            layer_scope_filter(layer_scope),
-        )
-        .distinct()
-        .all()
-    )
+        .filter(CodeApplication.segment_id.in_(focal_seg_ids)),
+        coder_ids, layer_scope, chips_follow_coder_ids,
+    ).distinct().all()
     codes_by_seg: dict[int, list[int]] = defaultdict(list)
     for seg_id, cid in focal_codes:
         codes_by_seg[seg_id].append(cid)
@@ -906,6 +1013,7 @@ def get_segments_with_context(
     )
     if document_ids:
         doc_app_query = doc_app_query.filter(Segment.document_id.in_(document_ids))
+    doc_app_query = pf.narrow_to_participants(doc_app_query, pf.DOCUMENT, participant_ids)  # #1536 D116
     doc_app_query = _coder_filter(doc_app_query, coder_ids, layer_scope)
     doc_app_query = doc_app_query.order_by(Segment.document_id, Segment.sequence_order)
     # #491: distinct-segment grain (see the conversation branch above).
@@ -947,15 +1055,11 @@ def get_segments_with_context(
         for seg in doc_all_segments:
             doc_segs_by_doc[seg.document_id].append(seg)
 
-        doc_focal_codes = (
+        doc_focal_codes = _chip_filter(
             db.query(CodeApplication.segment_id, CodeApplication.code_id)
-            .filter(
-                CodeApplication.segment_id.in_(doc_focal_seg_ids),
-                layer_scope_filter(layer_scope),
-            )
-            .distinct()
-            .all()
-        )
+            .filter(CodeApplication.segment_id.in_(doc_focal_seg_ids)),
+            coder_ids, layer_scope, chips_follow_coder_ids,
+        ).distinct().all()
         doc_codes_by_seg: dict[int, list[int]] = defaultdict(list)
         for seg_id, cid in doc_focal_codes:
             doc_codes_by_seg[seg_id].append(cid)
@@ -1046,6 +1150,7 @@ def get_segments_with_context(
     )
     if observation_ids:
         obs_app_query = obs_app_query.filter(Segment.observation_id.in_(observation_ids))
+    obs_app_query = pf.narrow_to_participants(obs_app_query, pf.CLIP, participant_ids)  # #1536 D117
     obs_app_query = _coder_filter(obs_app_query, coder_ids, layer_scope)
     obs_app_query = obs_app_query.order_by(Segment.observation_id, Segment.sequence_order)
     # #491: distinct-segment grain (see the conversation branch above).
@@ -1084,15 +1189,11 @@ def get_segments_with_context(
         for seg in obs_all_segments:
             obs_segs_by_obs[seg.observation_id].append(seg)
 
-        obs_focal_codes = (
+        obs_focal_codes = _chip_filter(
             db.query(CodeApplication.segment_id, CodeApplication.code_id)
-            .filter(
-                CodeApplication.segment_id.in_(obs_focal_seg_ids),
-                layer_scope_filter(layer_scope),
-            )
-            .distinct()
-            .all()
-        )
+            .filter(CodeApplication.segment_id.in_(obs_focal_seg_ids)),
+            coder_ids, layer_scope, chips_follow_coder_ids,
+        ).distinct().all()
         obs_codes_by_seg: dict[int, list[int]] = defaultdict(list)
         for seg_id, cid in obs_focal_codes:
             obs_codes_by_seg[seg_id].append(cid)
@@ -1278,6 +1379,9 @@ def get_demographic_filter_options(
     subtype_map: dict[str, dict[str, set[int]]] = defaultdict(lambda: defaultdict(set))
     col_subtype = {c.id: (c.demographic_subtype or c.column_text) for c in demo_cols}
     col_dataset = {c.id: c.dataset_id for c in demo_cols}
+    # #1332 (D56): the filter offers the groups `_build_participant_group_map`
+    # forms — an answer under the declared label it matches without case.
+    as_label_by_col = {c.id: answer_label_resolver(c) for c in demo_cols}
 
     for row_id, col_id, val_text in values:
         if not val_text or not val_text.strip():
@@ -1288,7 +1392,7 @@ def get_demographic_filter_options(
             continue
         if col_dataset.get(col_id) != row_dataset.get(row_id):
             continue
-        subtype_map[subtype][val_text.strip()].add(pid)
+        subtype_map[subtype][as_label_by_col[col_id](val_text).strip()].add(pid)
 
     participants_with_role = (
         db.query(Participant.id, Participant.role)
@@ -1335,6 +1439,101 @@ def get_demographic_filter_options(
     }
 
 
+# ── Co-occurrence: the rule, and its ONE tally (#1335) ───────────────────────
+
+#: #1335 (D46/D47, 1.5.9) — the rule, said where the number is read: the CSV's
+#: first line, the Excel sheet's corner cell, and on the client the screen's
+#: caption (which its Canvas embed renders) and the Canvas export's note
+#: (`frontend/src/lib/cooccurrence-rule.ts::COOCCURRENCE_RULE`, held equal to this
+#: by `test_cooccurrence_one_coder.py`). One rule for every scope is a DEFINITION,
+#: not a stated basis (D47: a one-valued vocabulary), so it never rides the wire.
+COOCCURRENCE_RULE = "Two codes count as co-occurring only where one coder applied both."
+
+#: #1527 D86 — the co-occurrence CSV's first line at the SOURCE level, before the rule: a
+#: file has no caption, and there each cell counts sources, not passages. Server-only (the
+#: screen's caption has its own sentence for the level).
+COOCCURRENCE_SOURCE_LEVEL_NOTE = "Counted per source: each cell is a number of sources, not passages."
+
+
+class CooccurrenceOrderError(RuntimeError):
+    """A unit's rows came back after the unit closed — the query lost its ORDER BY."""
+
+
+def _tally_cooccurrence(rows) -> tuple[dict[tuple[int, int], int], int]:
+    """#1335 (D46) — THE co-occurrence tally. Every builder, and the source level, call it.
+
+    ``rows`` yields ``(unit, coder, code)`` with each unit's rows ADJACENT and the
+    units ASCENDING: the caller's query is ORDERED BY the unit, and that ORDER BY is
+    load-bearing. The tally closes a unit when the next one starts, so it holds ONE
+    unit in memory, never the corpus (the builders used to materialise every row,
+    then every unit's set). A unit that comes back after it closed would be
+    counted twice, so a descending unit RAISES — a lost ORDER BY fails loudly
+    instead of printing a wrong matrix.
+
+    The rule (D46): the DIAGONAL counts the units carrying a code, by anyone, so
+    the matrix keeps agreeing with the frequency table beside it; an OFF-DIAGONAL
+    cell counts the units where ONE coder applied both codes. Coder A's X beside
+    coder B's Y on one passage is a disagreement about the passage, not a
+    relationship between X and Y. A unit adds at most 1 to a cell, however many
+    coders applied the pair there. A single coder, and the consensus layer (one
+    synthetic coder), read exactly as before, by construction. Rows with no coder
+    (``user_id`` NULL — the pre-J1 legacy rows) are ONE coder, as a merge's
+    "Unattributed" bucket is.
+
+    Returns ``(cooccur, n_units)``; ``n_units`` counts the units holding any code.
+    """
+    cooccur: dict[tuple[int, int], int] = defaultdict(int)
+    n_units = 0
+    current = None
+    by_coder: dict = {}
+
+    def close_unit() -> None:
+        carried: set[int] = set()
+        pairs: set[tuple[int, int]] = set()
+        for codes in by_coder.values():
+            carried |= codes
+            pairs.update(combinations(sorted(codes), 2))
+        for c in carried:
+            cooccur[(c, c)] += 1
+        for a, b in pairs:
+            cooccur[(a, b)] += 1
+            cooccur[(b, a)] += 1
+
+    for unit, coder, code in rows:
+        if unit != current:
+            if n_units:
+                if unit < current:
+                    raise CooccurrenceOrderError(
+                        f"co-occurrence rows must arrive ordered by unit: {unit} after {current}"
+                    )
+                close_unit()
+            current = unit
+            by_coder = defaultdict(set)
+            n_units += 1
+        by_coder[coder].add(code)
+    if n_units:
+        close_unit()
+    return cooccur, n_units
+
+
+# How many rows a co-occurrence read fetches at a time: the tally streams them.
+_COOCCURRENCE_FETCH_BATCH = 10_000
+
+
+def _none_of_this_kind(ids: list[int] | None) -> bool:
+    """#1527 D84 — the co-occurrence reads a source list the way the comparison does
+    (#1297): ``None`` (absent) is EVERY source of that kind, ``[]`` is NONE of it.
+
+    The page sends a kind as ``[]`` only when the researcher selected something of
+    another kind (``lib/qual-comparison.ts::comparisonSources``), so selecting one
+    interview no longer counts every document and clip in the figure. Each builder
+    asks this before it reads; a kind it answers True for adds nothing to the
+    matrix or to its N. ⚠️ `get_code_frequencies` deliberately keeps the other
+    reading (#749: `hasCoding`), and shares no helper with the co-occurrence.
+    """
+    return ids is not None and len(ids) == 0
+
+
 # ── Internal: conversation-based co-occurrence ───────────────────────────────
 
 def _build_conversation_cooccurrence(
@@ -1347,9 +1546,11 @@ def _build_conversation_cooccurrence(
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
 ) -> tuple[dict, int]:
-    """Build co-occurrence matrix from conversation segments."""
+    """Build co-occurrence matrix from conversation segments (#1335: one coder per pair)."""
+    if _none_of_this_kind(conversation_ids):
+        return {}, 0
     query = (
-        db.query(CodeApplication.segment_id, CodeApplication.code_id)
+        db.query(CodeApplication.segment_id, CodeApplication.user_id, CodeApplication.code_id)
         .filter(CodeApplication.segment_id.isnot(None))
         .join(Segment, CodeApplication.segment_id == Segment.id)
         .join(Conversation, Segment.conversation_id == Conversation.id)
@@ -1366,26 +1567,14 @@ def _build_conversation_cooccurrence(
     if conversation_ids:
         query = query.filter(Segment.conversation_id.in_(conversation_ids))
     if participant_ids:
-        query = query.filter(Speaker.participant_id.in_(participant_ids))
+        query = query.filter(pf.participant_clause(pf.TURN, participant_ids))
     if code_ids:
         query = query.filter(CodeApplication.code_id.in_(code_ids))
     query = _coder_filter(query, coder_ids, layer_scope)
 
-    apps = query.all()
-
-    segment_codes = defaultdict(set)
-    for seg_id, code_id in apps:
-        segment_codes[seg_id].add(code_id)
-
-    cooccur = defaultdict(int)
-    for codes in segment_codes.values():
-        for c in codes:
-            cooccur[(c, c)] += 1
-        for a, b in combinations(codes, 2):
-            cooccur[(a, b)] += 1
-            cooccur[(b, a)] += 1
-
-    return cooccur, len(segment_codes)
+    return _tally_cooccurrence(
+        query.order_by(CodeApplication.segment_id).yield_per(_COOCCURRENCE_FETCH_BATCH)
+    )
 
 
 def _build_comment_cooccurrence(
@@ -1397,9 +1586,16 @@ def _build_comment_cooccurrence(
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
 ) -> tuple[dict, int]:
-    """Build co-occurrence matrix from coded comments."""
+    """Build co-occurrence matrix from coded comments (#1335: one coder per pair).
+
+    #1527 D85: an answer the project treats as no response ("N/A", "-", …) is not a
+    unit here, as it is not in the summary table's counts (#1526 D80) — so the
+    diagonal keeps agreeing with the frequency table beside it (#1335 D46).
+    """
+    if _none_of_this_kind(text_column_ids):
+        return {}, 0
     query = (
-        db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
+        db.query(CodeApplication.dataset_value_id, CodeApplication.user_id, CodeApplication.code_id)
         .filter(CodeApplication.dataset_value_id.isnot(None))
         .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
         .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
@@ -1407,6 +1603,7 @@ def _build_comment_cooccurrence(
         .filter(
             Dataset.project_id == project_id,
             DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
+            substantive_text_clause(treat_as_empty_for_project(db, project_id)),
         )
     )
 
@@ -1414,26 +1611,14 @@ def _build_comment_cooccurrence(
         query = query.filter(DatasetValue.column_id.in_(text_column_ids))
     if participant_ids:
         query = query.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-        query = query.filter(DatasetRow.participant_id.in_(participant_ids))
+        query = query.filter(pf.participant_clause(pf.ANSWER, participant_ids))
     if code_ids:
         query = query.filter(CodeApplication.code_id.in_(code_ids))
     query = _coder_filter(query, coder_ids, layer_scope)
 
-    apps = query.all()
-
-    value_codes = defaultdict(set)
-    for dv_id, code_id in apps:
-        value_codes[dv_id].add(code_id)
-
-    cooccur = defaultdict(int)
-    for codes in value_codes.values():
-        for c in codes:
-            cooccur[(c, c)] += 1
-        for a, b in combinations(codes, 2):
-            cooccur[(a, b)] += 1
-            cooccur[(b, a)] += 1
-
-    return cooccur, len(value_codes)
+    return _tally_cooccurrence(
+        query.order_by(CodeApplication.dataset_value_id).yield_per(_COOCCURRENCE_FETCH_BATCH)
+    )
 
 
 def _build_document_cooccurrence(
@@ -1443,10 +1628,15 @@ def _build_document_cooccurrence(
     document_ids: list[int] | None = None,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    participant_ids: list[int] | None = None,
 ) -> tuple[dict, int]:
-    """Build co-occurrence matrix from document segments."""
+    """Build co-occurrence matrix from document segments (#1335: one coder per pair).
+
+    #1536 (D116): under a participant filter, only documents linked to those participants."""
+    if _none_of_this_kind(document_ids):
+        return {}, 0
     query = (
-        db.query(CodeApplication.segment_id, CodeApplication.code_id)
+        db.query(CodeApplication.segment_id, CodeApplication.user_id, CodeApplication.code_id)
         .filter(CodeApplication.segment_id.isnot(None))
         .join(Segment, CodeApplication.segment_id == Segment.id)
         .join(Document, Segment.document_id == Document.id)
@@ -1459,25 +1649,14 @@ def _build_document_cooccurrence(
 
     if document_ids:
         query = query.filter(Segment.document_id.in_(document_ids))
+    query = pf.narrow_to_participants(query, pf.DOCUMENT, participant_ids)
     if code_ids:
         query = query.filter(CodeApplication.code_id.in_(code_ids))
     query = _coder_filter(query, coder_ids, layer_scope)
 
-    apps = query.all()
-
-    segment_codes = defaultdict(set)
-    for seg_id, code_id in apps:
-        segment_codes[seg_id].add(code_id)
-
-    cooccur = defaultdict(int)
-    for codes in segment_codes.values():
-        for c in codes:
-            cooccur[(c, c)] += 1
-        for a, b in combinations(codes, 2):
-            cooccur[(a, b)] += 1
-            cooccur[(b, a)] += 1
-
-    return cooccur, len(segment_codes)
+    return _tally_cooccurrence(
+        query.order_by(CodeApplication.segment_id).yield_per(_COOCCURRENCE_FETCH_BATCH)
+    )
 
 
 def _build_observation_cooccurrence(
@@ -1487,11 +1666,15 @@ def _build_observation_cooccurrence(
     observation_ids: list[int] | None = None,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    participant_ids: list[int] | None = None,
 ) -> tuple[dict, int]:
     """Build co-occurrence matrix from observation clips (slab 4c — mirrors the
-    document builder; a clip is a Segment, so the unit is the clip)."""
+    document builder; a clip is a Segment, so the unit is the clip; #1335: one
+    coder per pair). #1536 (D117): no clip under a participant filter."""
+    if _none_of_this_kind(observation_ids):
+        return {}, 0
     query = (
-        db.query(CodeApplication.segment_id, CodeApplication.code_id)
+        db.query(CodeApplication.segment_id, CodeApplication.user_id, CodeApplication.code_id)
         .filter(CodeApplication.segment_id.isnot(None))
         .join(Segment, CodeApplication.segment_id == Segment.id)
         .join(Observation, Segment.observation_id == Observation.id)
@@ -1504,25 +1687,14 @@ def _build_observation_cooccurrence(
 
     if observation_ids:
         query = query.filter(Segment.observation_id.in_(observation_ids))
+    query = pf.narrow_to_participants(query, pf.CLIP, participant_ids)
     if code_ids:
         query = query.filter(CodeApplication.code_id.in_(code_ids))
     query = _coder_filter(query, coder_ids, layer_scope)
 
-    apps = query.all()
-
-    clip_codes = defaultdict(set)
-    for seg_id, code_id in apps:
-        clip_codes[seg_id].add(code_id)
-
-    cooccur = defaultdict(int)
-    for codes in clip_codes.values():
-        for c in codes:
-            cooccur[(c, c)] += 1
-        for a, b in combinations(codes, 2):
-            cooccur[(a, b)] += 1
-            cooccur[(b, a)] += 1
-
-    return cooccur, len(clip_codes)
+    return _tally_cooccurrence(
+        query.order_by(CodeApplication.segment_id).yield_per(_COOCCURRENCE_FETCH_BATCH)
+    )
 
 
 def build_code_cooccurrence_matrix(
@@ -1545,7 +1717,10 @@ def build_code_cooccurrence_matrix(
     total_units: combined total across sources (incl. observation clips —
         clips ride the matrix + this total exactly the way documents do; there
         is deliberately no positional obs_total, matching the 5-tuple arity the
-        export_helpers wrapper unpacks)
+        export_helpers wrapper unpacks). 🔴 THIS is the figure's N (#1527 D83):
+        the units the matrix was counted over. The figure drew conv_total +
+        text_total until 1.5.9, which left out every document passage and clip
+        (N 0 on a documents-only project, beside a matrix with pairs in it).
     conv_total: conversation segment count (0 if source != conversations/all)
     text_total: text-column count (0 if source != text/all)
     doc_total: document segment count (0 if source != conversations/all)
@@ -1568,12 +1743,14 @@ def build_code_cooccurrence_matrix(
             document_ids=document_ids,
             coder_ids=coder_ids,
             layer_scope=layer_scope,
+            participant_ids=participant_ids,
         )
         obs_cooccur, obs_total = _build_observation_cooccurrence(
             db, project_id, code_ids=code_ids,
             observation_ids=observation_ids,
             coder_ids=coder_ids,
             layer_scope=layer_scope,
+            participant_ids=participant_ids,
         )
         # Merge conversation + document + observation
         merged = defaultdict(int)
@@ -1614,12 +1791,14 @@ def build_code_cooccurrence_matrix(
             document_ids=document_ids,
             coder_ids=coder_ids,
             layer_scope=layer_scope,
+            participant_ids=participant_ids,
         )
         obs_cooccur, obs_total = _build_observation_cooccurrence(
             db, project_id, code_ids=code_ids,
             observation_ids=observation_ids,
             coder_ids=coder_ids,
             layer_scope=layer_scope,
+            participant_ids=participant_ids,
         )
         # Merge
         merged = defaultdict(int)
@@ -1644,6 +1823,7 @@ def get_coded_comments_with_context(
     offset: int = 0,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    chips_follow_coder_ids: bool = False,
 ) -> dict | None:
     """Get coded texts for a specific code, grouped by dataset.
 
@@ -1683,7 +1863,7 @@ def get_coded_comments_with_context(
         app_query = (
             app_query
             .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-            .filter(DatasetRow.participant_id.in_(participant_ids))
+            .filter(pf.participant_clause(pf.ANSWER, participant_ids))
         )
     app_query = _coder_filter(app_query, coder_ids, layer_scope)
 
@@ -1743,15 +1923,11 @@ def get_coded_comments_with_context(
 
     # Get all code applications for these dataset_values — layer-scoped + per-coder
     # de-duped (see the conversation focal_codes note; #447 / #441 class).
-    all_apps = (
+    all_apps = _chip_filter(
         db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
-        .filter(
-            CodeApplication.dataset_value_id.in_(paged_dv_ids),
-            layer_scope_filter(layer_scope),
-        )
-        .distinct()
-        .all()
-    )
+        .filter(CodeApplication.dataset_value_id.in_(paged_dv_ids)),
+        coder_ids, layer_scope, chips_follow_coder_ids,
+    ).distinct().all()
     codes_by_dv: dict[int, list[int]] = defaultdict(list)
     for dv_id, cid in all_apps:
         codes_by_dv[dv_id].append(cid)
@@ -1819,11 +1995,18 @@ def _get_ordered_codes(
 def _build_cooccurrence_response(
     cooccur: dict,
     all_codes: list,
-    total_coded_segments: int,
-    total_coded_texts: int,
+    n_units: int,
     source: str,
 ) -> dict:
-    """Build the structured co-occurrence response from raw cooccurrence data and code list."""
+    """Build the structured co-occurrence response from raw cooccurrence data and code list.
+
+    #1527 D83: ``n_units`` is the count the matrix was taken over — the passages,
+    paragraphs, clips and answers holding a code it shows (the source level: the
+    sources). It replaced ``total_coded_segments`` + ``total_coded_texts``, whose one
+    reader summed them into the figure's N and which left documents and clips out.
+    Not called "coded": a unit marked only with a universal code is not coded by J-A,
+    and the matrix counts it (its diagonal does).
+    """
     codes_info = []
     for c in all_codes:
         codes_info.append({
@@ -1850,8 +2033,7 @@ def _build_cooccurrence_response(
         "codes": codes_info,
         "matrix": matrix,
         "max_cooccurrence": max_cooccurrence,
-        "total_coded_segments": total_coded_segments,
-        "total_coded_texts": total_coded_texts,
+        "n_units": n_units,
         "source": source,
     }
 
@@ -1868,26 +2050,49 @@ def get_code_cooccurrence(
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
     observation_ids: list[int] | None = None,
+    text_column_ids: list[int] | None = None,
+    level: str = "segment",
 ) -> dict:
-    """Build a structured co-occurrence matrix with code metadata."""
-    cooccur, _total, total_coded_segments, total_coded_texts, _doc_total = build_code_cooccurrence_matrix(
-        db, project_id,
-        code_ids=code_ids,
-        exclude_facilitator=exclude_facilitator,
-        conversation_ids=conversation_ids,
-        participant_ids=participant_ids,
-        source=source,
-        document_ids=document_ids,
-        coder_ids=coder_ids,
-        layer_scope=layer_scope,
-        observation_ids=observation_ids,
-    )
+    """Build a structured co-occurrence matrix with code metadata.
+
+    #1527 — the ONE dispatch the screen's route and the CSV share, so the file is
+    the matrix the screen shows (D86: the CSV took no level until 1.5.9).
+    ``level="source"`` counts sources, ``"segment"`` units. A source list reads as
+    `_none_of_this_kind` says: absent = every source of the kind, ``[]`` = none (D84).
+    ``text_column_ids`` reaches the unit level too (it was dropped there until 1.5.9).
+    """
+    if level == "source":
+        cooccur, n_units = get_source_level_cooccurrence(
+            db, project_id,
+            code_ids=code_ids,
+            exclude_facilitator=exclude_facilitator,
+            conversation_ids=conversation_ids,
+            text_column_ids=text_column_ids,
+            participant_ids=participant_ids,
+            source=source,
+            document_ids=document_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
+            observation_ids=observation_ids,
+        )
+    else:
+        cooccur, n_units, _conv, _text, _doc = build_code_cooccurrence_matrix(
+            db, project_id,
+            code_ids=code_ids,
+            exclude_facilitator=exclude_facilitator,
+            conversation_ids=conversation_ids,
+            participant_ids=participant_ids,
+            source=source,
+            text_column_ids=text_column_ids,
+            document_ids=document_ids,
+            coder_ids=coder_ids,
+            layer_scope=layer_scope,
+            observation_ids=observation_ids,
+        )
 
     all_codes = _get_ordered_codes(db, project_id, code_ids)
 
-    return _build_cooccurrence_response(
-        cooccur, all_codes, total_coded_segments, total_coded_texts, source,
-    )
+    return _build_cooccurrence_response(cooccur, all_codes, n_units, source)
 
 
 # ── Participant → demographic group mapping ───────────────────────────────
@@ -1946,6 +2151,10 @@ def _build_participant_group_map(
     col_dataset = {c.id: c.dataset_id for c in target_cols}
     # #592: column-aware missing rules (None = the _is_na defaults)
     rules_by_col = {c.id: column_missing_rules(c) for c in target_cols}
+    # #1332 (D56): a group is named by the declared label its answer matches
+    # without case — as `grouping.load_grouping_values_for_columns` names the
+    # quantitative comparison's groups from the same column.
+    as_label_by_col = {c.id: answer_label_resolver(c) for c in target_cols}
 
     linked_rows = (
         db.query(DatasetRow.id, DatasetRow.participant_id, DatasetRow.dataset_id)
@@ -1980,7 +2189,7 @@ def _build_participant_group_map(
                 continue
             if col_dataset.get(col_id) != row_dataset.get(row_id):
                 continue
-            mapping[pid] = val_text.strip()
+            mapping[pid] = as_label_by_col[col_id](val_text).strip()
 
     return mapping
 
@@ -2059,7 +2268,7 @@ def _compute_source_groups(
     if conv_ids_filter is not None:
         q = q.filter(Segment.conversation_id.in_(conv_ids_filter))
     if participant_ids:
-        q = q.filter(Speaker.participant_id.in_(participant_ids))
+        q = q.filter(pf.participant_clause(pf.TURN, participant_ids))
     for conv_id, pid, cnt, wc in q.group_by(
         Segment.conversation_id, Speaker.participant_id
     ).all():
@@ -2097,7 +2306,7 @@ def _compute_source_groups(
     if conv_ids_filter is not None:
         app_q = app_q.filter(Segment.conversation_id.in_(conv_ids_filter))
     if participant_ids:
-        app_q = app_q.filter(Speaker.participant_id.in_(participant_ids))
+        app_q = app_q.filter(pf.participant_clause(pf.TURN, participant_ids))
     if code_ids is not None:
         app_q = app_q.filter(CodeApplication.code_id.in_(code_ids))
     app_q = _coder_filter(app_q, coder_ids, layer_scope)  # + J2-B consensus exclusion
@@ -2132,7 +2341,7 @@ def _compute_source_groups(
     if doc_ids_filter is not None:
         doc_q = doc_q.filter(Segment.document_id.in_(doc_ids_filter))
     if participant_ids:
-        doc_q = doc_q.filter(Document.participant_id.in_(participant_ids))
+        doc_q = doc_q.filter(pf.participant_clause(pf.DOCUMENT, participant_ids))
     for doc_id, pid, cnt, wc in doc_q.group_by(
         Segment.document_id, Document.participant_id
     ).all():
@@ -2165,7 +2374,7 @@ def _compute_source_groups(
     if doc_ids_filter is not None:
         doc_app_q = doc_app_q.filter(Segment.document_id.in_(doc_ids_filter))
     if participant_ids:
-        doc_app_q = doc_app_q.filter(Document.participant_id.in_(participant_ids))
+        doc_app_q = doc_app_q.filter(pf.participant_clause(pf.DOCUMENT, participant_ids))
     if code_ids is not None:
         doc_app_q = doc_app_q.filter(CodeApplication.code_id.in_(code_ids))
     doc_app_q = _coder_filter(doc_app_q, coder_ids, layer_scope)  # + J2-B consensus exclusion
@@ -2206,7 +2415,7 @@ def _compute_source_groups(
     if text_column_ids is not None:
         col_q = col_q.filter(DatasetValue.column_id.in_(text_column_ids))
     if participant_ids:
-        col_q = col_q.filter(DatasetRow.participant_id.in_(participant_ids))
+        col_q = col_q.filter(pf.participant_clause(pf.ANSWER, participant_ids))
     for col_id, pid, cnt, wc in col_q.group_by(
         DatasetValue.column_id, DatasetRow.participant_id
     ).all():
@@ -2243,7 +2452,7 @@ def _compute_source_groups(
     if text_column_ids is not None:
         col_app_q = col_app_q.filter(DatasetValue.column_id.in_(text_column_ids))
     if participant_ids:
-        col_app_q = col_app_q.filter(DatasetRow.participant_id.in_(participant_ids))
+        col_app_q = col_app_q.filter(pf.participant_clause(pf.ANSWER, participant_ids))
     if code_ids is not None:
         col_app_q = col_app_q.filter(CodeApplication.code_id.in_(code_ids))
     col_app_q = _coder_filter(col_app_q, coder_ids, layer_scope)
@@ -2368,7 +2577,7 @@ def get_source_frequencies(
     if conv_ids_filter is not None:
         conv_totals_q = conv_totals_q.filter(Segment.conversation_id.in_(conv_ids_filter))
     if participant_ids:
-        conv_totals_q = conv_totals_q.filter(Speaker.participant_id.in_(participant_ids))
+        conv_totals_q = conv_totals_q.filter(pf.participant_clause(pf.TURN, participant_ids))
     conv_totals_q = conv_totals_q.group_by(Segment.conversation_id)
     conv_totals = {r[0]: (r[1], int(r[2])) for r in conv_totals_q.all()}
 
@@ -2399,7 +2608,7 @@ def get_source_frequencies(
     if conv_ids_filter is not None:
         conv_coded_q = conv_coded_q.filter(Segment.conversation_id.in_(conv_ids_filter))
     if participant_ids:
-        conv_coded_q = conv_coded_q.filter(Speaker.participant_id.in_(participant_ids))
+        conv_coded_q = conv_coded_q.filter(pf.participant_clause(pf.TURN, participant_ids))
     conv_coded_q = _coder_filter(conv_coded_q, coder_ids, layer_scope)
     conv_coded_q = conv_coded_q.group_by(Segment.conversation_id)
     conv_coded = {r[0]: r[1] for r in conv_coded_q.all()}
@@ -2410,13 +2619,17 @@ def get_source_frequencies(
         cat_groups: dict[int, list[int]] = defaultdict(list)
         cat_meta: dict[int, dict] = {}
         for c in all_codes:
-            eff_cat_id = c.category_id if c.category_id else -c.id
+            eff_cat_id = _effective_category_id(c)
             cat_groups[eff_cat_id].append(c.id)
             if eff_cat_id not in cat_meta:
-                if c.category_id and c.category:
-                    cat_meta[eff_cat_id] = {"name": c.category.name, "color": c.category.color or c.color}
+                if eff_cat_id > 0 and c.category:
+                    cat_meta[eff_cat_id] = {"name": c.category.name, "color": c.category.color or c.color,
+                                            "is_universal": False}
                 else:
-                    cat_meta[eff_cat_id] = {"name": c.name, "color": c.color}
+                    # A pseudo-category is ONE code, so it is universal exactly when its code
+                    # is (#1529 D91) — the flag `codedSharePercent` withholds a coded share on.
+                    cat_meta[eff_cat_id] = {"name": c.name, "color": c.color,
+                                            "is_universal": bool(c.is_universal)}
 
         codes_info = [
             {
@@ -2426,7 +2639,7 @@ def get_source_frequencies(
                 "category_id": cat_id if cat_id > 0 else None,
                 "category_name": meta["name"] if cat_id > 0 else None,
                 "category_color": None,
-                "is_universal": False,
+                "is_universal": meta["is_universal"],
                 "numeric_id": idx,
             }
             for idx, (cat_id, meta) in enumerate(cat_meta.items())
@@ -2462,7 +2675,7 @@ def get_source_frequencies(
         if conv_ids_filter is not None:
             conv_cat_subq = conv_cat_subq.filter(Segment.conversation_id.in_(conv_ids_filter))
         if participant_ids:
-            conv_cat_subq = conv_cat_subq.filter(Speaker.participant_id.in_(participant_ids))
+            conv_cat_subq = conv_cat_subq.filter(pf.participant_clause(pf.TURN, participant_ids))
         if code_ids is not None:
             conv_cat_subq = conv_cat_subq.filter(CodeApplication.code_id.in_(code_ids))
         conv_cat_subq = _coder_filter(conv_cat_subq, coder_ids, layer_scope)
@@ -2498,13 +2711,18 @@ def get_source_frequencies(
             .filter(
                 Dataset.project_id == project_id,
                 DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
+                # #1526 D80 (#840's pairing): only an answer the base can hold — a code
+                # applied to "N/A" counted here while `col_coded_q` (the % Texts base) and
+                # `col_totals_q` dropped it, so a row read Texts 2 beside Records 1 (200%).
+                # The grouped arm (`_compute_source_groups`) and `rec_by_code_q` already pair.
+                substantive_text_clause(text_tae),
             )
         )
         if text_column_ids is not None:
             col_cat_subq = col_cat_subq.filter(DatasetValue.column_id.in_(text_column_ids))
         if participant_ids:
             col_cat_subq = col_cat_subq.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-            col_cat_subq = col_cat_subq.filter(DatasetRow.participant_id.in_(participant_ids))
+            col_cat_subq = col_cat_subq.filter(pf.participant_clause(pf.ANSWER, participant_ids))
         if code_ids is not None:
             col_cat_subq = col_cat_subq.filter(CodeApplication.code_id.in_(code_ids))
         col_cat_subq = _coder_filter(col_cat_subq, coder_ids, layer_scope)
@@ -2571,7 +2789,7 @@ def get_source_frequencies(
         if conv_ids_filter is not None:
             conv_code_subq = conv_code_subq.filter(Segment.conversation_id.in_(conv_ids_filter))
         if participant_ids:
-            conv_code_subq = conv_code_subq.filter(Speaker.participant_id.in_(participant_ids))
+            conv_code_subq = conv_code_subq.filter(pf.participant_clause(pf.TURN, participant_ids))
         if code_ids is not None:
             conv_code_subq = conv_code_subq.filter(CodeApplication.code_id.in_(code_ids))
         conv_code_subq = _coder_filter(conv_code_subq, coder_ids, layer_scope)  # + J2-B consensus exclusion
@@ -2609,13 +2827,15 @@ def get_source_frequencies(
             .filter(
                 Dataset.project_id == project_id,
                 DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
+                # #1526 D80 — paired with `col_coded_q` / `col_totals_q`; see the category arm.
+                substantive_text_clause(text_tae),
             )
         )
         if text_column_ids is not None:
             col_code_subq = col_code_subq.filter(DatasetValue.column_id.in_(text_column_ids))
         if participant_ids:
             col_code_subq = col_code_subq.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-            col_code_subq = col_code_subq.filter(DatasetRow.participant_id.in_(participant_ids))
+            col_code_subq = col_code_subq.filter(pf.participant_clause(pf.ANSWER, participant_ids))
         if code_ids is not None:
             col_code_subq = col_code_subq.filter(CodeApplication.code_id.in_(code_ids))
         col_code_subq = _coder_filter(col_code_subq, coder_ids, layer_scope)  # + J2-B consensus exclusion
@@ -2669,7 +2889,7 @@ def get_source_frequencies(
     if conv_ids_filter is not None:
         part_by_code_q = part_by_code_q.filter(Segment.conversation_id.in_(conv_ids_filter))
     if participant_ids:
-        part_by_code_q = part_by_code_q.filter(Speaker.participant_id.in_(participant_ids))
+        part_by_code_q = part_by_code_q.filter(pf.participant_clause(pf.TURN, participant_ids))
     if code_ids is not None:
         part_by_code_q = part_by_code_q.filter(CodeApplication.code_id.in_(code_ids))
     part_by_code_q = _coder_filter(part_by_code_q, coder_ids, layer_scope)
@@ -2694,7 +2914,7 @@ def get_source_frequencies(
         rec_by_code_q = rec_by_code_q.filter(DatasetValue.column_id.in_(text_column_ids))
     if participant_ids:
         rec_by_code_q = rec_by_code_q.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-        rec_by_code_q = rec_by_code_q.filter(DatasetRow.participant_id.in_(participant_ids))
+        rec_by_code_q = rec_by_code_q.filter(pf.participant_clause(pf.ANSWER, participant_ids))
     if code_ids is not None:
         rec_by_code_q = rec_by_code_q.filter(CodeApplication.code_id.in_(code_ids))
     rec_by_code_q = _coder_filter(rec_by_code_q, coder_ids, layer_scope)
@@ -2720,7 +2940,7 @@ def get_source_frequencies(
     if conv_ids_filter is not None:
         total_part_q = total_part_q.filter(Segment.conversation_id.in_(conv_ids_filter))
     if participant_ids:
-        total_part_q = total_part_q.filter(Speaker.participant_id.in_(participant_ids))
+        total_part_q = total_part_q.filter(pf.participant_clause(pf.TURN, participant_ids))
     total_participants = total_part_q.scalar() or 0
 
     # Speakers never linked to a participant. They are excluded from the
@@ -2764,7 +2984,7 @@ def get_source_frequencies(
         total_rec_q = total_rec_q.filter(DatasetValue.column_id.in_(text_column_ids))
     if participant_ids:
         total_rec_q = total_rec_q.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-        total_rec_q = total_rec_q.filter(DatasetRow.participant_id.in_(participant_ids))
+        total_rec_q = total_rec_q.filter(pf.participant_clause(pf.ANSWER, participant_ids))
     total_records = total_rec_q.scalar() or 0
 
     for _c in codes_info:
@@ -2798,6 +3018,8 @@ def get_source_frequencies(
     )
     if doc_ids_filter is not None:
         doc_totals_q = doc_totals_q.filter(Segment.document_id.in_(doc_ids_filter))
+    # #1536 (D116): under a participant filter, only documents linked to those participants.
+    doc_totals_q = pf.narrow_to_participants(doc_totals_q, pf.DOCUMENT, participant_ids)
     doc_totals_q = doc_totals_q.group_by(Segment.document_id)
     doc_totals = {r[0]: (r[1], int(r[2])) for r in doc_totals_q.all()}
 
@@ -2820,6 +3042,7 @@ def get_source_frequencies(
         doc_coded_q = doc_coded_q.filter(~CodeApplication.code_id.in_(universal_ids))
     if doc_ids_filter is not None:
         doc_coded_q = doc_coded_q.filter(Segment.document_id.in_(doc_ids_filter))
+    doc_coded_q = pf.narrow_to_participants(doc_coded_q, pf.DOCUMENT, participant_ids)
     doc_coded_q = _coder_filter(doc_coded_q, coder_ids, layer_scope)
     doc_coded_q = doc_coded_q.group_by(Segment.document_id)
     doc_coded = {r[0]: r[1] for r in doc_coded_q.all()}
@@ -2846,6 +3069,7 @@ def get_source_frequencies(
             doc_cat_subq = doc_cat_subq.filter(Segment.document_id.in_(doc_ids_filter))
         if code_ids is not None:
             doc_cat_subq = doc_cat_subq.filter(CodeApplication.code_id.in_(code_ids))
+        doc_cat_subq = pf.narrow_to_participants(doc_cat_subq, pf.DOCUMENT, participant_ids)
         doc_cat_subq = _coder_filter(doc_cat_subq, coder_ids, layer_scope)
         doc_cat_subq = doc_cat_subq.distinct().subquery()
 
@@ -2886,6 +3110,7 @@ def get_source_frequencies(
             doc_code_subq = doc_code_subq.filter(Segment.document_id.in_(doc_ids_filter))
         if code_ids is not None:
             doc_code_subq = doc_code_subq.filter(CodeApplication.code_id.in_(code_ids))
+        doc_code_subq = pf.narrow_to_participants(doc_code_subq, pf.DOCUMENT, participant_ids)
         doc_code_subq = _coder_filter(doc_code_subq, coder_ids, layer_scope)  # + J2-B consensus exclusion
         doc_code_subq = doc_code_subq.distinct().subquery()
 
@@ -2933,6 +3158,8 @@ def get_source_frequencies(
     )
     if obs_ids_filter is not None:
         obs_totals_q = obs_totals_q.filter(Segment.observation_id.in_(obs_ids_filter))
+    # #1536 (D117): under a participant filter no observation is listed at all (the assembly
+    # loop below skips them), so these four reads need no participant clause.
     obs_totals_q = obs_totals_q.group_by(Segment.observation_id)
     obs_totals = {r[0]: (r[1], int(r[2])) for r in obs_totals_q.all()}
 
@@ -3059,7 +3286,7 @@ def get_source_frequencies(
         col_totals_q = col_totals_q.filter(DatasetValue.column_id.in_(text_column_ids))
     if participant_ids:
         col_totals_q = col_totals_q.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-        col_totals_q = col_totals_q.filter(DatasetRow.participant_id.in_(participant_ids))
+        col_totals_q = col_totals_q.filter(pf.participant_clause(pf.ANSWER, participant_ids))
     col_totals_q = col_totals_q.group_by(DatasetValue.column_id)
     col_totals = {r[0]: (r[1], int(r[2])) for r in col_totals_q.all()}
 
@@ -3086,7 +3313,7 @@ def get_source_frequencies(
         col_coded_q = col_coded_q.filter(DatasetValue.column_id.in_(text_column_ids))
     if participant_ids:
         col_coded_q = col_coded_q.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-        col_coded_q = col_coded_q.filter(DatasetRow.participant_id.in_(participant_ids))
+        col_coded_q = col_coded_q.filter(pf.participant_clause(pf.ANSWER, participant_ids))
     col_coded_q = _coder_filter(col_coded_q, coder_ids, layer_scope)
     col_coded_q = col_coded_q.group_by(DatasetValue.column_id)
     col_coded = {r[0]: r[1] for r in col_coded_q.all()}
@@ -3109,14 +3336,9 @@ def get_source_frequencies(
     col_groups: dict = {}
     doc_groups: dict = {}
     if part_group_map:
-        effective_id_expr = (
-            sa_case(
-                (Code.category_id.isnot(None), Code.category_id),
-                else_=(-1 * Code.id),
-            )
-            if aggregation == "category"
-            else Code.id
-        )
+        # The module's one fold (#1529 D91) — this arm carried an inline copy that would
+        # have kept a universal code inside its category while every other arm took it out.
+        effective_id_expr = _EFFECTIVE_CAT_ID if aggregation == "category" else Code.id
         conv_groups, col_groups, doc_groups = _compute_source_groups(
             db,
             project_id,
@@ -3222,6 +3444,13 @@ def get_source_frequencies(
 
     for o_id, (obs_name, import_order) in obs_map.items():
         if obs_ids_filter is not None and o_id not in obs_ids_filter:
+            continue
+        # #1536 (D117): under a participant filter an observation is LEFT OUT, not listed with
+        # zeros — it can reach no participant, so a row (and the summary's Obs. columns, which
+        # `presentSourceKinds` derives from these sources) would print "0.0%" for every code,
+        # a share of clips that were never counted. A conversation or document the filter
+        # leaves empty stays listed: it could have reached them.
+        if participant_ids:
             continue
         t_segs, t_wc = obs_totals.get(o_id, (0, 0))
         coded = obs_coded.get(o_id, 0)
@@ -3332,20 +3561,37 @@ def get_source_level_cooccurrence(
 ) -> tuple[dict, int]:
     """Build binary co-occurrence at source level (conversation, document, or column).
 
-    Each source contributes at most 1 to each code pair.
+    Each source contributes at most 1 to each code pair — and, since #1335 (D46),
+    only where ONE coder applied both codes somewhere in the source; the diagonal
+    still counts the sources carrying a code, by anyone. Each source kind is its
+    own read, tallied by `_tally_cooccurrence` ordered by the source's id; the
+    kinds' sources never coincide, so their tallies add.
+
+    #1527: a kind sent as ``[]`` is not read (D84, `_none_of_this_kind`), and a
+    question counts only its answers the project does not treat as no response (D85).
     """
     # Backward-compat: legacy callers may still pass "comments"
     if source == "comments":
         source = "text"
 
-    source_codes: dict[str, set[int]] = defaultdict(set)
+    cooccur: dict[tuple[int, int], int] = defaultdict(int)
+    n_sources = 0
+
+    def tally(query, source_id_column) -> None:
+        nonlocal n_sources
+        part, n = _tally_cooccurrence(
+            query.order_by(source_id_column).yield_per(_COOCCURRENCE_FETCH_BATCH)
+        )
+        for k, v in part.items():
+            cooccur[k] += v
+        n_sources += n
 
     # Conversations
     if source in ("conversations", "all"):
         conv_q = (
             db.query(
-                literal("conv").label("stype"),
-                Segment.conversation_id.label("sid"),
+                Segment.conversation_id,
+                CodeApplication.user_id,
                 CodeApplication.code_id,
             )
             .filter(CodeApplication.segment_id.isnot(None))
@@ -3363,18 +3609,18 @@ def get_source_level_cooccurrence(
         if conversation_ids:
             conv_q = conv_q.filter(Segment.conversation_id.in_(conversation_ids))
         if participant_ids:
-            conv_q = conv_q.filter(Speaker.participant_id.in_(participant_ids))
+            conv_q = conv_q.filter(pf.participant_clause(pf.TURN, participant_ids))
         if code_ids:
             conv_q = conv_q.filter(CodeApplication.code_id.in_(code_ids))
         conv_q = _coder_filter(conv_q, coder_ids, layer_scope)
-        for _, sid, cid in conv_q.all():
-            source_codes[f"conv_{sid}"].add(cid)
+        if not _none_of_this_kind(conversation_ids):
+            tally(conv_q, Segment.conversation_id)
 
         # Documents (segment-based, same source mode as conversations)
         doc_q = (
             db.query(
-                literal("doc").label("stype"),
-                Segment.document_id.label("sid"),
+                Segment.document_id,
+                CodeApplication.user_id,
                 CodeApplication.code_id,
             )
             .filter(CodeApplication.segment_id.isnot(None))
@@ -3388,18 +3634,18 @@ def get_source_level_cooccurrence(
         )
         if document_ids:
             doc_q = doc_q.filter(Segment.document_id.in_(document_ids))
+        doc_q = pf.narrow_to_participants(doc_q, pf.DOCUMENT, participant_ids)  # #1536 D116
         if code_ids:
             doc_q = doc_q.filter(CodeApplication.code_id.in_(code_ids))
         doc_q = _coder_filter(doc_q, coder_ids, layer_scope)
-        for _, sid, cid in doc_q.all():
-            source_codes[f"doc_{sid}"].add(cid)
+        if not _none_of_this_kind(document_ids):
+            tally(doc_q, Segment.document_id)
 
-        # Observations (clip-based; the source unit is the OBSERVATION —
-        # keyed obs_ per the established conv_/doc_/col_ convention)
+        # Observations (clip-based; the source unit is the OBSERVATION)
         obs_q = (
             db.query(
-                literal("obs").label("stype"),
-                Segment.observation_id.label("sid"),
+                Segment.observation_id,
+                CodeApplication.user_id,
                 CodeApplication.code_id,
             )
             .filter(CodeApplication.segment_id.isnot(None))
@@ -3413,18 +3659,19 @@ def get_source_level_cooccurrence(
         )
         if observation_ids:
             obs_q = obs_q.filter(Segment.observation_id.in_(observation_ids))
+        obs_q = pf.narrow_to_participants(obs_q, pf.CLIP, participant_ids)  # #1536 D117
         if code_ids:
             obs_q = obs_q.filter(CodeApplication.code_id.in_(code_ids))
         obs_q = _coder_filter(obs_q, coder_ids, layer_scope)
-        for _, sid, cid in obs_q.all():
-            source_codes[f"obs_{sid}"].add(cid)
+        if not _none_of_this_kind(observation_ids):
+            tally(obs_q, Segment.observation_id)
 
     # Text columns
     if source in ("text", "all"):
         col_q = (
             db.query(
-                literal("col").label("stype"),
-                DatasetValue.column_id.label("sid"),
+                DatasetValue.column_id,
+                CodeApplication.user_id,
                 CodeApplication.code_id,
             )
             .filter(CodeApplication.dataset_value_id.isnot(None))
@@ -3434,28 +3681,21 @@ def get_source_level_cooccurrence(
             .filter(
                 Dataset.project_id == project_id,
                 DatasetColumn.column_type.in_([ColumnType.OPEN_TEXT]),
+                substantive_text_clause(treat_as_empty_for_project(db, project_id)),
             )
         )
         if text_column_ids:
             col_q = col_q.filter(DatasetValue.column_id.in_(text_column_ids))
         if participant_ids:
             col_q = col_q.join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-            col_q = col_q.filter(DatasetRow.participant_id.in_(participant_ids))
+            col_q = col_q.filter(pf.participant_clause(pf.ANSWER, participant_ids))
         if code_ids:
             col_q = col_q.filter(CodeApplication.code_id.in_(code_ids))
         col_q = _coder_filter(col_q, coder_ids, layer_scope)
-        for _, sid, cid in col_q.all():
-            source_codes[f"col_{sid}"].add(cid)
+        if not _none_of_this_kind(text_column_ids):
+            tally(col_q, DatasetValue.column_id)
 
-    cooccur: dict[tuple[int, int], int] = defaultdict(int)
-    for codes in source_codes.values():
-        for c in codes:
-            cooccur[(c, c)] += 1
-        for a, b in combinations(codes, 2):
-            cooccur[(a, b)] += 1
-            cooccur[(b, a)] += 1
-
-    return cooccur, len(source_codes)
+    return cooccur, n_sources
 
 
 # ── Demographic Comparison ────────────────────────────────────────────────
@@ -3471,88 +3711,206 @@ def get_demographic_comparison(
     participant_ids: list[int] | None = None,
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
+    document_ids: list[int] | None = None,
+    observation_ids: list[int] | None = None,
+    unit: str = cmp_basis.DEFAULT_COMPARISON_UNIT,
+    correction: str = DEFAULT_CORRECTION,
 ) -> dict:
-    """Compare code frequencies across demographic groups."""
+    """Compare, per code, how many PARTICIPANTS in each group used it (#1323).
+
+    **The unit.** A participant counts once: they "used" a code when at least one of
+    their passages in the material compared carries it. The denominator is the
+    group's participants WITH material in scope (≥1 passage) — a participant
+    surveyed but silent here is not a "did not use" (#1421's four doors). Passage
+    counts ride every cell as a DESCRIPTION; passages from one person are not
+    independent, so they are never tested (``comparison_basis.TESTED_UNITS``).
+
+    **The material (#1297 / #1298).** Each source kind reaches a person its own way:
+    a conversation turn through its speaker's participant link (facilitator turns
+    out by default); a document segment through ``Document.participant_id``; an
+    open-text answer through its row's ``DatasetRow.participant_id``, counted only
+    when substantive (`treat_as_empty`, #519). Observations have no participant link
+    and are never counted — the ``scope`` block says how many were left out. A
+    passage with no person (an unlinked speaker, a document with no subject, an
+    answer row with no participant) is counted in ``scope.unassigned_passages`` and
+    in no group. Per kind, ``None`` = every source of that kind, a list = exactly
+    those (``[]`` = none) — the client sends lists whenever ANY source is selected.
+
+    **The test.** Per code, over the groups that HAVE participants with material
+    (an empty group stays a column, marked, and leaves the test — #591's rule):
+    Fisher's exact test for two, Freeman–Halton for three or more. The p-values of
+    the codes tested in THIS result are corrected together (``correction``, discrete
+    Holm by default — `services/multiplicity.py`); stars and ``significant`` read
+    the ADJUSTED p.
+    """
+    if unit not in cmp_basis.COMPARISON_UNITS:
+        raise ValueError(f"unknown comparison unit: {unit!r}")
+    # Checked up front, not only where the p-values are adjusted: the early return
+    # below states the correction too, and must never state one nobody can apply.
+    if correction not in CORRECTIONS:
+        raise ValueError(f"unknown multiplicity correction: {correction!r}")
 
     part_group = _build_participant_group_map(db, project_id, group_by_subtype)
-    if not part_group:
-        return {"groups": [], "group_totals": {}, "codes": []}
-
     # Filter to requested participants
     if participant_ids:
-        part_group = {pid: g for pid, g in part_group.items() if pid in set(participant_ids)}
+        wanted = set(participant_ids)
+        part_group = {pid: g for pid, g in part_group.items() if pid in wanted}
 
     # #496 / AC-4: numeric-aware label ordering — a plain sorted() put "10"
     # before "8" (the #406 class) in the comparison columns.
     groups = order_value_labels(set(part_group.values()))
-    if len(groups) < 2:
-        return {"groups": groups, "group_totals": {g: {"total_segments": 0, "total_word_count": 0} for g in groups}, "codes": []}
 
-    # Group → participant IDs
-    group_pids: dict[str, set[int]] = defaultdict(set)
-    for pid, g in part_group.items():
-        group_pids[g].add(pid)
+    # ── 1. Every passage in scope, and the person it belongs to (None = nobody) ──
+    # Rows of (kind, unit id, participant id | None, word count). Filtered by the
+    # SOURCE selection and the project; never by a participant-id list built from
+    # the data (SQLite's 250,000-parameter ceiling, `sql-id-sets.md`).
+    units: dict[tuple[str, int], int | None] = {}
+    words: dict[tuple[str, int], int] = {}
+    sources: dict[str, set[int]] = {"conv": set(), "doc": set(), "col": set()}
 
-    # Totals per group (conversation segments)
-    group_seg_totals: dict[str, int] = defaultdict(int)
-    group_wc_totals: dict[str, int] = defaultdict(int)
-
-    for group, pids in group_pids.items():
-        pid_list = list(pids)
-        q = (
-            db.query(
-                func.count(Segment.id),
-                func.coalesce(func.sum(Segment.word_count), 0),
-            )
-            .join(Conversation, Segment.conversation_id == Conversation.id)
-            .outerjoin(Speaker, Segment.speaker_id == Speaker.id)
-            .filter(
-                Conversation.project_id == project_id,
-                Segment.merged_into_id == None,
-                Segment.split_into_id == None,
-                Speaker.participant_id.in_(pid_list),
-            )
-        )
+    def _scope_conv(q):
+        q = (q.join(Conversation, Segment.conversation_id == Conversation.id)
+              .outerjoin(Speaker, Segment.speaker_id == Speaker.id)
+              .filter(Conversation.project_id == project_id,
+                      Segment.merged_into_id == None, Segment.split_into_id == None))
         if exclude_facilitator:
             q = q.filter((Speaker.is_facilitator == 0) | (Speaker.id == None))
-        if conversation_ids:
+        if conversation_ids is not None:
             q = q.filter(Segment.conversation_id.in_(conversation_ids))
-        result = q.first()
-        group_seg_totals[group] = result[0] if result else 0
-        group_wc_totals[group] = int(result[1]) if result else 0
+        return q
 
-    # Per-group, per-code counts
-    group_code_counts: dict[str, dict[int, int]] = {g: defaultdict(int) for g in groups}
+    def _scope_doc(q):
+        q = (q.join(Document, Segment.document_id == Document.id)
+              .filter(Document.project_id == project_id,
+                      Segment.merged_into_id == None, Segment.split_into_id == None))
+        if document_ids is not None:
+            q = q.filter(Segment.document_id.in_(document_ids))
+        return q
 
-    for group, pids in group_pids.items():
-        pid_list = list(pids)
-        q = (
-            # Track J · J2: distinct coded segments per code, not raw rows (a
-            # segment coded by two coders is two rows). _coder_filter applies the
-            # J2-B consensus exclusion.
-            db.query(CodeApplication.code_id, func.count(func.distinct(CodeApplication.segment_id)))
-            .filter(CodeApplication.segment_id.isnot(None))
-            .join(Segment, CodeApplication.segment_id == Segment.id)
-            .join(Conversation, Segment.conversation_id == Conversation.id)
-            .outerjoin(Speaker, Segment.speaker_id == Speaker.id)
-            .filter(
-                Conversation.project_id == project_id,
-                Segment.merged_into_id == None,
-                Segment.split_into_id == None,
-                Speaker.participant_id.in_(pid_list),
-            )
-        )
-        if exclude_facilitator:
-            q = q.filter((Speaker.is_facilitator == 0) | (Speaker.id == None))
-        if conversation_ids:
-            q = q.filter(Segment.conversation_id.in_(conversation_ids))
+    tae = treat_as_empty_for_project(db, project_id)
+
+    def _scope_text(q):
+        q = (q.join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
+              .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+              .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+              .filter(Dataset.project_id == project_id,
+                      DatasetColumn.column_type == ColumnType.OPEN_TEXT,
+                      substantive_text_clause(tae)))
+        if text_column_ids is not None:
+            q = q.filter(DatasetValue.column_id.in_(text_column_ids))
+        return q
+
+    if conversation_ids is None or conversation_ids:
+        for sid, pid, src, wc in _scope_conv(
+            db.query(Segment.id, Speaker.participant_id, Segment.conversation_id, Segment.word_count)
+        ).all():
+            units[("seg", sid)] = pid
+            words[("seg", sid)] = int(wc or 0)
+            sources["conv"].add(src)
+    if document_ids is None or document_ids:
+        for sid, pid, src, wc in _scope_doc(
+            db.query(Segment.id, Document.participant_id, Segment.document_id, Segment.word_count)
+        ).all():
+            units[("seg", sid)] = pid
+            words[("seg", sid)] = int(wc or 0)
+            sources["doc"].add(src)
+    if text_column_ids is None or text_column_ids:
+        for vid, pid, src, wc in _scope_text(
+            db.query(DatasetValue.id, DatasetRow.participant_id, DatasetValue.column_id, DatasetValue.word_count)
+        ).all():
+            units[("val", vid)] = pid
+            words[("val", vid)] = int(wc or 0)
+            sources["col"].add(src)
+
+    # ── 2. Which code each passage carries (coder + layer scope; distinct) ──
+    unit_codes: dict[tuple[str, int], set[int]] = defaultdict(set)
+
+    def _code_scope(q):
         if code_ids:
             q = q.filter(CodeApplication.code_id.in_(code_ids))
-        q = _coder_filter(q, coder_ids, layer_scope)  # + J2-B consensus exclusion
-        q = q.group_by(CodeApplication.code_id)
+        return _coder_filter(q, coder_ids, layer_scope)  # + J2-B consensus exclusion
 
-        for cid, cnt in q.all():
-            group_code_counts[group][cid] = cnt
+    if conversation_ids is None or conversation_ids:
+        q = db.query(CodeApplication.segment_id, CodeApplication.code_id).join(
+            Segment, CodeApplication.segment_id == Segment.id)
+        for sid, cid in _code_scope(_scope_conv(q)).distinct().all():
+            unit_codes[("seg", sid)].add(cid)
+    if document_ids is None or document_ids:
+        q = db.query(CodeApplication.segment_id, CodeApplication.code_id).join(
+            Segment, CodeApplication.segment_id == Segment.id)
+        for sid, cid in _code_scope(_scope_doc(q)).distinct().all():
+            unit_codes[("seg", sid)].add(cid)
+    if text_column_ids is None or text_column_ids:
+        q = db.query(CodeApplication.dataset_value_id, CodeApplication.code_id).join(
+            DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
+        for vid, cid in _code_scope(_scope_text(q)).distinct().all():
+            unit_codes[("val", vid)].add(cid)
+
+    # ── 3. Fold passages into groups: the denominators in both units ──
+    if participant_ids:
+        # A participant filter makes "unassigned" moot (source frequencies' rule).
+        wanted = set(participant_ids)
+        units = {k: p for k, p in units.items() if p in wanted}
+    unassigned = sum(1 for p in units.values() if p is None)
+    without_group = {p for p in units.values() if p is not None and p not in part_group}
+    group_people: dict[str, set[int]] = {g: set() for g in groups}
+    group_passages: dict[str, int] = defaultdict(int)
+    group_words: dict[str, int] = defaultdict(int)
+    code_people: dict[str, dict[int, set[int]]] = {g: defaultdict(set) for g in groups}
+    code_passages: dict[str, dict[int, int]] = {g: defaultdict(int) for g in groups}
+    for key, pid in units.items():
+        g = part_group.get(pid) if pid is not None else None
+        if g is None:
+            continue
+        group_people[g].add(pid)
+        group_passages[g] += 1
+        group_words[g] += words.get(key, 0)
+        for cid in unit_codes.get(key, ()):
+            code_people[g][cid].add(pid)
+            code_passages[g][cid] += 1
+
+    def _n(g: str) -> int:
+        return len(group_people[g]) if unit == cmp_basis.COMPARISON_UNIT_PARTICIPANT else group_passages[g]
+
+    def _count(g: str, cid: int) -> int:
+        if unit == cmp_basis.COMPARISON_UNIT_PARTICIPANT:
+            return len(code_people[g].get(cid, ()))
+        return code_passages[g].get(cid, 0)
+
+    tested_groups = [g for g in groups if _n(g) > 0]
+    if unit not in cmp_basis.TESTED_UNITS:
+        test_omitted = cmp_basis.TEST_OMITTED_PASSAGE_UNIT
+    elif len(tested_groups) < 2:
+        test_omitted = cmp_basis.TEST_OMITTED_INSUFFICIENT_GROUPS
+    else:
+        test_omitted = None
+    # Observations have no participant link: the selected ones (every one when the
+    # selection is the whole project) are LEFT OUT, and the result says how many.
+    if observation_ids is None:
+        n_obs_left_out = db.query(func.count(Observation.id)).filter(
+            Observation.project_id == project_id).scalar() or 0
+    else:
+        n_obs_left_out = len(set(observation_ids))
+    scope = {
+        "conversations": len(sources["conv"]),
+        "documents": len(sources["doc"]),
+        "text_columns": len(sources["col"]),
+        "observations_left_out": int(n_obs_left_out),
+        "unassigned_passages": unassigned,
+        "participants_without_group": len(without_group),
+    }
+    group_totals = {
+        g: {"n": _n(g), "participants": len(group_people[g]),
+            "total_segments": group_passages[g], "total_word_count": group_words[g]}
+        for g in groups
+    }
+    if len(groups) < 2:
+        return {
+            "groups": groups, "group_totals": group_totals, "codes": [],
+            "basis": _comparison_basis(unit, correction, 0, tested_groups,
+                                       test_omitted or cmp_basis.TEST_OMITTED_INSUFFICIENT_GROUPS),
+            "scope": scope,
+        }
 
     # Load codes
     code_query = (
@@ -3567,97 +3925,47 @@ def get_demographic_comparison(
         code_id_set = set(code_ids)
         all_codes = [c for c in all_codes if c.id in code_id_set]
 
-    # Build comparison entries with statistical tests
+    # Build comparison entries; the tests are corrected TOGETHER below.
     entries = []
     for code in all_codes:
         by_group = {}
         for g in groups:
-            count = group_code_counts[g].get(code.id, 0)
-            total = group_seg_totals[g]
-            # #1421: a group with no segments in the material compared has no
-            # share to report — None WITH a reason, never 0.0, which read as
-            # "this group never said it" and made a full-size difference.
-            # ⚠️ Keyed on the TOTAL, never on the count: a group WITH segments
-            # and none coded this code is a real 0.0 and must stay one.
-            if total > 0:
-                by_group[g] = {"count": count, "proportion": round(count / total, 4),
-                               "undefined_reason": None}
-            else:
-                by_group[g] = {"count": count, "proportion": None,
-                               "undefined_reason": NO_SEGMENTS}
+            count = _count(g, code.id)
+            n = _n(g)
+            # #1421: a group with no material in the sources compared has no share
+            # — None WITH a reason, never 0.0. ⚠️ Keyed on the group's n, never on
+            # the count: a group WITH material that never used the code is a real 0.
+            by_group[g] = {
+                "count": count,
+                "proportion": round(count / n, 4) if n > 0 else None,
+                "undefined_reason": None if n > 0 else NO_SEGMENTS,
+                # Always the PASSAGE count — a description beside the tested number.
+                "passages": code_passages[g].get(code.id, 0),
+            }
 
-        # Statistical test
         delta = None
-        test_result = None
-
+        delta_ci = None
         if len(groups) == 2:
-            g1, g2 = groups
-            p1, p2 = by_group[g1]["proportion"], by_group[g2]["proportion"]
-            # #1421: a difference needs both shares. Every code's Δ is then None
-            # together, so the |Δ| sort below leaves the codebook order — it ranks
-            # nothing, which is the honest answer.
+            p1, p2 = (by_group[g]["proportion"] for g in groups)
+            # #1421: a difference needs both shares.
             delta = round(p1 - p2, 4) if p1 is not None and p2 is not None else None
-            # Fisher's exact test on 2x2 table
-            a = by_group[g1]["count"]
-            b = group_seg_totals[g1] - a
-            c = by_group[g2]["count"]
-            d = group_seg_totals[g2] - c
-            if group_seg_totals[g1] > 0 and group_seg_totals[g2] > 0:
-                try:
-                    from scipy.stats import fisher_exact
-                    _, p = fisher_exact([[a, b], [c, d]])
-                    test_result = {
-                        "method": "fisher_exact",
-                        "statistic": None,
-                        "p_value": round(p, 6),
-                        "significant": p < 0.05,
-                    }
-                    # Odds ratio effect size
-                    if b * c > 0:
-                        odds_ratio = (a * d) / (b * c)
-                        test_result["effect_size"] = round(odds_ratio, 4)
-                        test_result["effect_size_label"] = "odds_ratio"
-                except (ZeroDivisionError, ValueError, TypeError) as exc:
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "Fisher's exact test failed for code %s: %s", code.id, exc
-                    )
-        elif len(groups) >= 3:
-            # Chi-square on kx2 table
-            observed = []
-            for g in groups:
-                count = by_group[g]["count"]
-                total = group_seg_totals[g]
-                observed.append([count, total - count])
-            # Check if any column totals are zero
-            col_sums = [sum(row[i] for row in observed) for i in range(2)]
-            if all(s > 0 for s in col_sums) and all(group_seg_totals[g] > 0 for g in groups):
-                try:
-                    from scipy.stats import chi2_contingency
-                    import math
-                    chi2, p, _, expected = chi2_contingency(observed)
-                    # Check for small expected cells
-                    method = "chi2"
-                    if any(cell < 5 for row in expected for cell in row):
-                        method = "chi2_small_expected"
-                    test_result = {
-                        "method": method,
-                        "statistic": round(chi2, 4),
-                        "p_value": round(p, 6),
-                        "significant": p < 0.05,
-                    }
-                    # Cramér's V effect size (kx2 table: min dimension is 2, so k-1 = 1)
-                    n_total = sum(group_seg_totals[g] for g in groups)
-                    min_dim = min(len(observed), 2)  # rows=groups, cols=2 (coded/not)
-                    if n_total > 0 and min_dim > 1:
-                        cramers_v = math.sqrt(chi2 / (n_total * (min_dim - 1)))
-                        test_result["effect_size"] = round(cramers_v, 4)
-                        test_result["effect_size_label"] = "cramers_v"
-                except (ZeroDivisionError, ValueError, TypeError) as exc:
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "Chi-square test failed for code %s: %s", code.id, exc
-                    )
+            # D3: Δ's interval (Newcombe, UNADJUSTED) — only over a TESTED unit:
+            # passages from one person are not independent, so an interval over
+            # them would claim a precision the data do not have.
+            if delta is not None and unit in cmp_basis.TESTED_UNITS:
+                g1, g2 = groups
+                delta_ci = cmp_basis.delta_interval(
+                    by_group[g1]["count"], _n(g1), by_group[g2]["count"], _n(g2))
+
+        test_result = None
+        omitted = test_omitted
+        if omitted is None and code.is_universal and not cmp_basis.UNIVERSAL_CODES_TESTED:
+            omitted = cmp_basis.TEST_OMITTED_UNIVERSAL
+        if omitted is None:
+            test_result = cmp_basis.presence_test(
+                [by_group[g]["count"] for g in tested_groups], [_n(g) for g in tested_groups])
+            if test_result is None:
+                omitted = cmp_basis.TEST_OMITTED_NO_VARIANCE
 
         entries.append({
             "code_id": code.id,
@@ -3665,22 +3973,60 @@ def get_demographic_comparison(
             "category_name": code.category.name if code.category else None,
             "by_group": by_group,
             "delta_proportion": delta,
+            "delta_ci": delta_ci,
             "test": test_result,
+            "test_omitted_reason": omitted,
         })
 
-    # Sort: by abs(delta) desc for 2 groups, by p-value asc for 3+
+    # 🔴 The family is the codes TESTED in this result — a code with no test (no
+    # variance, a universal code) cannot be rejected and must not widen it.
+    family = [e for e in entries if e["test"] is not None]
+    supports = [e["test"].pop("support") for e in family]
+    mins = [e["test"]["min_attainable_p"] for e in family]
+    adjusted = adjust_p_values([e["test"]["p_value"] for e in family], correction, supports)
+    # The marker: the best adjusted p each code could EVER get with these margins.
+    # From the margins alone — not a selection on the result.
+    best = best_case_adjusted(mins, correction, supports)
+    for e, p_adj, b in zip(family, adjusted, best):
+        t = e["test"]
+        t["p_value"] = finite_or_none(t["p_value"], 6)
+        t["p_adjusted"] = finite_or_none(p_adj, 6)
+        t["significant"] = bool(p_adj < cmp_basis.COMPARISON_ALPHA)
+        t["min_attainable_p"] = finite_or_none(t["min_attainable_p"], 6)
+        t["can_reach_significance"] = None if b is None else bool(b < cmp_basis.COMPARISON_ALPHA)
+    n_reachable = sum(1 for e in family if e["test"]["can_reach_significance"])
+
+    # Sort: by |Δ| desc for 2 groups, by adjusted p asc for 3+ (untested last)
     if len(groups) == 2:
         entries.sort(key=lambda e: abs(e["delta_proportion"] or 0), reverse=True)
     else:
-        entries.sort(key=lambda e: (e["test"]["p_value"] if e["test"] else 1.0))
+        entries.sort(key=lambda e: (e["test"] is None, e["test"]["p_adjusted"] if e["test"] else 1.0))
 
     return {
         "groups": groups,
-        "group_totals": {
-            g: {"total_segments": group_seg_totals[g], "total_word_count": group_wc_totals[g]}
-            for g in groups
-        },
+        "group_totals": group_totals,
         "codes": entries,
+        "basis": _comparison_basis(unit, correction, len(family), tested_groups, test_omitted,
+                                   n_reachable, tarone_family_size(mins, cmp_basis.COMPARISON_ALPHA)),
+        "scope": scope,
+    }
+
+
+def _comparison_basis(unit: str, correction: str, family_size: int,
+                      tested_groups: list[str], test_omitted: str | None,
+                      family_reachable: int = 0, tarone_family: int = 0) -> dict:
+    """The comparison's stated basis — every field present on every response."""
+    return {
+        "unit": unit,
+        "correction": correction,
+        "family_size": family_size,
+        # How many of the family could reach significance with these group sizes
+        # under THIS correction, and Tarone's effective family — both from margins.
+        "family_reachable": family_reachable,
+        "tarone_family_size": tarone_family,
+        "alpha": cmp_basis.COMPARISON_ALPHA,
+        "tested_groups": list(tested_groups) if test_omitted is None else [],
+        "test_omitted_reason": test_omitted,
     }
 
 

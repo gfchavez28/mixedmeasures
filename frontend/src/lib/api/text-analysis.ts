@@ -93,10 +93,16 @@ export const textAnalysisApi = {
   responseLength: (pid: number, params: { column_ids: string; coder_ids?: string; layer_scope?: LayerScope }) =>
     api.get<ResponseLengthResponse>(`/projects/${pid}/text-analysis/response-length-by-code`, { params }).then(r => r.data),
 
-  exportCrossAnalysis: (pid: number, params: { column_ids: string; filters?: string; coder_ids?: string; layer_scope?: LayerScope }) => {
+  /**
+   * 🔴 #1534 (1.5.9): the route reads `filters_json`. This sent `filters` from the day it was
+   * written (2026-02-19), FastAPI dropped it without a word, and no release's Cross-analysis
+   * CSV ever applied the panel's filters. `request-contract.test.ts` (D110) now holds every
+   * request's names to the routes' declared ones.
+   */
+  exportCrossAnalysis: (pid: number, params: { column_ids: string; filters_json?: string; coder_ids?: string; layer_scope?: LayerScope }) => {
     const searchParams = new URLSearchParams()
     searchParams.append('column_ids', params.column_ids)
-    if (params.filters) searchParams.append('filters', params.filters)
+    if (params.filters_json) searchParams.append('filters_json', params.filters_json)
     if (params.coder_ids) searchParams.append('coder_ids', params.coder_ids)
     if (params.layer_scope) searchParams.append('layer_scope', params.layer_scope)
     const qs = searchParams.toString()

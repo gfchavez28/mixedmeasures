@@ -424,6 +424,21 @@ def set_code_magnitude(
         CodeApplication.code_id == code_id,
         CodeApplication.user_id == user.id,
     ).first()
+    if application is None and segment.group_id:
+        # 🔴 #1334 unit 3 (D36) — a group is rated as ONE unit, so the coder's
+        # application may sit on another visible member (a coding made before
+        # grouping, `bulk_code`, a merged copy); the Reconciliation grid rates a
+        # group through one member. Any member's row is the unit's: the fan-out
+        # below writes the rating to every member the coder holds it on.
+        application = db.query(CodeApplication).join(
+            Segment, CodeApplication.segment_id == Segment.id,
+        ).filter(
+            Segment.group_id == segment.group_id,
+            Segment.merged_into_id == None,  # noqa: E711
+            Segment.split_into_id == None,  # noqa: E711
+            CodeApplication.code_id == code_id,
+            CodeApplication.user_id == user.id,
+        ).order_by(Segment.sequence_order, Segment.id).first()
     if not application:
         raise HTTPException(
             status_code=404,
@@ -522,24 +537,17 @@ async def remove_code(
         raise HTTPException(status_code=400, detail="Segment and code must belong to the same project")
 
     # Find and delete THIS coder's application only (per-coder layer; #J2-1b).
-    application = db.query(CodeApplication).filter(
-        CodeApplication.segment_id == segment_id,
-        CodeApplication.code_id == code_id,
-        CodeApplication.user_id == user.id
-    ).first()
-
-    if not application:
-        return CodeApplicationResponse(
-            segment_id=segment_id,
-            code_id=code_id,
-            applied=False
-        )
-
     # If segment is in a group, remove from all visible segments in group.
     # Scoped to user.id so removing a grouped code deletes only THIS coder's
     # applications across the group — never another coder's (#J2-1b nuke site).
+    #
+    # 🔴 #1334 unit 3 (D36) — on a group, "is it applied?" is asked of the GROUP,
+    # not of the addressed turn. The Reconciliation grid acts on a group through
+    # ONE member, and a coder's code can sit on another member only (a coding
+    # made before grouping, `bulk_code`, a merged copy); asking the addressed
+    # turn answered "not applied" and removed nothing.
     if segment.group_id:
-        db.query(CodeApplication).filter(
+        mine_in_group = db.query(CodeApplication).filter(
             CodeApplication.segment_id.in_(
                 db.query(Segment.id).filter(
                     Segment.group_id == segment.group_id,
@@ -549,8 +557,26 @@ async def remove_code(
             ),
             CodeApplication.code_id == code_id,
             CodeApplication.user_id == user.id
-        ).delete(synchronize_session=False)
+        )
+        if mine_in_group.first() is None:
+            return CodeApplicationResponse(
+                segment_id=segment_id,
+                code_id=code_id,
+                applied=False
+            )
+        mine_in_group.delete(synchronize_session=False)
     else:
+        application = db.query(CodeApplication).filter(
+            CodeApplication.segment_id == segment_id,
+            CodeApplication.code_id == code_id,
+            CodeApplication.user_id == user.id
+        ).first()
+        if not application:
+            return CodeApplicationResponse(
+                segment_id=segment_id,
+                code_id=code_id,
+                applied=False
+            )
         db.delete(application)
 
     log_action(

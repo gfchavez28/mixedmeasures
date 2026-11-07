@@ -9,9 +9,12 @@ import BlindModeToggle from '@/components/BlindModeToggle'
  * on Descriptives/Relationships otherwise sees an unexplained near-empty grid
  * while the source lists show all-coder coverage.
  */
-export default function BlindScopeNotice({ blind, onReveal, className = '', children }: {
+export default function BlindScopeNotice({ blind, onReveal, surface = 'analysis', className = '', children }: {
   blind: boolean
-  onReveal?: () => void
+  onReveal?: (surface?: string) => void
+  /** Where a reveal from this notice happened, for the reveal log (#1531: the Quote Board and
+   *  Cross-analysis say their own; the analysis page's notices keep 'analysis'). */
+  surface?: string
   className?: string
   children: ReactNode
 }) {
@@ -22,7 +25,7 @@ export default function BlindScopeNotice({ blind, onReveal, className = '', chil
       <span>{children}</span>
       {onReveal && (
         <span className="ml-auto flex-none">
-          <BlindModeToggle blind={blind} onToggle={onReveal} surface="analysis" />
+          <BlindModeToggle blind={blind} onToggle={onReveal} surface={surface} />
         </span>
       )}
     </div>

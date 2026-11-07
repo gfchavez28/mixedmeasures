@@ -2,7 +2,7 @@ import csv
 import io
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session, contains_eager, joinedload
+from sqlalchemy.orm import Session, aliased, contains_eager, joinedload
 from sqlalchemy import and_, or_, exists
 
 from ..database import get_db
@@ -31,7 +31,9 @@ from ..schemas.excerpt import (
 )
 from ..auth import get_current_user
 from ..services.audit import log_action
-from ..services.coding_layers import project_scoped_segments
+from ..services.coding_layers import coder_scope_clause, in_coder_scope, project_scoped_segments
+from ..services.id_set import in_id_set
+from ..services.participant_filter import ANSWER, participant_clause, segment_passage_clause
 from ..services.timestamp import format_timecode
 from .helpers import _get_project_or_404, parse_int_list, TEXT_TYPES, visible_segment_filter as _visible_segment_filter
 from .export_helpers import csv_safe
@@ -146,7 +148,13 @@ def _segment_excerpt_dup_query(db: Session, item: ExcerptCreate):
     """The per-shape duplicate lookup — one shape's duplicate never blocks
     another shape's create. The whole-shape arm routes through the single-
     sourced predicate (§8j.0.2): a bare `start_offset IS NULL` here would
-    match time-range excerpts too and 409 legitimate creates."""
+    match time-range excerpts too and 409 legitimate creates.
+
+    #1324 (decided 2026-10-31): char-range quotes may OVERLAP and NEST — only an
+    IDENTICAL range is a duplicate (`ix_excerpt_segment_range`). The absence of an
+    overlap refusal is the decision, not an oversight; `tests/test_quote_overlap.py`
+    fails if one is added (the renderer that once drew shared words twice is
+    `frontend/src/lib/quote-runs.ts`)."""
     q = db.query(Excerpt).filter(Excerpt.segment_id == item.segment_id)
     if item.start_offset is not None:
         return q.filter(
@@ -571,7 +579,7 @@ async def export_excerpts_csv(
 
 
 @router.get("/starred", response_model=QuotedExcerptsResponse)
-async def list_quoted_excerpts(
+def list_quoted_excerpts(
     project_id: int,
     source: str = Query("all", description="Source filter: all, conversations, or text (legacy 'comments' is coerced to 'text')"),
     code_ids: str | None = Query(None, description="Comma-separated code IDs"),
@@ -580,16 +588,33 @@ async def list_quoted_excerpts(
     text_column_ids: str | None = Query(None, description="Comma-separated text column IDs"),
     exclude_facilitator: bool = Query(False),
     participant_ids: str | None = Query(None, description="Comma-separated participant IDs"),
+    # #1531 D99 (1.5.9) — appended, BARE default (direct-call tests get real None).
+    # The Quote Board sends the effective coder scope while blind.
+    coder_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List all quoted excerpts (segments + text values) with enriched data."""
+    """List all quoted excerpts (segments + text values) with enriched data.
+
+    #1531 D99 (1.5.9): with ``coder_ids`` a quote's codes are those coders' only,
+    and the ``code_ids`` filter matches only their applications — the board filed a
+    blind coder's quotes under a colleague's codes, and a code filter would have
+    shown which quotes a colleague coded. The QUOTES stay: an excerpt has no author
+    (`models/excerpt.py`), and blind mode is about coding, so a quote only a
+    colleague coded lists with no codes.
+
+    #1539 (1.6.0): ``def``, not ``async def`` — its body awaits nothing, and once the
+    preceding-turn read stopped refusing at ~995 quotes the whole board runs to
+    completion on the selection: 6.7 s for 20,045 quotes and 19.9 s for 60,000 on the
+    D12 copy, all of it on the event loop as ``async`` (`test_endpoint_event_loop.py`).
+    """
     _get_project_or_404(db, project_id, user.id)
 
     # Backward-compat: legacy callers may still pass "comments"
     if source == "comments":
         source = "text"
 
+    scope = parse_int_list(coder_ids)
     parsed_code_ids = parse_int_list(code_ids)
     parsed_conversation_ids = parse_int_list(conversation_ids)
     parsed_document_ids = parse_int_list(document_ids)
@@ -643,7 +668,10 @@ async def list_quoted_excerpts(
             )
 
         if parsed_participant_ids:
-            seg_query = seg_query.filter(Speaker.participant_id.in_(parsed_participant_ids))
+            # #1536 (D116/D117): a turn by its speaker, a document quote by the participant the
+            # document is linked to, a clip never. This was the speaker clause alone over the
+            # outer join, so every document quote vanished — the filtered person's own included.
+            seg_query = seg_query.filter(segment_passage_clause(parsed_participant_ids))
 
         if parsed_code_ids:
             seg_query = seg_query.filter(
@@ -651,46 +679,45 @@ async def list_quoted_excerpts(
                     and_(
                         CodeApplication.segment_id == Segment.id,
                         CodeApplication.code_id.in_(parsed_code_ids),
+                        *([coder_scope_clause(scope)] if scope else []),
                     )
                 )
             )
 
         seg_excerpts = seg_query.all()
 
-        # Batch-fetch preceding segments for context_before
-        # Keys: ('conv', conversation_id, seq-1) or ('doc', document_id, seq-1)
-        conv_preceding_keys: set[tuple[int, int]] = set()
-        doc_preceding_keys: set[tuple[int, int]] = set()
-        for exc in seg_excerpts:
-            seg = exc.segment
-            if seg and seg.sequence_order is not None and seg.sequence_order > 0:
-                if seg.conversation_id:
-                    conv_preceding_keys.add((seg.conversation_id, seg.sequence_order - 1))
-                elif seg.document_id:
-                    doc_preceding_keys.add((seg.document_id, seg.sequence_order - 1))
-
+        # Batch-fetch preceding segments for context_before.
+        # Keys: ('conv', conversation_id, seq-1) or ('doc', document_id, seq-1).
+        # #1539 (1.6.0): ONE read per parent kind, joined back to the quoted turns, never one
+        # OR term per quote — SQLite refuses an expression tree deeper than 1,000
+        # (SQLITE_MAX_EXPR_DEPTH), so ~995 quotes with a preceding turn made the whole board
+        # answer 500. The quoted ids travel as one JSON array (`in_id_set`, no bind per row),
+        # and the preceding turn is the visible segment of the same parent one position
+        # earlier — the same predicate the OR spelled out. The visibility test is the
+        # `from_parent` form so SQLite cannot start from `ix_segments_merged_into_id` (every
+        # visible segment on the install, #1463 D62): it enters through the quoted ids and
+        # seeks the parent's `(…_id, sequence_order)` index.
         preceding_map: dict[tuple[str, int, int], Segment] = {}
-        prev_filter_clauses = []
-        for conv_id, seq in conv_preceding_keys:
-            prev_filter_clauses.append(
-                and_(Segment.conversation_id == conv_id, Segment.sequence_order == seq)
-            )
-        for doc_id, seq in doc_preceding_keys:
-            prev_filter_clauses.append(
-                and_(Segment.document_id == doc_id, Segment.sequence_order == seq)
-            )
-        if prev_filter_clauses:
-            prev_segments = (
-                db.query(Segment)
-                .filter(or_(*prev_filter_clauses), *_visible_segment_filter())
-                .options(joinedload(Segment.speaker))
-                .all()
-            )
-            for ps in prev_segments:
-                if ps.conversation_id:
-                    preceding_map[('conv', ps.conversation_id, ps.sequence_order)] = ps
-                elif ps.document_id:
-                    preceding_map[('doc', ps.document_id, ps.sequence_order)] = ps
+        quoted_ids = {exc.segment.id for exc in seg_excerpts if exc.segment is not None}
+        if quoted_ids:
+            quoted = aliased(Segment)
+            for tag, parent_col, quoted_parent_col in (
+                ('conv', Segment.conversation_id, quoted.conversation_id),
+                ('doc', Segment.document_id, quoted.document_id),
+            ):
+                prev_segments = (
+                    db.query(Segment)
+                    .join(quoted, and_(
+                        parent_col == quoted_parent_col,
+                        Segment.sequence_order == quoted.sequence_order - 1,
+                    ))
+                    .filter(in_id_set(quoted.id, quoted_ids))
+                    .filter(*_visible_segment_filter(from_parent=True))
+                    .options(joinedload(Segment.speaker))
+                    .all()
+                )
+                for ps in prev_segments:
+                    preceding_map[(tag, getattr(ps, parent_col.key), ps.sequence_order)] = ps
 
         for exc in seg_excerpts:
             seg = exc.segment
@@ -744,8 +771,10 @@ async def list_quoted_excerpts(
                     ctx_before = prev_seg.text
                     ctx_before_speaker = prev_seg.speaker.name if prev_seg.speaker else None
 
-            # Code applications
-            ca_ids = [ca.code_id for ca in seg.code_applications]
+            # Code applications (#1531 D99: the scope's own, when one is asked)
+            ca_ids = [
+                ca.code_id for ca in seg.code_applications if in_coder_scope(ca.user_id, scope)
+            ]
             codes_detail = []
             for cid in ca_ids:
                 c = code_map.get(cid)
@@ -820,7 +849,7 @@ async def list_quoted_excerpts(
             cmt_query = cmt_query.filter(DatasetColumn.id.in_(parsed_text_column_ids))
 
         if parsed_participant_ids:
-            cmt_query = cmt_query.filter(DatasetRow.participant_id.in_(parsed_participant_ids))
+            cmt_query = cmt_query.filter(participant_clause(ANSWER, parsed_participant_ids))
 
         if parsed_code_ids:
             cmt_query = cmt_query.filter(
@@ -828,6 +857,7 @@ async def list_quoted_excerpts(
                     and_(
                         CodeApplication.dataset_value_id == DatasetValue.id,
                         CodeApplication.code_id.in_(parsed_code_ids),
+                        *([coder_scope_clause(scope)] if scope else []),
                     )
                 )
             )
@@ -849,7 +879,9 @@ async def list_quoted_excerpts(
             ds_name = ds.name if ds else ""
             source_name = f"{ds_name} › {col_name}"
 
-            ca_ids = [ca.code_id for ca in dv.code_applications]
+            ca_ids = [
+                ca.code_id for ca in dv.code_applications if in_coder_scope(ca.user_id, scope)
+            ]
             codes_detail = []
             for cid in ca_ids:
                 c = code_map.get(cid)

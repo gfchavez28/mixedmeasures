@@ -78,6 +78,7 @@ function renderTab() {
           projectId={1} codes={CODES} codesStatus={'ready' as ListStatus} frequencies={[]}
           selectedContentCodeId={10} onCodeSelect={() => {}} filterParams={{ source: 'all' }}
           source="all" hasConversations hasCommentColumns={false} hasDocuments hasObservations={false}
+          chipsFollowCoderIds={false}
         />
       </MemoryRouter>
     </QueryClientProvider>,

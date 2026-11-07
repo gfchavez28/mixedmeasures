@@ -51,7 +51,7 @@ router = APIRouter(prefix="/api/projects/{project_id}/conversations", tags=["con
 
 def ensure_participant_for_speaker(
     db: Session, project_id: int, speaker: Speaker, name: str
-) -> None:
+) -> bool:
     """Auto-create or link Participant for non-facilitator speakers.
 
     #534: matching is trim-then-exact on Participant.identifier — the same rule
@@ -59,12 +59,18 @@ def ensure_participant_for_speaker(
     leading/trailing space in a CSV speaker label can't silently mint a
     duplicate participant. Case stays sensitive; a whitespace-only label
     identifies nobody and links nothing.
+
+    Returns True when the speaker was left UNLINKED because the project's
+    withdrawal record names the label (#1391 / #1472, D73–D74) — by the withdrawn
+    person's ID or by a name the project knew her by — so the import can say so.
+    An existing participant holding the identifier is matched first, so someone
+    reinstated under it (D12), or created by hand under one of her names, is linked.
     """
     if speaker.is_facilitator or speaker.participant_id is not None:
-        return
+        return False
     name = name.strip()
     if not name:
-        return
+        return False
     existing = db.query(Participant).filter(
         Participant.project_id == project_id,
         Participant.identifier == name,
@@ -72,12 +78,13 @@ def ensure_participant_for_speaker(
     if existing:
         speaker.participant_id = existing.id
     else:
-        # #1190 — never re-create a withdrawn participant from a speaker label.
+        # #1190 — never re-create a withdrawn participant from a speaker label; and
+        # #1472 (D73) — nor from a NAME she was known by, which only this door reads.
         from ..models.project import Project
-        from ..services.tombstones import is_withdrawn_identifier
+        from ..services import tombstones
         project_uuid = db.query(Project.project_uuid).filter(Project.id == project_id).scalar()
-        if is_withdrawn_identifier(db, project_uuid, name):
-            return
+        if tombstones.load(db, project_uuid).withdrawn_speaker_label(name):
+            return True
         participant = Participant(
             project_id=project_id,
             identifier=name,
@@ -86,6 +93,7 @@ def ensure_participant_for_speaker(
         db.add(participant)
         db.flush()
         speaker.participant_id = participant.id
+    return False
 
 
 def conversation_to_response(
@@ -187,7 +195,7 @@ def ensure_universal_codes(db: Session, project_id: int) -> None:
 
 
 @router.get("", response_model=ConversationListResponse)
-async def list_conversations(
+def list_conversations(  # def, not async: #1463 D67 — test_endpoint_event_loop.py::MUST_BE_SYNC
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -379,6 +387,9 @@ async def import_csv(
     # Create or get speakers
     # Assign color indices based on speaker order in config
     speaker_cache = {}
+    # #1391 / #1472 (D74) — the speakers the withdrawal record kept unlinked, by id
+    # (two labels mapped onto one name are one speaker).
+    withdrawn_speaker_ids: set[int] = set()
     for i, sm in enumerate(config.speaker_mappings):
         # Check if speaker exists
         existing = db.query(Speaker).filter(
@@ -392,7 +403,8 @@ async def import_csv(
             if sm.color is not None:
                 existing.color = sm.color
             speaker_cache[sm.normalized_name] = existing
-            ensure_participant_for_speaker(db, project_id, existing, sm.normalized_name)
+            if ensure_participant_for_speaker(db, project_id, existing, sm.normalized_name):
+                withdrawn_speaker_ids.add(existing.id)
         else:
             speaker = Speaker(
                 project_id=project_id,
@@ -405,7 +417,12 @@ async def import_csv(
             db.add(speaker)
             db.flush()
             speaker_cache[sm.normalized_name] = speaker
-            ensure_participant_for_speaker(db, project_id, speaker, sm.normalized_name)
+            if ensure_participant_for_speaker(db, project_id, speaker, sm.normalized_name):
+                withdrawn_speaker_ids.add(speaker.id)
+    if withdrawn_speaker_ids:
+        # First: it is about consent, the rest are about the file's timestamps.
+        from ..services.tombstones import withdrawn_speaker_warning
+        warnings = [withdrawn_speaker_warning(len(withdrawn_speaker_ids)), *warnings]
 
     # Create segments
     for seg in segments:

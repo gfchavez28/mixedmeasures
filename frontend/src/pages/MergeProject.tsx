@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
-import { useParams, useNavigate } from 'react-router'
+import { useParams, useNavigate, Link } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { LoadState } from '@/components/LoadStatus'
 import UploadLimitNote from '@/components/UploadLimitNote'
@@ -149,6 +149,9 @@ export default function MergeProject() {
   // The recovery snapshot's filename, so the sentence promising one can NAME it.
   const [safetyBackup, setSafetyBackup] = useState<string | null>(null)
   const [divergence, setDivergence] = useState<MergeDivergenceDetail | null>(null)
+  // #1470 — a refusal the PREVIEW predicted stops the flow before Confirm coders, so the
+  // rail must not mark that step completed (as it does for a refusal from the merge).
+  const [refusedBeforeConfirm, setRefusedBeforeConfirm] = useState(false)
   // #1232 — the sentence for a merge the client stopped waiting for (`unknown`).
   const [unknownOutcome, setUnknownOutcome] = useState<string | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
@@ -208,6 +211,16 @@ export default function MergeProject() {
     setCodesPreview(codes)
     setCodeDecisions(defaultCodeDecisions(codes))
     setAdditions(v.merge_additions ?? null)
+    // #1470 (D70) — the preview says the merge WILL be refused: the copy withdrew someone
+    // this project still holds. Say so now, before any coder or code decision is asked
+    // for, with the same screen the merge's own 409 opens.
+    const held = v.merge_additions?.withdrawn_here ?? []
+    if (held.length > 0) {
+      setDivergence({ error: 'merge_divergence', kind: 'withdrawal', withdrawn_here: held })
+      setRefusedBeforeConfirm(true)
+      setStep('diverged')
+      return
+    }
     setStep('confirm')
   }, [])
 
@@ -393,7 +406,7 @@ export default function MergeProject() {
   const labelForStep: Record<Step, string> = {
     loading: 'Choose file', upload: 'Choose file', confirm: 'Confirm coders',
     reconcile: 'Reconcile codes', review: 'Review', merging: 'Review',
-    report: 'Done', diverged: 'Review', unknown: 'Review',
+    report: 'Done', diverged: refusedBeforeConfirm ? 'Confirm coders' : 'Review', unknown: 'Review',
   }
 
   /**
@@ -563,6 +576,7 @@ export default function MergeProject() {
           <DivergedStep
             divergence={divergence}
             onBack={() => navigate(`/projects/${targetId}/overview`)}
+            participantsHref={`/projects/${targetId}/participants`}
             headingRef={headingRef}
           />
         )}
@@ -1189,11 +1203,18 @@ const DIVERGENCE_TITLE = {
   segmentation_freeze: "Can't merge yet — one side's clips are frozen",
   codebook: "Can't merge yet — codebooks differ",
   segment_text: "Can't merge yet — the text was edited",
+  withdrawal: "Can't merge yet — this copy records a withdrawal",
 } satisfies Record<MergeDivergenceKind, string>
 
-function DivergedStep({ divergence, onBack, headingRef }: {
+function withdrawnPeople(n: number): string {
+  return n === 1 ? '1 participant' : `${n} participants`
+}
+
+function DivergedStep({ divergence, onBack, participantsHref, headingRef }: {
   divergence: MergeDivergenceDetail
   onBack: () => void
+  /** #1470 — where the `withdrawal` screen sends the researcher to act. */
+  participantsHref: string
   headingRef?: React.Ref<HTMLHeadingElement>
 }) {
   return (
@@ -1204,7 +1225,27 @@ function DivergedStep({ divergence, onBack, headingRef }: {
           <h2 ref={headingRef} tabIndex={-1} className="text-lg font-medium scroll-mt-24">{DIVERGENCE_TITLE[divergence.kind]}</h2>
         </div>
 
-        {divergence.kind === 'segment_text' ? (
+        {divergence.kind === 'withdrawal' ? (
+          <>
+            {/* #1470 (D69–D71) — named by THIS project's own ID: its own record, which
+                the Participants page already shows; nothing the file says. */}
+            <p className="text-sm text-mm-text-muted">
+              The copy you are merging records that {withdrawnPeople(divergence.withdrawn_here?.length ?? 0)}{' '}
+              withdrew from the study, and this project still holds their data:
+            </p>
+            <ul
+              aria-label="Participants to withdraw in this project"
+              className="text-sm text-mm-text list-disc pl-5 space-y-0.5"
+            >
+              {(divergence.withdrawn_here ?? []).map(p => <li key={p.participant_id}>{p.identifier}</li>)}
+            </ul>
+            <p className="text-sm text-mm-text-muted">
+              Merging would keep their data here. Withdraw them in this project first, on the{' '}
+              <Link to={participantsHref} className="underline">Participants page</Link>, then
+              merge the copy again. Nothing has been changed.
+            </p>
+          </>
+        ) : divergence.kind === 'segment_text' ? (
           <>
             <p className="text-sm text-mm-text-muted">
               These sources have the same segments on both sides, but the words inside them

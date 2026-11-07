@@ -303,11 +303,11 @@ class TestTimeShapeWire:
             pid, ExcerptCreate(segment_id=sid, start_time=15.0, end_time=25.0),
             user=_user(db), db=db,
         ))
-        resp = _run(list_quoted_excerpts(
+        resp = list_quoted_excerpts(
             pid, source="all", code_ids=None, conversation_ids=None,
             document_ids=None, text_column_ids=None, exclude_facilitator=False,
             participant_ids=None, user=_user(db), db=db,
-        ))
+        )
         assert resp.total_observation_excerpts == 1
         item = resp.excerpts[0]
         assert (item.start_time, item.end_time) == (15.0, 25.0)

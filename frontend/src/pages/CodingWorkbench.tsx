@@ -590,6 +590,16 @@ export default function CodingWorkbench() {
     [cid, pid, history, queryClient, showSaved]
   )
 
+  // #1334 — a group of turns counts ONCE in reliability and in a participant's
+  // score, so grouping and ungrouping move those figures: the derived counts
+  // (`irr`, `machine-agreement` among them) and what a rating moves (the rating
+  // α's units, the participant table's "out of date" marker, the rating queue's
+  // buckets). The server marks the scores stale; these let the screens see it.
+  const invalidateAfterGrouping = useCallback(() => {
+    invalidateDerivedCounts(queryClient, pid)
+    invalidateAfterRating(queryClient, pid)
+  }, [pid, queryClient])
+
   // Group segments with undo support (Phase 8)
   const handleGroupSegments = useCallback(
     (segmentIds: number[]) => {
@@ -601,17 +611,19 @@ export default function CodingWorkbench() {
           const result = await segmentsApi.createGroup(cid, segmentIds)
           createdGroupId = result.id
           queryClient.invalidateQueries({ queryKey: ['segments', cid] })
+          invalidateAfterGrouping()
         },
         undo: async () => {
           if (createdGroupId) {
             await segmentsApi.deleteGroup(cid, createdGroupId)
           }
           queryClient.invalidateQueries({ queryKey: ['segments', cid] })
+          invalidateAfterGrouping()
         },
       })
       showSaved()
     },
-    [cid, history, queryClient, showSaved]
+    [cid, history, queryClient, showSaved, invalidateAfterGrouping]
   )
 
   // Ungroup segments with undo support (Phase 8)
@@ -623,15 +635,17 @@ export default function CodingWorkbench() {
         redo: async () => {
           await segmentsApi.deleteGroup(cid, groupId)
           queryClient.invalidateQueries({ queryKey: ['segments', cid] })
+          invalidateAfterGrouping()
         },
         undo: async () => {
           await segmentsApi.createGroup(cid, memberSegmentIds)
           queryClient.invalidateQueries({ queryKey: ['segments', cid] })
+          invalidateAfterGrouping()
         },
       })
       showSaved()
     },
-    [cid, history, queryClient, showSaved]
+    [cid, history, queryClient, showSaved, invalidateAfterGrouping]
   )
 
   const invalidateAfterCodeChange = useCallback(() => {

@@ -132,7 +132,7 @@ def test_conversation_list_segment_count_excludes_facilitator(
     """The list endpoint's denominator (segment_count) should be 5 — the
     5 participant turns — not 8 (all turns). #351/#352."""
     user = project_with_coded_facilitator_and_participant
-    resp = _run(list_conversations(project_id=600, user=user, db=db_session))
+    resp = list_conversations(project_id=600, user=user, db=db_session)  # def since #1463 D67
     assert len(resp.conversations) == 1
     conv = resp.conversations[0]
     assert conv.segment_count == 5, (
@@ -149,7 +149,7 @@ def test_conversation_list_coded_segment_count_excludes_facilitator(
     facilitator-coded turns + the participant turn with only a universal
     code MUST be excluded."""
     user = project_with_coded_facilitator_and_participant
-    resp = _run(list_conversations(project_id=600, user=user, db=db_session))
+    resp = list_conversations(project_id=600, user=user, db=db_session)  # def since #1463 D67
     conv = resp.conversations[0]
     assert conv.coded_segment_count == 3, (
         f"Expected 3 coded participant segments (non-universal), got "
@@ -188,7 +188,7 @@ def test_project_summary_coded_segments_excludes_facilitator(
     summary. After fix it should report 3 (participant + non-universal),
     not 5 (all coded including facilitator)."""
     user = project_with_coded_facilitator_and_participant
-    resp = _run(get_project_summary(project_id=600, user=user, db=db_session))
+    resp = get_project_summary(project_id=600, user=user, db=db_session)  # `def` since #1463
     assert resp.coded_segments == 3, (
         f"Project summary coded_segments should exclude facilitator + "
         f"universal codes. Got {resp.coded_segments}, expected 3."
@@ -200,7 +200,7 @@ def test_project_summary_recent_conversations_excludes_facilitator(
 ):
     """Recent-conversations card on OverviewPage. Same #351/#352 semantics."""
     user = project_with_coded_facilitator_and_participant
-    resp = _run(get_project_summary(project_id=600, user=user, db=db_session))
+    resp = get_project_summary(project_id=600, user=user, db=db_session)
     assert len(resp.recent_conversations) == 1
     rc = resp.recent_conversations[0]
     assert rc.segment_count == 5
@@ -219,8 +219,8 @@ def test_project_summary_recent_conversations_excludes_universal_codes(
     pre-fix this would have counted as "coded" on the recent-conversations
     card but NOT on the main conversations list. After fix, both show 3."""
     user = project_with_coded_facilitator_and_participant
-    summary_resp = _run(get_project_summary(project_id=600, user=user, db=db_session))
-    list_resp = _run(list_conversations(project_id=600, user=user, db=db_session))
+    summary_resp = get_project_summary(project_id=600, user=user, db=db_session)
+    list_resp = list_conversations(project_id=600, user=user, db=db_session)  # def since #1463 D67
 
     # Both surfaces must agree.
     assert summary_resp.recent_conversations[0].coded_segment_count == \
@@ -243,7 +243,7 @@ def test_list_endpoint_and_coding_progress_endpoint_agree(
     from app.routers.coding import get_coding_progress
 
     user = project_with_coded_facilitator_and_participant
-    list_resp = _run(list_conversations(project_id=600, user=user, db=db_session))
+    list_resp = list_conversations(project_id=600, user=user, db=db_session)  # def since #1463 D67
     progress_resp = _run(get_coding_progress(conversation_id=6000, user=user, db=db_session))
 
     assert list_resp.conversations[0].coded_segment_count == progress_resp.participant_coded

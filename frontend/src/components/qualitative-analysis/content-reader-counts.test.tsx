@@ -82,6 +82,8 @@ describe('#1077 (a) — the document reader counts people', () => {
             selectedSourceId="d:8"
             onSourceSelect={() => {}}
             source="all"
+            coderLens={null}
+            blind={false}
           />
         </MemoryRouter>
       </QueryClientProvider>,

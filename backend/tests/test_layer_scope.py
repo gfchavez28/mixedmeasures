@@ -105,10 +105,10 @@ def test_list_codes_usage_count_honors_layer(db_session):
     user = db.get(User, 1)
     # Direct endpoint calls must pass every Query param explicitly (otherwise the
     # unset ones stay FastAPI Query objects rather than resolved values).
-    human = _run(list_codes(project_id=pid, include_inactive=False, category_id=None,
-                            layer_scope=LAYER_HUMAN, user=user, db=db))
-    consensus = _run(list_codes(project_id=pid, include_inactive=False, category_id=None,
-                                layer_scope=LAYER_CONSENSUS, user=user, db=db))
+    human = list_codes(project_id=pid, include_inactive=False, category_id=None,  # def: #1463 D67
+                       layer_scope=LAYER_HUMAN, user=user, db=db)
+    consensus = list_codes(project_id=pid, include_inactive=False, category_id=None,
+                           layer_scope=LAYER_CONSENSUS, user=user, db=db)
     human_x = next(c for c in human.codes if c.id == CODE_X)
     consensus_x = next(c for c in consensus.codes if c.id == CODE_X)
     assert human_x.usage_count == 2
@@ -214,8 +214,9 @@ def test_source_frequencies_csv_forwards_layer_scope(db_session):
     kw = dict(code_ids=None, conversation_ids=None, text_column_ids=None, document_ids=None,
               exclude_facilitator=True, participant_ids=None, group_by_subtype=None,
               coder_ids=None, user=db.get(User, 1), db=db)
-    human = _run(source_frequencies_csv(project_id=pid, layer_scope=LAYER_HUMAN, **kw))
-    consensus = _run(source_frequencies_csv(project_id=pid, layer_scope=LAYER_CONSENSUS, **kw))
+    # `def` since #1528 D89 — called directly, not through `_run`.
+    human = source_frequencies_csv(project_id=pid, layer_scope=LAYER_HUMAN, **kw)
+    consensus = source_frequencies_csv(project_id=pid, layer_scope=LAYER_CONSENSUS, **kw)
     human_body = _run(_collect_csv(human))
     consensus_body = _run(_collect_csv(consensus))
     assert b"TOTAL" in human_body and b"TOTAL" in consensus_body

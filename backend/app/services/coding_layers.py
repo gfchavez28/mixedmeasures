@@ -231,6 +231,38 @@ def layer_scope_filter(layer_scope: str | None = None):
     return and_(non_consensus_filter(), without_machine_filter())
 
 
+def coder_scope_clause(coder_ids):
+    """The ONE clause narrowing ``CodeApplication`` rows to a set of coders (J1).
+
+    INCLUDE-list semantics: an application by a coder outside the set — and one
+    with NO coder (the merged-legacy *Unattributed* rows, ``user_id IS NULL``) —
+    is left out, exactly as the analysis page's charts leave it out
+    (`multicoder.md`, the Timeline note). Orthogonal to the LAYER: pair it with
+    ``layer_scope_filter`` or ``non_consensus_filter``, whichever the caller
+    already applies — this clause never changes which layer a surface reads.
+
+    🔴 **#1530 D98 (1.5.9): the files a blind coder downloads narrow through this
+    clause, so a file and the screen it mirrors cannot spell "her coding" two
+    ways.** `code_analysis._coder_filter` is built on it; ``in_coder_scope`` is its
+    Python twin for a surface that filters rows it already loaded.
+    """
+    return CodeApplication.user_id.in_(list(coder_ids))
+
+
+def narrow_to_coders(query, coder_ids):
+    """``query`` narrowed by `coder_scope_clause`, or unchanged when no scope was
+    asked (``None`` or empty = every coder, the convention of every
+    ``coder_ids`` parameter)."""
+    return query.filter(coder_scope_clause(coder_ids)) if coder_ids else query
+
+
+def in_coder_scope(user_id, coder_ids) -> bool:
+    """`coder_scope_clause`'s Python twin: is an application by ``user_id`` inside
+    the scope? No scope (``None`` or empty) = every coder; with one, a ``None``
+    coder is OUT, as SQL's ``IN`` leaves a NULL out (no coder id is ``None``)."""
+    return not coder_ids or user_id in coder_ids
+
+
 # ── Consensus eligibility (D18: unit provenance, not parent type) ───────────
 
 

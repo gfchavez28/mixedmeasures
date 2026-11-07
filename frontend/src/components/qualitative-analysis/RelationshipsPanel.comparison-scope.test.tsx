@@ -16,9 +16,10 @@ import { RelationshipsContent, type RelationshipsContentProps } from './Relation
 
 afterEach(cleanup)
 
+// #1297/#1298 (1.5.9): every source kind that reaches a person is counted now.
 const SENTENCE =
-  "Counts codings in conversations only, through each speaker's participant link. " +
-  'Documents, open-text answers and observations are not included.'
+  'Counts participants through their conversation turns, the documents linked to them and their open-text answers. ' +
+  'Observations have no participant link and are not included.'
 
 const FILTER = { subtype: 'gender', label: 'Gender', values: [] } as unknown as DemographicFilter
 
@@ -27,7 +28,7 @@ function renderContent(demoFilters: DemographicFilter[], groupBy: string | null)
   render(
     <MemoryRouter>
       <RelationshipsContent
-        pid={1} qa={qa} codes={[]} filterParams={{}} demoFilters={demoFilters}
+        pid={1} qa={qa} codes={[]} filterParams={{}} cooccurrenceParams={{}} demoFilters={demoFilters} participantFilterLabel={undefined}
         cooccurrenceN={null} comparisonData={undefined} comparisonLoading={false}
         comparisonN={null} onCooccurrenceDataLoad={vi.fn()}
       />

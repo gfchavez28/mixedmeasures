@@ -10,7 +10,8 @@ Reachability was INFERRED in the filed entry; the 2026-10-26 pre-implementation 
 EXECUTED it through the real service and found FOUR doors, each parametrised below:
 a participant surveyed but never a speaker; one who speaks only in an UNSELECTED
 conversation; one whose only speaker is a facilitator (excluded by default); one linked
-through a DOCUMENT (the comparison counts conversations only — #1298).
+through a DOCUMENT (the comparison counted conversations only until #1298, 1.5.9 — the
+door is now a linked document the researcher did not select).
 
 ⚠️ Every assertion has a control a mutant must also get past: a REAL zero (a group WITH
 segments and none coded this code) stays ``0.0`` with no reason, and the non-empty
@@ -35,7 +36,13 @@ from app.models.speaker import Speaker
 from app.models.user import User
 from app.schemas.code_analysis import DemographicComparisonResponse
 from app.services.code_analysis import get_demographic_comparison
+from app.services.comparison_basis import COMPARISON_UNIT_PARTICIPANT, COMPARISON_UNIT_PASSAGE
 from app.services.undefined_stats import NO_SEGMENTS, UNDEFINED_REASONS
+
+# #1323 (1.5.9): the comparison counts PARTICIPANTS by default. This file's fixture
+# is passage-shaped (one person, four turns), so its SHARE assertions name the
+# passage unit; the empty-group rule is unit-agnostic and is asserted in both.
+PASSAGES = {"unit": COMPARISON_UNIT_PASSAGE}
 
 PID = 1421
 C1, C2 = 14211, 14212
@@ -118,6 +125,9 @@ def _facilitator_only(db):
 
 
 def _document_only(db):
+    """#1298 (1.5.9): a linked document COUNTS now, so this door is a document the
+    researcher did not select (`document_ids=[]`) — `test_comparison_unit_1323.py`
+    pins that the same document, selected, fills the group."""
     _person(db, 14205, "P-doc", "Written")
     db.add(Document(id=14250, project_id=PID, name="Essay", source_filename="e.txt",
                     source_format="txt", participant_id=14205))
@@ -126,38 +136,43 @@ def _document_only(db):
     db.flush()
     db.add(CodeApplication(segment_id=14250, code_id=A, user_id=1))
     db.flush()
-    return "Written", {}
+    return "Written", {"document_ids": []}
 
 
 DOORS = [_survey_only, _unselected_conversation, _facilitator_only, _document_only]
 
 
+@pytest.mark.parametrize("unit", [COMPARISON_UNIT_PASSAGE, COMPARISON_UNIT_PARTICIPANT])
 @pytest.mark.parametrize("door", DOORS, ids=lambda f: f.__name__.lstrip("_"))
-def test_a_group_with_no_segments_has_no_share_and_no_difference(project, door):
+def test_a_group_with_no_segments_has_no_share_and_no_difference(project, door, unit):
     empty, kwargs = door(project)
-    r = get_demographic_comparison(project, PID, group_by_subtype="Mode", **kwargs)
+    r = get_demographic_comparison(project, PID, group_by_subtype="Mode", unit=unit, **kwargs)
 
     assert set(r["groups"]) == {"Interviewed", empty}
     assert r["group_totals"][empty]["total_segments"] == 0, "the door must really empty the group"
+    assert r["group_totals"][empty]["n"] == 0
     by_code = {e["code_name"]: e for e in r["codes"]}
     for name in ("A", "B", "C"):
         cell = by_code[name]["by_group"][empty]
-        assert cell == {"count": 0, "proportion": None, "undefined_reason": NO_SEGMENTS}, name
+        assert cell == {"count": 0, "proportion": None, "undefined_reason": NO_SEGMENTS,
+                        "passages": 0}, name
         assert by_code[name]["delta_proportion"] is None, f"{name}: a difference needs both shares"
         assert by_code[name]["test"] is None
 
+    if unit != COMPARISON_UNIT_PASSAGE:
+        return
     # Controls: the group WITH segments keeps every share, and a REAL zero survives.
     interviewed = {n: by_code[n]["by_group"]["Interviewed"] for n in ("A", "B", "C")}
-    assert interviewed["A"] == {"count": 1, "proportion": 0.25, "undefined_reason": None}
-    assert interviewed["B"] == {"count": 3, "proportion": 0.75, "undefined_reason": None}
-    assert interviewed["C"] == {"count": 0, "proportion": 0.0, "undefined_reason": None}
+    assert interviewed["A"] == {"count": 1, "proportion": 0.25, "undefined_reason": None, "passages": 1}
+    assert interviewed["B"] == {"count": 3, "proportion": 0.75, "undefined_reason": None, "passages": 3}
+    assert interviewed["C"] == {"count": 0, "proportion": 0.0, "undefined_reason": None, "passages": 0}
 
 
 def test_no_code_is_ranked_by_a_manufactured_difference(project):
     """With no Δ anywhere the codebook order stands — B (the most prevalent in the one
     group that has segments) is NOT promoted to the top as the "biggest difference"."""
     _survey_only(project)
-    r = get_demographic_comparison(project, PID, group_by_subtype="Mode")
+    r = get_demographic_comparison(project, PID, group_by_subtype="Mode", **PASSAGES)
     assert [e["code_name"] for e in r["codes"]] == ["A", "B", "C"]
 
 
@@ -173,7 +188,7 @@ def test_two_groups_with_segments_still_get_a_difference_and_a_real_zero(project
     project.flush()
     project.add(CodeApplication(segment_id=14260, code_id=B, user_id=1))
     project.flush()
-    r = get_demographic_comparison(project, PID, group_by_subtype="Mode")
+    r = get_demographic_comparison(project, PID, group_by_subtype="Mode", **PASSAGES)
     by_code = {e["code_name"]: e for e in r["codes"]}
     # ⚠️ Field by field, so this CONTROL passes on HEAD as well (HEAD has no reason key).
     phone_a = by_code["A"]["by_group"]["Phone"]
@@ -192,11 +207,12 @@ def test_three_groups_one_empty_keeps_the_others_shares(project):
     project.add_all([Segment(id=14260 + i, conversation_id=C1, sequence_order=40 + i,
                              text="p", word_count=1, speaker_id=14206) for i in range(5)])
     project.flush()
-    r = get_demographic_comparison(project, PID, group_by_subtype="Mode")
+    r = get_demographic_comparison(project, PID, group_by_subtype="Mode", **PASSAGES)
     a = next(e for e in r["codes"] if e["code_name"] == "A")
     assert a["by_group"]["Survey only"]["proportion"] is None
     assert a["by_group"]["Survey only"]["undefined_reason"] == NO_SEGMENTS
-    assert a["by_group"]["Phone"] == {"count": 0, "proportion": 0.0, "undefined_reason": None}
+    assert a["by_group"]["Phone"] == {"count": 0, "proportion": 0.0, "undefined_reason": None,
+                                      "passages": 0}
     assert a["by_group"]["Interviewed"]["proportion"] == 0.25
     assert a["delta_proportion"] is None  # no Δ column beyond two groups, as before
 
@@ -217,7 +233,8 @@ def _csv(db, **params):
     from app.routers.code_analysis import demographic_comparison_csv
 
     async def go():
-        resp = await demographic_comparison_csv(
+        # A plain `def` endpoint since #1323's D11; only the streamed body is read async.
+        resp = demographic_comparison_csv(
             project_id=PID, group_by_subtype="Mode", code_ids=None,
             conversation_ids=params.get("conversation_ids"), text_column_ids=None,
             exclude_facilitator=True, participant_ids=None, coder_ids=None,
@@ -233,9 +250,14 @@ def test_the_csv_leaves_the_empty_groups_share_and_the_difference_blank(project)
     rows = _csv(project)
     header, body = rows[0], {r[0]: dict(zip(rows[0], r)) for r in rows[1:]}
     assert "Survey only (Proportion)" in header and "Delta" in header
-    assert body["B"]["Survey only (Count)"] == "0"
+    # #1323: the default unit is the participant, named in the column.
+    assert body["B"]["Survey only (Participants who used it)"] == "0"
+    assert body["B"]["Survey only (Participants with material)"] == "0"
     assert body["B"]["Survey only (Proportion)"] == ""
     assert body["B"]["Delta"] == ""
-    # Controls: the group with segments keeps its share; a real zero prints as zero.
-    assert body["B"]["Interviewed (Proportion)"] == "0.7500"
+    # Controls: the group with material keeps its share (one participant, who used B
+    # on three of four turns — 1 of 1, with the passages beside it); a real zero
+    # prints as zero.
+    assert body["B"]["Interviewed (Proportion)"] == "1.0000"
+    assert body["B"]["Interviewed (Passages coded)"] == "3"
     assert body["C"]["Interviewed (Proportion)"] == "0.0000"

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from ..models.dataset import Dataset, DatasetColumn, DatasetValue
 from .missing_values import column_missing_rules, is_missing
+from .value_labels import answer_label_resolver
 
 #: What a bucket of rows with no grouping value is CALLED, everywhere.
 #:
@@ -119,17 +120,24 @@ def load_grouping_values_for_columns(
     ``missing_values`` rule list uses it (REPLACE semantics), an undeclared
     column keeps the ``_is_na`` defaults; each value is judged by ITS column's
     rules (the query selects ``column_id`` for exactly this).
+
+    #1332 (1.5.9, D56): a group is named by the declared LABEL its answer matches
+    without case or surrounding space (``value_labels.answer_label_resolver``, the
+    rule the import numbers a cell by) — "Strongly Agree" joins the group
+    "Strongly agree" instead of forming one of its own. An answer the column's
+    labels do not place keeps its own spelling. Missing is judged on the stored
+    text first.
     """
     if row_ids is not None and not row_ids:
         return {}
     if not column_ids:
         return {}
-    rules_by_col = {
-        c.id: column_missing_rules(c)
-        for c in db.query(
-            DatasetColumn.id, DatasetColumn.missing_values, DatasetColumn.column_type,
-        ).filter(DatasetColumn.id.in_(column_ids)).all()
-    }
+    cols = db.query(
+        DatasetColumn.id, DatasetColumn.missing_values, DatasetColumn.column_type,
+        DatasetColumn.scale_labels, DatasetColumn.scale_values,
+    ).filter(DatasetColumn.id.in_(column_ids)).all()
+    rules_by_col = {c.id: column_missing_rules(c) for c in cols}
+    as_label_by_col = {c.id: answer_label_resolver(c) for c in cols}
     query = db.query(
         DatasetValue.row_id, DatasetValue.column_id, DatasetValue.value_text,
     ).filter(
@@ -145,7 +153,7 @@ def load_grouping_values_for_columns(
             .filter(Dataset.project_id == project_id)
         )
     return {
-        r_id: val
+        r_id: as_label_by_col[c_id](val)
         for r_id, c_id, val in query.all()
         if not is_missing(val, rules_by_col.get(c_id))
     }

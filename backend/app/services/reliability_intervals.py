@@ -119,11 +119,24 @@ CI_UNAVAILABLE_INSUFFICIENT_UNITS = "insufficient_units"
 #: makes a rare code common.
 CI_UNAVAILABLE_NO_VARIANCE_IN_RESAMPLES = "no_variance_in_resamples"
 
+#: 🔴 #1505 (D44) — the interval came out with NO WIDTH, and that is a claim of
+#: certainty the data cannot back. Two roads reach it, both measured: a unit
+#: bootstrap whose resamples cannot differ (every unit the same value pattern —
+#: twenty (1, 0) units gave [−0.95, −0.95] — or perfect agreement, where every
+#: resample with variance is perfect too: ten units gave [1.00, 1.00]), and κ's
+#: analytic variance at exactly 0 (perfect agreement, or one coder who never
+#: varies — κ 0 with [0.00, 0.00]). A percentile bootstrap cannot show the
+#: uncertainty at a boundary, and the delta-method SE is a local approximation
+#: that vanishes there; neither means the coefficient is known exactly. The
+#: point estimate stays — only the interval is refused.
+CI_UNAVAILABLE_NO_SPREAD = "no_spread"
+
 CI_UNAVAILABLE_REASONS = frozenset({
     CI_UNAVAILABLE_SINGLE_CONTINUUM,
     CI_UNAVAILABLE_AUTOCORRELATED_BINS,
     CI_UNAVAILABLE_INSUFFICIENT_UNITS,
     CI_UNAVAILABLE_NO_VARIANCE_IN_RESAMPLES,
+    CI_UNAVAILABLE_NO_SPREAD,
 })
 
 # ── Reported methods parameters ──────────────────────────────────────────────
@@ -261,6 +274,11 @@ def kappa_interval(units: list[list[int | None]]) -> dict | None:
     upper = finite_or_none(min(1.0, kappa + margin), _STATS_PRECISION)
     if lower is None or upper is None:
         return None
+    if lower == upper:
+        # D44 — a zero variance (perfect agreement; a coder who never varies) is
+        # where the approximation is degenerate, not where κ is known exactly.
+        return _interval(None, None, CI_METHOD_KAPPA_ANALYTIC,
+                         unavailable_reason=CI_UNAVAILABLE_NO_SPREAD)
     return _interval(lower, upper, CI_METHOD_KAPPA_ANALYTIC)
 
 
@@ -428,9 +446,14 @@ def alpha_interval(
 
     tail = (1.0 - CI_LEVEL) / 2.0 * 100.0
     lower, upper = np.percentile(values, [tail, 100.0 - tail])
-    return _interval(
-        finite_or_none(float(lower), _STATS_PRECISION),
-        finite_or_none(float(upper), _STATS_PRECISION),
-        CI_METHOD_ALPHA_BOOTSTRAP_UNITS,
-        n_resamples=len(values),
-    )
+    lower = finite_or_none(float(lower), _STATS_PRECISION)
+    upper = finite_or_none(float(upper), _STATS_PRECISION)
+    if lower is not None and lower == upper:
+        # D44 — every resample that mattered gave one value: the bootstrap had no
+        # spread to show, which is not the same as the data having none.
+        return _interval(
+            None, None, CI_METHOD_ALPHA_BOOTSTRAP_UNITS,
+            n_resamples=len(values),
+            unavailable_reason=CI_UNAVAILABLE_NO_SPREAD,
+        )
+    return _interval(lower, upper, CI_METHOD_ALPHA_BOOTSTRAP_UNITS, n_resamples=len(values))

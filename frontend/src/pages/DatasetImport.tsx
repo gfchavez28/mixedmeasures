@@ -132,8 +132,12 @@ export function effectiveLinkColumnIndex(config: FileConfig): number | null {
  * same way blank cells are — so the handling isn't silent. Renders nothing
  * when there are none. `compact` is the inline per-dataset suffix used in the
  * multi-file list.
+ *
+ * #1567: the link goes to the QUANTITATIVE page's tab. `/analysis` alone is the Analysis
+ * Hub (`App.tsx`), which reads no `tab` — from 2026-06-21 (#415) until 1.6.0 the link
+ * landed there and the Data Quality tab was never shown. Exported for its test.
  */
-function RecognizedMissingNote({
+export function RecognizedMissingNote({
   count,
   labels,
   projectId,
@@ -164,7 +168,7 @@ function RecognizedMissingNote({
       missing{exampleText} and excluded from analysis, the same way blank cells are.
       Review them on the{' '}
       <Link
-        to={`/projects/${projectId}/analysis?tab=data_quality`}
+        to={`/projects/${projectId}/analysis/quantitative?tab=data_quality`}
         className="text-mm-blue-text hover:underline"
       >
         Data Quality

@@ -20,14 +20,14 @@
 # one; the production gates are deliberately identical.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# CAN IT RUN TODAY? Yes — the unsigned path is fully functional. With NO signing
-# secrets set (the current state: Apple Developer ID cert not yet minted, Azure
-# Trusted Signing signer-role/secrets not yet wired, repo still private),
-# electron-builder builds UNSIGNED installers and this workflow goes green. The
-# moment the secrets below exist, the same file produces signed + notarized builds
-# with no edits. That is the whole point of wiring it now.
+# CAN IT RUN WITHOUT SIGNING SECRETS? Yes. With none set (the private working
+# repository holds none), electron-builder builds UNSIGNED installers and this
+# workflow goes green. With the secrets below set (the public release repository
+# holds all eleven — RELEASING.md, "How releases work"), the same file produces
+# signed + notarized builds with no edits.
 #
-# ⚠️  THREE THINGS TO DO BEFORE THIS SHIPS A REAL SIGNED RELEASE:
+# The three steps that took it to signed releases, kept as the reference for
+# re-pinning and for the secret names:
 #
 #   (1) SHA-PIN EVERY ACTION. ✅ DONE 2026-06-14 — every `uses:` below is pinned to its
 #       release commit SHA (trailing `# vN` comment). Actions are NOT all on the same
@@ -48,14 +48,12 @@
 #         AZURE_ENDPOINT                the Trusted Signing account endpoint URL
 #         AZURE_CODE_SIGNING_NAME       the Trusted Signing account name
 #         AZURE_CERT_PROFILE            certificate profile name (= MixedMeasures)
-#       Outstanding Azure step (cert-acquisition plan): assign the service principal
-#       the "Trusted Signing Certificate Profile Signer" role before first use.
+#       The service principal needs the "Trusted Signing Certificate Profile Signer"
+#       role on the certificate profile.
 #
-#   (3) VERIFY THE SIGNING FLAGS ON THE FIRST REAL SIGNED RUN. The mac-notarize and
-#       win-azure config overrides below are wired from the documented mechanism but
-#       have NOT been exercised on a runner (can't be, from the dev WSL box). Treat
-#       the first signed build as the validation: confirm a downloaded installer
-#       launches on a clean Mac/Windows with no Gatekeeper/SmartScreen block.
+#   (3) VERIFY THE SIGNING FLAGS ON A REAL SIGNED RUN. The mac-notarize and win-azure
+#       config overrides below now run on every signed release; RELEASING.md §4b is
+#       the per-release smoke of the signed, packaged build on a real desktop.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: Release

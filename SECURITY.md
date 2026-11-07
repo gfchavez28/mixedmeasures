@@ -39,7 +39,7 @@ updates itself unless that is switched off.
 | Version | Supported |
 |---------|-----------|
 | Latest `1.x` release | ✅ |
-| `main` (development) | ✅ — fixes land here first |
+| `main` | ✅ — synced from a private working repository |
 | Older releases | ❌ — please update |
 
 ## Threat model & security posture
@@ -63,7 +63,8 @@ policy locked to same-origin and standard security headers
 researcher (no login screen — your operating-system account is the boundary), with
 server-side sessions in HttpOnly cookies, CSRF tokens on all state-changing
 requests, and loopback-only Host validation.
-Project access is owner-scoped and enforced on every project endpoint.
+Projects are not separated by coder: every coder on an installation can open every
+project, so the operating-system account is the boundary between people.
 
 **The desktop app's own program** (since 1.5.6): the installed app cannot be run as
 a plain script engine, have code injected through an environment variable, or have
@@ -115,8 +116,7 @@ window — the same-user limit below.
 
 ## In scope
 
-Issues that would let one user access another user's project through the
-application, authentication/session/CSRF bypasses, injection via imported files
+Authentication/session/CSRF bypasses, injection via imported files
 (CSV/DOCX/PDF/XML/audio parsing, including formula injection in exports), path
 traversal / zip-slip in import/backup/restore, and similar application-layer flaws.
 
@@ -142,8 +142,12 @@ CVE); reports of gaps in these defenses are welcome.
 
 - Frontend installs use `npm ci` against a committed lockfile, with
   `ignore-scripts=true` to block install-time script execution.
-- Production dependencies are version-pinned; transitive CVEs get an explicit
-  security-floor pin documented with the CVE in `requirements.txt`.
-- All shipping dependencies are permissive / Apache-compatible licenses.
+- Backend production dependencies are pinned in `requirements.txt` (an exact
+  version, or a bounded range for four of them); frontend and desktop-shell
+  dependencies are locked by a committed `package-lock.json`. Transitive CVEs get an
+  explicit security-floor pin documented with the CVE in `requirements.txt`.
+- Direct dependencies are chosen for permissive, Apache-compatible licences; some
+  libraries bundled inside them are not, and the installers do not yet carry every
+  third-party licence notice.
 
 Thank you for helping keep researchers' data safe.

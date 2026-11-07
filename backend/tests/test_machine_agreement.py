@@ -262,7 +262,11 @@ class TestTheMachineStaysOutOfReliability:
         _apply(db, PID * 100 + 1, machine.id, 0, 2)
         result = ma.compute_machine_agreement(db, PID)
         fields = set(vars(result))
-        assert fields == {"available", "unavailable_reason", "pairs"}
+        # #1333 / #1334 added the shared unit basis — a statement of what a unit
+        # is, never a figure; the set stays exact so a pooled number still fails.
+        # #1505 (D43) added the verdict floor — a reporting threshold, not a figure.
+        assert fields == {"available", "unavailable_reason", "pairs", "unit_basis",
+                          "verdict_min_units"}
         pair_fields = set(vars(result.pairs[0]))
         assert "overall_kappa" not in pair_fields
         assert "alpha" not in pair_fields

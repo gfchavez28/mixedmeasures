@@ -33,6 +33,8 @@ from .grouping import (
     load_grouping_values_for_columns,
     order_value_labels,
 )
+# #1332 (D56): the category an answer is counted under.
+from .value_labels import answer_label_resolver
 
 # ── Rounding precision constants ─────────────────────────────────────────────
 PERCENTAGE_PRECISION = 2   # round(x, 2) for percentage values (e.g. 85.71%)
@@ -62,6 +64,32 @@ CI_METHOD_T_INTERVAL = "t_interval"
 CI_METHOD_WILSON = "wilson"
 CI_METHOD_ITEM_LEVEL_T = "item_level_t"
 CI_METHOD_WILSON_PER_CATEGORY = "wilson_per_category"
+
+# ── Intervals over a variable group's POOLED answers: the record is the unit ──
+# (#1330, 1.5.9, D53/D54). A mean, proportion or frequency over a variable group
+# pools every member column's answers into one list (`compute_metric`'s
+# non-aggregate domain branch), and each computer used to treat that list as
+# independent people — so a record that answered four items counted four times in
+# the interval's width (1.6–1.7x too narrow at four items, the review's probe).
+# The ESTIMATES stay the pooled ones; only the intervals change, with the records
+# as clusters (`record_cluster_variance`, the CR1 variance with G/(G−1)):
+#   * the mean: a t interval on G−1 df — identical to the t on record means
+#     whenever every record answers every item;
+#   * a proportion, and each category of a frequency: a Wilson interval on a
+#     Korn–Graubard effective n, n* = p(1−p)/v̂ · (z/t_{G−1})², capped at n
+#     (a design effect floored at 1) — Stata's `proportion, citype(wilson)`
+#     under `vce(cluster)`. At p = 0 or 1, n* = n.
+# Each states its own method, so a client cannot mistake it for the naive kind.
+CI_METHOD_RECORD_CLUSTER_T = "record_cluster_t"
+CI_METHOD_WILSON_EFFECTIVE_N = "wilson_effective_n"
+CI_METHOD_WILSON_PER_CATEGORY_EFFECTIVE_N = "wilson_per_category_effective_n"
+#: How many RECORDS a pooled result's values came from (D53: the n reads
+#: "N values from M records"). Rides only a pooled result.
+RECORD_COUNT_KEY = "record_count"
+#: The pooled mean's or proportion's standard error over records, on the
+#: estimate's own scale (a proportion's in percentage points). Sent because the
+#: naive `sd / √n` a client would derive is exactly the error #1330 removes.
+STD_ERROR_KEY = "std_error"
 
 # ── t-distribution critical values (two-tailed 95% CI, α=0.025 each tail) ────
 # Precomputed t.ppf(0.975, df) for df 1..200 + ∞ (the ∞ tail is `_Z_975`).
@@ -166,6 +194,12 @@ def _ci_wilson(proportion: float, n: int) -> dict | None:
     """
     if n < 2 or proportion is None:
         return None
+    return _wilson_bounds(proportion, n, CI_METHOD_WILSON)
+
+
+def _wilson_bounds(proportion: float, n: float, method: str) -> dict:
+    """The Wilson score interval at sample size ``n`` — which may be an EFFECTIVE,
+    fractional n (#1330, D54). Callers decide when there is an interval at all."""
     z = _Z_975
     p = proportion  # 0-1 scale
     z2 = z * z
@@ -182,8 +216,84 @@ def _ci_wilson(proportion: float, n: int) -> dict | None:
         "ci_lower": round(ci_lower, PERCENTAGE_PRECISION),
         "ci_upper": round(ci_upper, PERCENTAGE_PRECISION),
         "ci_level": 0.95,
-        "ci_method": CI_METHOD_WILSON,
+        "ci_method": method,
     }
+
+
+def record_cluster_variance(
+    totals: dict[int, float], sizes: dict[int, int],
+) -> float | None:
+    """The CR1 variance of a POOLED mean whose clusters are records (#1330, D53/D54).
+
+    The ONE variance the three pooled computers use. ``sizes`` maps every record
+    that contributed a value to how many it contributed (m_g); ``totals`` maps a
+    record to the sum of its values (t_g) — absent means 0, which is how a
+    category's indicator is passed. With n = Σm_g, ŷ = Σt_g / n and G records:
+
+        v̂ = G/(G−1) · Σ_g (t_g − ŷ·m_g)² / n²
+
+    (Stata's small-sample factor (N−1)/(N−K) is 1 for a mean.) With every m_g
+    equal it is the variance of the record means over G, so the t interval on
+    it equals the t on record means; with unequal m_g it is the response-weighted
+    pooled mean's, the survey ratio estimator. None below two records.
+    """
+    G = len(sizes)
+    n = sum(sizes.values())
+    if G < 2 or n == 0:
+        return None
+    est = math.fsum(totals.values()) / n
+    spread = math.fsum((totals.get(g, 0.0) - est * m) ** 2 for g, m in sizes.items())
+    return G / (G - 1) * spread / (n * n)
+
+
+def _ci_mean_by_record(mean_val: float, variance: float | None, records: int) -> dict | None:
+    """A pooled mean's interval over records: t on G−1 df (#1330, D53).
+
+    The same floor as ``_ci_mean``'s (an interval needs three), counted in
+    RECORDS — the unit the interval is over."""
+    if variance is None or records < 3:
+        return None
+    margin = _t_critical(records - 1) * math.sqrt(variance)
+    return {
+        "ci_lower": round(mean_val - margin, STATS_PRECISION),
+        "ci_upper": round(mean_val + margin, STATS_PRECISION),
+        "ci_level": 0.95,
+        "ci_method": CI_METHOD_RECORD_CLUSTER_T,
+    }
+
+
+def effective_n(proportion: float, n: int, variance: float | None, records: int) -> float:
+    """A proportion's Korn–Graubard effective sample size over records (#1330, D54).
+
+    n* = p(1−p)/v̂ · (z/t_{G−1})², capped at n — a design effect floored at 1, the
+    cap NCHS applies — and n itself at p = 0 or 1, or when the records' answers
+    carry no spread at all (v̂ = 0). Stata's ``proportion, citype(wilson)`` under
+    ``vce(cluster)``; the R script emits the same formula.
+    """
+    if proportion <= 0 or proportion >= 1 or variance is None or variance <= 0:
+        return float(n)
+    df_factor = (_Z_975 / _t_critical(records - 1)) ** 2
+    return min(float(n), proportion * (1 - proportion) / variance * df_factor)
+
+
+def _ci_wilson_by_record(
+    proportion: float, n: int, variance: float | None, records: int, *, method: str,
+) -> dict | None:
+    """A Wilson interval on the effective n — none below two values or two records."""
+    if n < 2 or records < 2:
+        return None
+    return _wilson_bounds(proportion, effective_n(proportion, n, variance, records), method)
+
+
+def _record_tallies(rows, value) -> tuple[dict[int, float], dict[int, int]]:
+    """``(totals, sizes)`` for ``record_cluster_variance``: each row's ``value(row)``
+    summed per record, and how many rows each record contributed."""
+    totals: dict[int, float] = {}
+    sizes: dict[int, int] = {}
+    for r in rows:
+        totals[r.row_id] = totals.get(r.row_id, 0.0) + value(r)
+        sizes[r.row_id] = sizes.get(r.row_id, 0) + 1
+    return totals, sizes
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -566,11 +676,17 @@ def resolve_dataset_column(
     # #592: the column's missing declaration (None = the _is_na defaults)
     # #1048: and the defaults its TYPE calls for.
     _col = (
-        db.query(DatasetColumn.missing_values, DatasetColumn.column_type)
+        db.query(
+            DatasetColumn.missing_values, DatasetColumn.column_type,
+            DatasetColumn.scale_labels, DatasetColumn.scale_values,
+        )
         .filter(DatasetColumn.id == column_id)
         .first()
     )
     missing_rules = column_missing_rules(_col) if _col is not None else None
+    # #1332 (D56): an answer is counted under the declared label it matches
+    # without case or surrounding space — the rule the import numbered it by.
+    as_label = answer_label_resolver(_col) if _col is not None else (lambda t: t)
 
     # Load all values for this column
     values = (
@@ -587,12 +703,13 @@ def resolve_dataset_column(
     rows_by_response: dict[int, ResolvedRow] = {}
     for row_id, val_num, val_text in values:
         excluded = bool(val_text and val_text.strip().lower() in excludes)
+        missing = is_missing(val_text, missing_rules)
         rows_by_response[row_id] = ResolvedRow(
             row_id=row_id,
             value_numeric=val_num,
-            value_text=val_text,
+            value_text=val_text if missing else as_label(val_text),
             excluded=excluded,
-            missing=is_missing(val_text, missing_rules),
+            missing=missing,
         )
 
     # If no grouping, return single group
@@ -1085,12 +1202,14 @@ def resolve_dataset_domain(
     # #592: per-column missing declarations. Marked HERE, per column, because
     # the pooled paths below merge rows and discard col_id (C2) — the resolver
     # is the last place the right rules can be chosen.
-    missing_rules_by_col = {
-        c.id: column_missing_rules(c)
-        for c in db.query(
-            DatasetColumn.id, DatasetColumn.missing_values, DatasetColumn.column_type,
-        ).filter(DatasetColumn.id.in_(all_column_ids)).all()
-    }
+    member_cols = db.query(
+        DatasetColumn.id, DatasetColumn.missing_values, DatasetColumn.column_type,
+        DatasetColumn.scale_labels, DatasetColumn.scale_values,
+    ).filter(DatasetColumn.id.in_(all_column_ids)).all()
+    missing_rules_by_col = {c.id: column_missing_rules(c) for c in member_cols}
+    # #1332 (D56): each answer under ITS OWN column's declared label, before the
+    # pooled paths below discard which column it came from.
+    as_label_by_col = {c.id: answer_label_resolver(c) for c in member_cols}
 
     # Query 4: Load ALL primary RecodeDefinitions for exclude_values
     # (we don't actually need recode defs for the metric's own exclude_values —
@@ -1150,12 +1269,13 @@ def resolve_dataset_domain(
 
     for col_id, row_id, val_num, val_text in all_values:
         excluded = bool(val_text and val_text.strip().lower() in excludes)
+        missing = is_missing(val_text, missing_rules_by_col.get(col_id))
         row = ResolvedRow(
             row_id=row_id,
             value_numeric=val_num,
-            value_text=val_text,
+            value_text=val_text if missing else as_label_by_col[col_id](val_text),
             excluded=excluded,
-            missing=is_missing(val_text, missing_rules_by_col.get(col_id)),
+            missing=missing,
         )
 
         if col_id not in result:
@@ -1183,11 +1303,17 @@ def resolve_dataset_domain(
 def compute_frequency_distribution(
     rows: list[ResolvedRow],
     scale_labels: list[str] | None = None,
+    *,
+    by_record: bool = False,
 ) -> tuple[dict, int, int]:
     """Compute frequency distribution.
 
     Returns (result_data, valid_n, total_n).
     result_data: {counts: {label: n}, percentages: {label: float}, scale_order: [...]}
+
+    ``by_record`` (#1330, D54): the rows are a variable group's POOLED answers, so
+    each category's interval counts each record once — a Wilson interval on its
+    effective n — and the result carries the record count.
     """
     total_n = len(rows)
     # #381: exclude missing value_text. §I.7: the MARK is the resolver's
@@ -1250,8 +1376,24 @@ def compute_frequency_distribution(
     # rate could still be as high as X" is the useful statement.
     ci_lower_by_label: dict[str, float | None] = {}
     ci_upper_by_label: dict[str, float | None] = {}
+    if by_record:
+        # #1330 (D54): per category, the indicator "answered this", records as
+        # clusters. A record that gave two answers in a category moves its
+        # interval once, not twice.
+        _, sizes = _record_tallies(valid_rows, lambda r: 0.0)
+        hits_by_key: dict[str, dict[int, float]] = {}
+        for r in valid_rows:
+            hits = hits_by_key.setdefault(r.value_text.strip(), {})
+            hits[r.row_id] = hits.get(r.row_id, 0.0) + 1.0
     for key in order:
-        ci = _ci_wilson(counts.get(key, 0) / valid_n, valid_n) if valid_n > 0 else None
+        if by_record:
+            p = counts.get(key, 0) / valid_n if valid_n > 0 else 0.0
+            ci = _ci_wilson_by_record(
+                p, valid_n, record_cluster_variance(hits_by_key.get(key, {}), sizes),
+                len(sizes), method=CI_METHOD_WILSON_PER_CATEGORY_EFFECTIVE_N,
+            )
+        else:
+            ci = _ci_wilson(counts.get(key, 0) / valid_n, valid_n) if valid_n > 0 else None
         ci_lower_by_label[key] = ci["ci_lower"] if ci else None
         ci_upper_by_label[key] = ci["ci_upper"] if ci else None
 
@@ -1262,18 +1404,27 @@ def compute_frequency_distribution(
         "ci_lower_by_label": ci_lower_by_label,
         "ci_upper_by_label": ci_upper_by_label,
         "ci_level": 0.95,
-        "ci_method": CI_METHOD_WILSON_PER_CATEGORY,
+        "ci_method": (
+            CI_METHOD_WILSON_PER_CATEGORY_EFFECTIVE_N if by_record
+            else CI_METHOD_WILSON_PER_CATEGORY
+        ),
     }
+    if by_record:
+        result_data[RECORD_COUNT_KEY] = len(sizes)
     return result_data, valid_n, total_n
 
 
 def compute_proportion(
-    rows: list[ResolvedRow], config: dict,
+    rows: list[ResolvedRow], config: dict, *, by_record: bool = False,
 ) -> tuple[dict, int, int]:
     """Compute proportion of values meeting criteria.
 
     Returns (result_data, valid_n, total_n).
     result_data: {count_meeting: int, proportion: float|null, percentage: float|null}
+
+    ``by_record`` (#1330, D54): the rows are a variable group's POOLED answers —
+    the interval is Wilson on the records' effective n, and the result carries
+    the record count and the standard error over records.
     """
     total_n = len(rows)
     valid_rows = [r for r in rows if not r.excluded]
@@ -1289,10 +1440,9 @@ def compute_proportion(
             if not r.missing and r.value_text is not None
         ]
         valid_n = len(countable)
-        count_meeting = sum(
-            1 for r in countable
-            if r.value_text.strip().lower() in threshold_values
-        )
+
+        def meets(r: ResolvedRow) -> bool:
+            return r.value_text.strip().lower() in threshold_values
     else:  # numeric
         operator = config.get("operator", ">=")
         threshold_numeric = config.get("threshold_numeric", 0)
@@ -1302,10 +1452,11 @@ def compute_proportion(
             if not r.missing and r.value_numeric is not None
         ]
         valid_n = len(countable)
-        count_meeting = sum(
-            1 for r in countable
-            if _compare(r.value_numeric, operator, threshold_numeric)
-        )
+
+        def meets(r: ResolvedRow) -> bool:
+            return _compare(r.value_numeric, operator, threshold_numeric)
+
+    count_meeting = sum(1 for r in countable if meets(r))
 
     if valid_n == 0:
         proportion = None
@@ -1314,26 +1465,47 @@ def compute_proportion(
         proportion = round(count_meeting / valid_n, STATS_PRECISION)
         percentage = round(proportion * 100, PERCENTAGE_PRECISION)
 
-    # Confidence interval (Wilson score)
-    ci = _ci_wilson(proportion, valid_n) if proportion is not None else None
-
     result_data = {
         "count_meeting": count_meeting,
         "proportion": proportion,
         "percentage": percentage,
     }
+    if by_record:
+        # #1330 (D54): the indicator per answer, records as clusters.
+        totals, sizes = _record_tallies(countable, lambda r: 1.0 if meets(r) else 0.0)
+        variance = record_cluster_variance(totals, sizes)
+        method = CI_METHOD_WILSON_EFFECTIVE_N
+        ci = (
+            _ci_wilson_by_record(count_meeting / valid_n, valid_n, variance, len(sizes),
+                                 method=method)
+            if valid_n > 0 else None
+        )
+        result_data[RECORD_COUNT_KEY] = len(sizes)
+        result_data[STD_ERROR_KEY] = (
+            round(math.sqrt(variance) * 100, STATS_PRECISION) if variance is not None else None
+        )
+    else:
+        # Confidence interval (Wilson score)
+        method = CI_METHOD_WILSON
+        ci = _ci_wilson(proportion, valid_n) if proportion is not None else None
+
     if ci:
         result_data.update(ci)
     else:
-        result_data.update({"ci_lower": None, "ci_upper": None, "ci_level": 0.95, "ci_method": CI_METHOD_WILSON})
+        result_data.update({"ci_lower": None, "ci_upper": None, "ci_level": 0.95, "ci_method": method})
 
     return result_data, valid_n, total_n
 
 
-def compute_mean(rows: list[ResolvedRow]) -> tuple[dict, int, int]:
+def compute_mean(rows: list[ResolvedRow], *, by_record: bool = False) -> tuple[dict, int, int]:
     """Compute descriptive statistics (mean, median, std_dev, min, max).
 
     Returns (result_data, valid_n, total_n).
+
+    ``by_record`` (#1330, D53): the rows are a variable group's POOLED answers.
+    The mean stays the pooled one; its interval is over RECORDS (CR1, t on G−1
+    df), and the result carries the record count and the standard error over
+    records. ``std_dev`` still describes the pooled values.
     """
     total_n = len(rows)
     # `not r.missing` is belt-and-suspenders: a missing cell's value_numeric
@@ -1354,6 +1526,8 @@ def compute_mean(rows: list[ResolvedRow]) -> tuple[dict, int, int]:
             "min": None,
             "max": None,
         }
+        if by_record:
+            result_data[RECORD_COUNT_KEY] = 0
         return result_data, valid_n, total_n
 
     values = [r.value_numeric for r in valid_rows]
@@ -1376,12 +1550,25 @@ def compute_mean(rows: list[ResolvedRow]) -> tuple[dict, int, int]:
         "max": max_val,
     }
 
-    # Confidence interval
-    ci = _ci_mean(mean_val, std_dev_val, valid_n) if std_dev_val is not None else None
+    if by_record:
+        # #1330 (D53): the pooled mean's interval over records — a record's
+        # several answers move it once.
+        totals, sizes = _record_tallies(valid_rows, lambda r: r.value_numeric)
+        variance = record_cluster_variance(totals, sizes)
+        method = CI_METHOD_RECORD_CLUSTER_T
+        ci = _ci_mean_by_record(mean_val, variance, len(sizes))
+        result_data[RECORD_COUNT_KEY] = len(sizes)
+        result_data[STD_ERROR_KEY] = (
+            round(math.sqrt(variance), STATS_PRECISION) if variance is not None else None
+        )
+    else:
+        # Confidence interval
+        method = CI_METHOD_T_INTERVAL
+        ci = _ci_mean(mean_val, std_dev_val, valid_n) if std_dev_val is not None else None
     if ci:
         result_data.update(ci)
     else:
-        result_data.update({"ci_lower": None, "ci_upper": None, "ci_level": 0.95, "ci_method": CI_METHOD_T_INTERVAL})
+        result_data.update({"ci_lower": None, "ci_upper": None, "ci_level": 0.95, "ci_method": method})
 
     return result_data, valid_n, total_n
 
@@ -1834,13 +2021,20 @@ def compute_metric(
                 for group_value, rows in group_map.items():
                     pooled.setdefault(group_value, []).extend(rows)
 
+            # #1330 (D53/D54): the pool holds several answers per record, so
+            # every interval below is over RECORDS (`by_record`), never over
+            # the answers as if each were a different person.
             for group_value, rows in pooled.items():
                 if metric_def.metric_type == "frequency_distribution":
-                    result_data, valid_n, total_n = compute_frequency_distribution(rows, scale_labels)
+                    result_data, valid_n, total_n = compute_frequency_distribution(
+                        rows, scale_labels, by_record=True,
+                    )
                 elif metric_def.metric_type == "proportion":
-                    result_data, valid_n, total_n = compute_proportion(rows, config)
+                    result_data, valid_n, total_n = compute_proportion(
+                        rows, config, by_record=True,
+                    )
                 elif metric_def.metric_type == "mean":
-                    result_data, valid_n, total_n = compute_mean(rows)
+                    result_data, valid_n, total_n = compute_mean(rows, by_record=True)
                 else:
                     continue
 

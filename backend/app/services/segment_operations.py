@@ -391,6 +391,26 @@ def merge_segments(
 # Unmerge
 # ---------------------------------------------------------------------------
 
+#: D77 (1.5.9) — the refusal of an undo whose segment a LATER merge or split has hidden.
+UNDO_OF_HIDDEN_SEGMENT_MESSAGE = (
+    "This passage has since been merged or split again. Undo that later change first."
+)
+
+
+def _refuse_undo_of_hidden(segment: Segment) -> None:
+    """D77 — an Unmerge or Unsplit acts on a VISIBLE result only.
+
+    A result that a later merge or split has hidden was accepted (found 2026-11-03b,
+    with #1473 (b)): restoring its originals beside the later result that still holds
+    their words leaves two copies of one passage, and the withdrawal's history walks
+    (#1320, #1473 b) were not written for a history undone out of order. The UI offers
+    these acts on visible rows only and its undo is last-in-first-out, so nothing it
+    does reaches this; a stale undo from another window or a direct call does. 409: the
+    request conflicts with what the passage now is."""
+    if segment.merged_into_id is not None or segment.split_into_id is not None:
+        raise HTTPException(status_code=409, detail=UNDO_OF_HIDDEN_SEGMENT_MESSAGE)
+
+
 def unmerge_segment(
     db: Session,
     segment_id: int,
@@ -409,6 +429,7 @@ def unmerge_segment(
         raise HTTPException(status_code=404, detail="Segment not found")
     if not segment.is_merge_result:
         raise HTTPException(status_code=400, detail="This segment was not created by a merge")
+    _refuse_undo_of_hidden(segment)
 
     originals = db.query(Segment).filter(
         Segment.merged_into_id == segment_id,
@@ -919,6 +940,7 @@ def unsplit_segment(
         raise HTTPException(status_code=404, detail="Segment not found")
     if not segment.is_split_result:
         raise HTTPException(status_code=400, detail="This segment was not created by a split")
+    _refuse_undo_of_hidden(segment)
 
     # Find original — it has split_into_id pointing to one of the split-result segments
     original = db.query(Segment).filter(

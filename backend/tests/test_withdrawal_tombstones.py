@@ -155,8 +155,9 @@ class TestEveryOtherDoor:
             again = Speaker(project_id=pid, name="Maria Lopez", color_index=5)
             other = Speaker(project_id=pid, name="Noor", color_index=6)
             db.add_all([again, other]); db.flush()
-            ensure_participant_for_speaker(db, pid, again, " Maria Lopez ")
-            ensure_participant_for_speaker(db, pid, other, "Noor")
+            # #1391 (D74) — True: kept unlinked by the record, so the import can say so.
+            assert ensure_participant_for_speaker(db, pid, again, " Maria Lopez ") is True
+            assert ensure_participant_for_speaker(db, pid, other, "Noor") is False
             db.flush()
             assert again.participant_id is None
             assert other.participant_id is not None          # control

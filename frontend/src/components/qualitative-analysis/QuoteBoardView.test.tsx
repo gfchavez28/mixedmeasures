@@ -78,6 +78,9 @@ function renderBoard(excerpts: QuotedExcerptItem[], props: Record<string, unknow
           sortMode="source"
           density="quote"
           setSrAnnouncement={vi.fn()}
+          blind={false}
+          blindSettled
+          fileScope={null}
           {...props}
         />
       </MemoryRouter>
@@ -158,6 +161,54 @@ describe('CSV export', () => {
 
     vi.unstubAllGlobals()
   })
+
+  /** The writer prefixes a UTF-8 byte-order mark (`lib/csv.ts`); compared by code, not as a literal. */
+  const stripBom = (s: string) => (s.charCodeAt(0) === 0xfeff ? s.slice(1) : s)
+
+  it('#1531 D97: while the read is coder-scoped the first line says whose codes these are', async () => {
+    let captured = ''
+    vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:x'), revokeObjectURL: vi.fn() })
+    vi.stubGlobal('Blob', class {
+      constructor(parts: string[]) { captured = parts.join('') }
+    } as unknown as typeof globalThis.Blob)
+    renderBoard([clip({ excerpt_id: 1 })], { fileScope: 'Scope: coders: Alice' })
+    fireEvent.click(await screen.findByRole('button', { name: /export/i }))
+    await waitFor(() => expect(captured).toContain('excerpt_text'))
+    const lines = stripBom(captured).split('\r\n')
+    expect(lines[0]).toBe('Scope: coders: Alice')
+    expect(lines[1].startsWith('excerpt_text,')).toBe(true)
+    vi.unstubAllGlobals()
+  })
+
+  it('…and unscoped the header is line one, as before', async () => {
+    let captured = ''
+    vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:x'), revokeObjectURL: vi.fn() })
+    vi.stubGlobal('Blob', class {
+      constructor(parts: string[]) { captured = parts.join('') }
+    } as unknown as typeof globalThis.Blob)
+    renderBoard([clip({ excerpt_id: 1 })])
+    fireEvent.click(await screen.findByRole('button', { name: /export/i }))
+    await waitFor(() => expect(captured).toContain('excerpt_text'))
+    expect(stripBom(captured).startsWith('excerpt_text,')).toBe(true)
+    vi.unstubAllGlobals()
+  })
+})
+
+describe('#1531 D99 — the board while blind', () => {
+  it('says once that the codes are the viewer’s own, with the logged reveal (surface "quote_board")', async () => {
+    const reveals: (string | undefined)[] = []
+    renderBoard([clip({ excerpt_id: 1 })], { blind: true, onReveal: (s?: string) => { reveals.push(s) } })
+    expect(await screen.findByText(/each quote shows only your own codes/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Colleagues hidden' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reveal' }))
+    expect(reveals).toEqual(['quote_board'])
+  })
+
+  it('says nothing when nothing is withheld', async () => {
+    renderBoard([clip({ excerpt_id: 1, text: 'A clip' })])
+    expect(await screen.findByText('A clip')).toBeInTheDocument()
+    expect(screen.queryByText(/each quote shows only your own codes/)).toBeNull()
+  })
 })
 
 /**
@@ -193,6 +244,9 @@ describe('#963 Tier 3 — the board fetching for itself', () => {
             sortMode="source"
             density="quote"
             setSrAnnouncement={vi.fn()}
+            blind={false}
+            blindSettled
+            fileScope={null}
           />
         </MemoryRouter>
       </QueryClientProvider>,
@@ -219,6 +273,24 @@ describe('#963 Tier 3 — the board fetching for itself', () => {
     expect(screen.queryByText('No quoted excerpts yet.')).toBeNull()
     expect(screen.queryByText(/to curate quotes here/)).toBeNull()
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
+
+  it('#1531: a board fetching for itself WAITS for the blind state to settle (positive control above)', async () => {
+    listQuoted().mockResolvedValue({ excerpts: [], total_excerpts: 0 })
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <QuoteBoardView
+            projectId={1} codes={[]} codesStatus="ready" filterParams={{ coder_ids: '2' }}
+            groupBy="source" sortMode="source" density="quote" setSrAnnouncement={vi.fn()}
+            blind={false} blindSettled={false} fileScope={null}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(await screen.findByText('Loading quoted excerpts…')).toBeInTheDocument()
+    expect(listQuoted()).not.toHaveBeenCalled()
   })
 
   it('a board HANDED its data never consults the disabled query', async () => {

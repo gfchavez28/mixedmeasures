@@ -177,7 +177,8 @@ export default function SummaryStatsTable({
                 style={{ fontSize: fmt.labelFontSize, color: colors.text }}
                 title={
                   aggregateNCaveat(toBasisFields(row), row.n)
-                  ?? (row.pooledAcrossDomain ? pooledNCaveat(row.n, row.memberCount) : undefined)
+                  ?? (row.pooledAcrossDomain
+                    ? pooledNCaveat(row.n, row.memberCount, row.recordCount) : undefined)
                 }
               >
                 {/* #693: a scale score's `n` is the SUM of its items'
@@ -188,7 +189,7 @@ export default function SummaryStatsTable({
                     way, and there is no better figure to show — so that one
                     states its UNIT rather than replacing the number. */}
                 {aggregateNLabel(toBasisFields(row))
-                  ?? (row.pooledAcrossDomain ? pooledNLabel(row.n) : row.n)}
+                  ?? (row.pooledAcrossDomain ? pooledNLabel(row.n, row.recordCount) : row.n)}
               </td>
               <td
                 className="text-center px-2 py-2 tabular-nums font-semibold"

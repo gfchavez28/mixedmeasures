@@ -152,3 +152,73 @@ class TestTheConsumersReadTheConstant:
 def test_the_existing_response_fields_are_untouched(field):
     """The basis is additive: nothing about the existing payload changed."""
     assert field in IrrResponse.model_fields
+
+
+class TestTheUnitBasis:
+    """#1333 / #1334 — the FOURTEENTH stated-basis member: what one UNIT is.
+    The family's three properties: it reaches the wire, the TS mirror has not
+    drifted, and an unknown variant is a compile error on the client."""
+
+    def test_the_default_is_a_member_and_fails_closed_on_an_unknown(self):
+        assert rb.DEFAULT_RELIABILITY_UNIT_BASIS in rb.RELIABILITY_UNIT_BASES
+        assert set(rb.UNIT_BASIS_SENTENCE) == set(rb.RELIABILITY_UNIT_BASES)
+        with pytest.raises(ValueError):
+            rb.unit_basis_excludes_facilitator_turns("everything")
+
+    def test_it_reaches_both_wires(self):
+        from app.schemas.code_analysis import MachineAgreementResponse
+
+        assert "unit_basis" in IrrResponse.model_fields
+        assert "unit_basis" in MachineAgreementResponse.model_fields
+        assert IrrResponse(available=False, n_coders=1).unit_basis is None
+        # D18 — who was left out rides the same payload as how many.
+        assert "facilitator_turns_excluded" in IrrResponse.model_fields
+        assert "facilitator_speakers" in IrrResponse.model_fields
+        assert "facilitator_turns_coded" in IrrCodeResult.model_fields
+
+    def test_every_value_is_mirrored_on_the_client(self):
+        ts = _ts()
+        for basis in rb.RELIABILITY_UNIT_BASES:
+            assert f"'{basis}'" in ts, f"ReliabilityUnitBasis lacks {basis!r}"
+        assert "satisfies Record<ReliabilityUnitBasis, string>" in ts
+
+    def test_the_r_export_states_the_basis_it_computed_on(self):
+        src = _py("routers/export_r.py")
+        assert "build_irr_matrices(db, project_id, unit_basis=irr_unit_basis)" in src
+        assert "UNIT_BASIS_SENTENCE[irr_unit_basis]" in src
+
+
+class TestTheVerdictFloorsClientHalf:
+    """#1505 (D43, 1.5.9 session B) — the reasons a verdict is withheld, mirrored
+    by hand in `lib/reliability-basis.ts`. The client's fallback for a reason it
+    does not know is the neutral "no verdict", which is correct for a newer
+    server and hides a reason this build forgot to mirror — hence this test."""
+
+    def test_every_reason_is_mirrored_with_words(self):
+        ts = _ts()
+        for reason in rb.VERDICT_WITHHELD_REASONS:
+            assert f"'{reason}'" in ts, f"VerdictWithheldReason lacks {reason!r}"
+        assert "satisfies Record<VerdictWithheldReason, string>" in ts
+
+    def test_the_client_never_restates_the_floor(self):
+        """The floor rides the payload (`verdict_min_units`) and every client
+        sentence takes it as an argument; a literal of the server's constant in
+        the mirror is a second source of truth (the behaviour is pinned in
+        `reliability-basis.test.ts` with a floor of 25)."""
+        code = "\n".join(
+            line for line in _ts().splitlines()
+            if not line.lstrip().startswith(("*", "/*", "//"))
+        )
+        assert str(rb.VERDICT_MIN_UNITS) not in code
+        assert "VERDICT_MIN_UNITS" not in code
+
+    def test_the_floor_and_the_reasons_reach_both_wires(self):
+        from app.schemas.code_analysis import (
+            IrrSetResult, MachineAgreementResponse, MachineCodeAgreement,
+        )
+
+        assert "verdict_min_units" in IrrResponse.model_fields
+        assert "overall_verdict_withheld_reason" in IrrResponse.model_fields
+        assert "verdict_min_units" in MachineAgreementResponse.model_fields
+        for row in (IrrCodeResult, IrrMagnitudeResult, IrrSetResult, MachineCodeAgreement):
+            assert "verdict_withheld_reason" in row.model_fields, row.__name__

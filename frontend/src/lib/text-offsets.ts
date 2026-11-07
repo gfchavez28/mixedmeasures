@@ -135,34 +135,46 @@ export function sliceByCodePoints(text: string, start: number, end: number): str
  * untestable producer was the worst possible place to leave it.
  *
  * `node`/`offset` are a DOM position as `caretPositionFromPoint` / `Range` report
- * it: `offset` counts UTF-16 code units when `node` is character data.
+ * it: `offset` counts UTF-16 code units when `node` is character data, and CHILD
+ * NODES when `node` is an element.
+ *
+ * #1324: an ELEMENT position inside the passage — a caret on a highlight's edge,
+ * `(mark, 0)`, or between two highlights, `(textEl, 2)` — used to resolve to the END
+ * of the passage (only a text node was looked for, and any other node fell through
+ * to "outside"). A Range from the element's start to the position counts the
+ * characters before it whatever kind of node the position names.
  */
 export function charOffsetInElement(textEl: HTMLElement, node: Node, offset: number): number {
   const full = textEl.textContent ?? ''
 
   // ── everything in this block is UTF-16 code units ──
   let utf16: number
-  if (node === textEl) {
-    utf16 = offset === 0 ? 0 : full.length
+  if (!textEl.contains(node)) {
+    // The position is outside this element: before it (offset 0) or after it.
+    const cmp = node.compareDocumentPosition(textEl)
+    utf16 = cmp & Node.DOCUMENT_POSITION_FOLLOWING ? 0 : full.length
   } else {
-    const walker = textEl.ownerDocument.createTreeWalker(textEl, NodeFilter.SHOW_TEXT)
-    let charCount = 0
-    let found = false
-    let textNode: Node | null
-    while ((textNode = walker.nextNode())) {
-      if (textNode === node) {
-        utf16 = charCount + offset
-        found = true
-        break
-      }
-      charCount += (textNode as Text).length
-    }
-    if (!found) {
-      // The position is outside this element: before it (offset 0) or after it.
-      const cmp = node.compareDocumentPosition(textEl)
-      utf16 = cmp & Node.DOCUMENT_POSITION_FOLLOWING ? 0 : full.length
-    }
+    const limit = node.nodeType === Node.TEXT_NODE ? (node as Text).length : node.childNodes.length
+    const range = textEl.ownerDocument.createRange()
+    range.setStart(textEl, 0)
+    range.setEnd(node, Math.max(0, Math.min(offset, limit)))
+    utf16 = range.toString().length
   }
 
-  return utf16ToCodePoint(full, utf16!)
+  return utf16ToCodePoint(full, utf16)
+}
+
+/**
+ * Does `textEl` render EXACTLY the stored text? — the precondition of
+ * `charOffsetInElement` (#1324).
+ *
+ * The producer counts the element's rendered characters, so an offset it returns is
+ * an offset into the STORED text only when the two are identical. Anything else
+ * inside the element — a passage drawn twice (#1324's overlap renderer), a tooltip's
+ * words rendered in place, a badge — turns every later offset into other words, and
+ * nothing downstream can tell. So a selection is refused, never corrected: there is
+ * no general way to map a position in the wrong text back onto the right one.
+ */
+export function renderedTextMatches(textEl: HTMLElement, storedText: string): boolean {
+  return (textEl.textContent ?? '') === storedText
 }

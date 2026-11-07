@@ -5,12 +5,19 @@ interface FrequencyComparisonChartProps {
   filtered: FrequencySet
   overall: FrequencySet | null
   filterDescription: string
+  /**
+   * #1534 D107 (1.5.9) — the sentence naming the focal datasets no filter judges, which the
+   * comparison leaves out on BOTH sides (`lib/subgroup-filters.ts::notComparedSentence`);
+   * `null` when every focal dataset is compared. REQUIRED, so a new mount decides.
+   */
+  notCompared: string | null
 }
 
 export default function FrequencyComparisonChart({
   filtered,
   overall,
   filterDescription,
+  notCompared,
 }: FrequencyComparisonChartProps) {
   if (filtered.frequencies.length === 0) {
     return (
@@ -42,6 +49,7 @@ export default function FrequencyComparisonChart({
           {filtered.text_count} text{filtered.text_count !== 1 ? 's' : ''} from {filtered.row_count} record{filtered.row_count !== 1 ? 's' : ''}
         </span>
       </div>
+      {notCompared && <p className="text-xs text-mm-text-muted mb-3">{notCompared}</p>}
 
       <div className="space-y-2">
         {filtered.frequencies.map(f => {

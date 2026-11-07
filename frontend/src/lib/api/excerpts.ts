@@ -129,6 +129,9 @@ export interface QuotedExcerptsParams {
   document_ids?: string
   exclude_facilitator?: boolean
   participant_ids?: string
+  /** #1531 D99 (1.5.9): the viewer's own id while blind mode withholds — each quote's codes are
+   *  then hers (every quote stays: an excerpt has no author); absent = every coder. */
+  coder_ids?: string
 }
 
 // API functions - Excerpts

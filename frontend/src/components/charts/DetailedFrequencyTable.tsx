@@ -30,10 +30,13 @@ function MetricTable({
   metric,
   formatting,
   showCumulative,
+  groupValue,
 }: {
   metric: FrequencyTableMetric
   formatting: ReturnType<typeof mergeFormatting>
   showCumulative: boolean
+  /** The group this table counts, when the tables are grouped (#1466). */
+  groupValue?: string
 }) {
   // #1412: no valid answer remains — every "Valid %" is 0/0.
   const noValid = metric.totalValid <= 0
@@ -42,8 +45,22 @@ function MetricTable({
       className="w-full border-collapse text-sm"
       style={{ fontSize: formatting.axisFontSize }}
     >
-      <caption className="text-left font-medium text-mm-text pb-1.5" style={{ fontSize: formatting.labelFontSize }}>
+      {/* `relative`: the sr-only group below is absolutely positioned, and a
+          positioned caption keeps it from escaping into the page (#1156). */}
+      <caption className="relative text-left font-medium text-mm-text pb-1.5" style={{ fontSize: formatting.labelFontSize }}>
         {metric.fullLabel || metric.label}
+        {/* 🔴 #1466 (D131) — each group's table is NAMED for its group, or a
+            reader moving table to table hears "q1" for A and again for B. The
+            group is drawn once above its tables, so here it is for the ear only,
+            in the form the Canvas export already prints for the same row:
+            "q1 (A)". The space is in the caption's own child list — a space
+            inside the span is trimmed away by the name computation (#908). */}
+        {groupValue != null && (
+          <>
+            {' '}
+            <span className="sr-only">({groupValue})</span>
+          </>
+        )}
         {noValid && (
           <>
             {' '}
@@ -187,7 +204,7 @@ export default function DetailedFrequencyTable({
           </div>
           <div className="space-y-4">
             {tables.map((q, i) => (
-              <MetricTable key={i} metric={q} formatting={fmt} showCumulative={showCumulative} />
+              <MetricTable key={i} metric={q} formatting={fmt} showCumulative={showCumulative} groupValue={groupValue} />
             ))}
           </div>
         </div>

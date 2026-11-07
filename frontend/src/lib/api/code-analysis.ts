@@ -15,7 +15,8 @@ export interface CodeFrequencyItem {
   category_name: string | null
   category_color: string | null
   segment_count: number
-  segment_percentage: number
+  /** `null` for a universal code (#1526 D79 — `lib/universal-share.ts`). */
+  segment_percentage: number | null
   conversation_count: number
   conversation_percentage: number
   // Emitted since Observations; the client type omitted both for a year, which
@@ -27,9 +28,9 @@ export interface CodeFrequencyItem {
   participant_count: number
   participant_percentage: number
   text_count: number
-  text_percentage: number
   row_count: number
-  row_percentage: number
+  // text_percentage / row_percentage / total_rows: deleted by #1526 D81 — no reader since
+  // #749, and their base counted an answer marked only with a universal code.
 }
 
 export interface CodeFrequencySummary {
@@ -39,8 +40,8 @@ export interface CodeFrequencySummary {
   total_participants: number
   total_codes_active: number
   unlinked_speaker_count: number
+  /** J-A since #1526 D78: answers carrying a NON-universal code. `hasCoding` reads it. */
   total_coded_texts: number
-  total_rows: number
   source: string
 }
 
@@ -161,8 +162,13 @@ export interface CooccurrenceMatrixResponse {
   codes: CooccurrenceCodeInfo[]
   matrix: number[][]
   max_cooccurrence: number
-  total_coded_segments: number
-  total_coded_texts: number
+  /**
+   * #1527 D83 — the units the matrix was counted over (passages, paragraphs, clips and
+   * answers holding a code it shows; at the source level, the sources): the figure's N.
+   * It replaced `total_coded_segments` + `total_coded_texts`, which left documents and
+   * clips out (N 0 on a documents-only project, beside a matrix with pairs in it).
+   */
+  n_units: number
   source: string
 }
 
@@ -317,8 +323,12 @@ export interface SourceFrequenciesResponse {
 export interface DemographicComparisonRequest {
   code_ids?: number[] | null
   group_by_subtype: string
+  /** #1297/#1298: per kind, absent = every source of that kind, a list = exactly
+   *  those (`[]` = none). Build with `lib/qual-comparison.ts::comparisonSources`. */
   conversation_ids?: number[] | null
   text_column_ids?: number[] | null
+  document_ids?: number[] | null
+  observation_ids?: number[] | null
   exclude_facilitator?: boolean
   participant_ids?: number[] | null
   /** Track J · J1 item 4 — coder (user) IDs to include; null/omit = all coders. */
@@ -328,25 +338,45 @@ export interface DemographicComparisonRequest {
 }
 
 export interface GroupTotal {
+  /** #1323: the denominator in `basis.unit` — participants with material, or passages. */
+  n: number
+  participants: number
   total_segments: number
   total_word_count: number
 }
 
 export interface GroupCodeStats {
+  /** In `basis.unit`. */
   count: number
-  /** #1421: `null` when the group has no segments in the material compared —
+  /** #1421: `null` when the group has no material in the sources compared —
    *  `undefined_reason` says why. Never read it with `?? 0`. */
   proportion: number | null
   undefined_reason: string | null
+  /** #1323: the passage count — a description beside the tested number, never tested. */
+  passages: number
 }
 
 export interface StatTestResult {
   method: string
   statistic: number | null
   p_value: number
+  /** #1323: corrected across the codes tested (`basis.correction`); `significant` reads it. */
+  p_adjusted: number | null
   significant: boolean
   effect_size: number | null
   effect_size_label: string | null
+  min_attainable_p?: number | null
+  /** `false` = cannot reach significance at these group sizes under the correction. */
+  can_reach_significance?: boolean | null
+}
+
+/** #1323 D3 — Δ's interval; mirrors `schemas/code_analysis.py::ComparisonInterval`. */
+export interface ComparisonInterval {
+  lower: number
+  upper: number
+  level: number
+  /** `comparison_basis.CI_METHOD_*` — read through `lib/ci-label.ts`, never inferred. */
+  method: string
 }
 
 export interface CodeComparisonEntry {
@@ -355,13 +385,42 @@ export interface CodeComparisonEntry {
   category_name: string | null
   by_group: Record<string, GroupCodeStats>
   delta_proportion: number | null
+  /** Two groups, a tested unit, both shares defined; absent from older payloads. */
+  delta_ci?: ComparisonInterval | null
   test: StatTestResult | null
+  test_omitted_reason?: string | null
+}
+
+/** #1323 — the stated basis (`lib/comparison-basis.ts` reads it). */
+export interface ComparisonBasis {
+  unit: string
+  correction: string
+  family_size: number
+  family_reachable: number
+  tarone_family_size: number
+  alpha: number
+  tested_groups: string[]
+  test_omitted_reason: string | null
+}
+
+/** #1297/#1298 — what was counted and what was left out. */
+export interface ComparisonScope {
+  conversations: number
+  documents: number
+  text_columns: number
+  observations_left_out: number
+  unassigned_passages: number
+  participants_without_group: number
 }
 
 export interface DemographicComparisonResponse {
   groups: string[]
   group_totals: Record<string, GroupTotal>
   codes: CodeComparisonEntry[]
+  /** Optional on the CLIENT only: a cached payload from an older server has none,
+   *  and must not be relabelled (`comparisonMethodNote` returns null). */
+  basis?: ComparisonBasis
+  scope?: ComparisonScope
 }
 
 // Saturation
@@ -495,9 +554,25 @@ export interface BinnedKappaResponse {
 }
 
 export interface ReconciliationUnit {
-  /** A clip IS a Segment, so an observation unit is still 'segment'. */
-  unit_type: 'segment' | 'dataset_value'
+  /**
+   * A clip IS a Segment, so an observation unit is still 'segment'. A segment
+   * GROUP is its own kind (#1334 unit 3, D35): the consensus layer decides it
+   * once, so the grid lists it once. The backend field is a plain `str`, so an
+   * unknown kind arrives here SILENTLY — `test_reconciliation_groups.py` reads
+   * this union and holds it equal to the server's (`reconciliation._UNIT_TYPE`).
+   */
+  unit_type: 'segment' | 'group' | 'dataset_value'
+  /** The segment's, the GROUP's or the value's own id — for a group, never a turn. */
   unit_id: number
+  /**
+   * The turn this row's link and own-cell actions address: the segment itself,
+   * a group's FIRST visible turn (the server's remove and rate find your code on
+   * any turn of the group, and an apply fans out to all of them), null for a
+   * dataset value. Optional so payloads from before 1.5.9 still type-check.
+   */
+  anchor_segment_id?: number | null
+  /** A group's visible turns in transcript order; empty for any other unit. */
+  member_segment_ids?: number[]
   source_type: 'conversation' | 'document' | 'observation' | 'column'
   source_id: number
   source_label: string
@@ -543,6 +618,19 @@ export interface ReconciliationUnit {
    * the coder has not re-rated since. In the review set until adjudicated.
    */
   has_merge_conflict?: boolean
+  /**
+   * #1334 unit 3 (D37) — coderId → { codeId → the two or more ratings that
+   * coder gave the code on different turns of this GROUP, ascending }. Such a
+   * coder has NO rating on the group, so the code is absent from their
+   * `ratings_by_coder` and from the consensus median; this is why.
+   */
+  group_rating_conflicts_by_coder?: Record<string, Record<string, number[]>>
+  /**
+   * …and a FIFTH review fact (groups only), never folded into the merge one,
+   * whose words name a merged copy. Rating the code again sets one rating on
+   * every turn of the group and settles it.
+   */
+  has_group_rating_conflict?: boolean
 }
 
 export interface ReconciliationResponse {
@@ -597,9 +685,17 @@ export interface IrrCodeResult {
   krippendorff_alpha: number | null
   alpha_interpretation: string | null
   /**
+   * #1505 (D43) — why κ and α carry NO band word although they have values
+   * (`lib/reliability-basis.ts::VerdictWithheldReason`): fewer units than
+   * `IrrResponse.verdict_min_units`. One reason per ROW — κ and α rest on the
+   * same units. Absent on a payload from before 1.5.9.
+   */
+  verdict_withheld_reason?: string | null
+  /**
    * #829 — why κ/α are null here. `no_variance` = nobody applied this code in
    * scope (or everybody did), so there is nothing to agree about. Reporting
-   * κ = 1 "almost perfect" was the defect.
+   * κ = 1 "almost perfect" was the defect. `insufficient_n` covers ONE unit
+   * too (#1505, D42): over one unit α is 0 for any disagreement.
    */
   undefined_reason: string | null
   /**
@@ -612,6 +708,11 @@ export interface IrrCodeResult {
    */
   kappa_ci: ReliabilityInterval | null
   alpha_ci: ReliabilityInterval | null
+  /**
+   * #1333 — facilitator turns in scope carrying this code (they are NOT units).
+   * Absent/null when facilitator turns are units, or on an older payload.
+   */
+  facilitator_turns_coded?: number | null
   /**
    * #35 — how α scored a difference (`lib/reliability-basis.ts::AlphaMetric`).
    * `nominal` here; the rating rows below are `interval`. Absent on older
@@ -648,6 +749,8 @@ export interface IrrMagnitudeResult {
   mean_abs_difference: number | null
   krippendorff_alpha: number | null
   alpha_interpretation: string | null
+  /** #1505 (D43) — as `IrrCodeResult.verdict_withheld_reason`. */
+  verdict_withheld_reason?: string | null
   /** `interval`, by the declaration (`lib/reliability-basis.ts`). */
   alpha_metric: string
   /** `insufficient_n` · `no_variance` · null. */
@@ -711,6 +814,8 @@ export interface IrrSetResult {
   kappa_interpretation: string | null
   krippendorff_alpha: number | null
   alpha_interpretation: string | null
+  /** #1505 (D43) — as `IrrCodeResult.verdict_withheld_reason`. */
+  verdict_withheld_reason?: string | null
   /** `degenerate` (fewer than two values) · `insufficient_n` · `no_variance` · null. */
   undefined_reason: string | null
   kappa_ci: ReliabilityInterval | null
@@ -756,6 +861,8 @@ export interface MachineCodeAgreement {
   prevalence: number | null
   /** `no_variance` / `insufficient_n` — an undefined statistic is null WITH a reason. */
   undefined_reason: string | null
+  /** #1505 (D43) — as `IrrCodeResult.verdict_withheld_reason`, decided over `n_units`. */
+  verdict_withheld_reason?: string | null
 }
 
 export interface MachinePairAgreement {
@@ -774,6 +881,14 @@ export interface MachineAgreementResponse {
   /** `lib/machine-agreement-copy.ts::MachineAgreementUnavailable`. */
   unavailable_reason: string | null
   pairs: MachinePairAgreement[]
+  /**
+   * #1333 / #1334 — the unit basis this table shares with the human one
+   * (`IrrResponse.unit_basis`, `lib/reliability-basis.ts::ReliabilityUnitBasis`).
+   * Optional — an older payload predates it and is not relabelled.
+   */
+  unit_basis?: string | null
+  /** #1505 (D43) — as `IrrResponse.verdict_min_units`. */
+  verdict_min_units?: number | null
 }
 
 export interface IrrResponse {
@@ -790,9 +905,17 @@ export interface IrrResponse {
   per_code: IrrCodeResult[]
   overall_alpha: number | null
   overall_alpha_interpretation: string | null
+  /** #1505 (D43) — the headline's band withheld: its units are fewer than the floor. */
+  overall_verdict_withheld_reason?: string | null
   /** #43 — a CLUSTER bootstrap over units, not over the pooled per-code rows. */
   overall_alpha_ci: ReliabilityInterval | null
   interpretation_thresholds: IrrThresholds
+  /**
+   * #1505 (D43) — the server's verdict floor (`reliability_basis.VERDICT_MIN_UNITS`):
+   * below this many units no coefficient carries a band word. The client never
+   * restates it. Absent on a payload from before 1.5.9.
+   */
+  verdict_min_units?: number | null
   /**
    * #35 — the stated basis: every α on this payload is over CODERS
    * (`lib/reliability-basis.ts::ReliabilityFacet`). Optional so a mocked or
@@ -800,6 +923,16 @@ export interface IrrResponse {
    * facet rather than inventing one.
    */
   reliability_facet?: string | null
+  /**
+   * #1333 / #1334 — what one UNIT is (`lib/reliability-basis.ts::ReliabilityUnitBasis`):
+   * whether a facilitator's turns count; a group of turns counts once either way.
+   * Optional — an older payload predates it and is not relabelled.
+   */
+  unit_basis?: string | null
+  /** #1333 — facilitator turns in scope the basis left out; null when it keeps them. */
+  facilitator_turns_excluded?: number | null
+  /** D18 — the speakers whose turns were left out as a facilitator's, sorted. */
+  facilitator_speakers?: string[] | null
   /** #35 — rating agreement per scaled code; empty when none declares a scale. */
   magnitude_per_code?: IrrMagnitudeResult[]
   /** Row 48 — the THIRD table: one α per code set, never pooled. */
@@ -855,6 +988,9 @@ export const codeAnalysisApi = {
     context_size?: number
     limit?: number
     offset?: number
+    /** #1531 D102 (1.5.9): sent ONLY while blind mode withholds — each passage's chips then
+     *  follow `coder_ids` (her own codes); absent, a coder filter keeps whole-unit chips. */
+    chips_follow_coder_ids?: boolean
   }) =>
     api.get<CodeSegmentsWithContextResponse>(
       `/projects/${projectId}/code-analysis/codes/${codeId}/segments`, { params }
@@ -885,6 +1021,8 @@ export const codeAnalysisApi = {
     layer_scope?: LayerScope
     limit?: number
     offset?: number
+    /** #1531 D102 — as `segmentsWithContext`: only while blind mode withholds. */
+    chips_follow_coder_ids?: boolean
   }) =>
     api.get<CodeTextsResponse>(
       `/projects/${projectId}/code-analysis/codes/${codeId}/texts`, { params }
@@ -893,8 +1031,13 @@ export const codeAnalysisApi = {
   cooccurrence: (projectId: number, params?: CodeAnalysisFilterParams) =>
     api.get<CooccurrenceMatrixResponse>(`/projects/${projectId}/code-analysis/cooccurrence`, { params }).then(r => r.data),
 
-  sourceFrequencies: (projectId: number, data: SourceFrequenciesRequest) =>
-    api.post<SourceFrequenciesResponse>(`/projects/${projectId}/code-analysis/source-frequencies`, data)
+  /**
+   * `config.timeout` — #1528: the Frequencies CSV is written from this read, so the export
+   * passes `EXPORT_TIMEOUT_MS` (#820: an export's cost is the project's, unknowable before
+   * asking; the server file it replaced had that budget). The screen keeps the 30 s default.
+   */
+  sourceFrequencies: (projectId: number, data: SourceFrequenciesRequest, config?: { timeout?: number }) =>
+    api.post<SourceFrequenciesResponse>(`/projects/${projectId}/code-analysis/source-frequencies`, data, config)
       .then(r => r.data),
 
   demographicComparison: (projectId: number, data: DemographicComparisonRequest) =>

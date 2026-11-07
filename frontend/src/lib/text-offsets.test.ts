@@ -205,6 +205,31 @@ describe('charOffsetInElement — THE producer, now reachable from a test', () =
     expect(charOffsetInElement(el, el, 1)).toBe(3) // code points, not 4 units
   })
 
+  it('#1324: an ELEMENT position inside the passage counts the characters before it', () => {
+    // A caret on a highlight's edge is reported against the <mark>, and one between two
+    // highlights against the passage element, with a CHILD index. Both used to resolve to
+    // the END of the passage — measured: all five positions below returned 26.
+    const el = document.createElement('div')
+    el.innerHTML = 'We rolled <mark>it 😀</mark><mark>ut in</mark> March.'
+    const [m1, m2] = el.querySelectorAll('mark')
+    const full = el.textContent!
+    const at = (s: string) => codePointIndexOf(full, s)
+    expect(charOffsetInElement(el, m1, 0)).toBe(at('it 😀'))
+    expect(charOffsetInElement(el, m1, 1)).toBe(at('ut in'))
+    expect(charOffsetInElement(el, m2, 0)).toBe(at('ut in'))
+    expect(charOffsetInElement(el, el, 1)).toBe(at('it 😀'))
+    expect(charOffsetInElement(el, el, 2)).toBe(at('ut in'))
+    expect(charOffsetInElement(el, el, 3)).toBe(at(' March.'))
+  })
+
+  it('an offset past its node clamps to the node\'s end rather than throwing', () => {
+    // A Range throws IndexSizeError on an offset beyond its node; a selection boundary
+    // is not worth an exception in a mousedown handler (the pre-#1324 walk never threw).
+    const { el, nodes } = elementWith('ab', 'c😀d')
+    expect(charOffsetInElement(el, nodes[0], 99)).toBe(2)
+    expect(charOffsetInElement(el, el, 99)).toBe(codePointLength('abc😀d'))
+  })
+
   it('resolves a node outside the element to a boundary rather than throwing', () => {
     const { el } = elementWith('a😀b')
     const outside = document.createElement('span')

@@ -373,7 +373,9 @@ def reached_turns(db: Session, speaker_ids: list[int]) -> ReachedTurns:
     (`merged_into_id`), and the children of its split (`split_into_id` plus the
     siblings, `_split_children`) — to a fixpoint, so a merge of a split of a merge
     is followed as far as it goes. Hidden turns are included on purpose: they hold
-    the words, and Unmerge or Unsplit brings them back.
+    the words, and Unmerge or Unsplit brings them back. A merge result or split child
+    an Unmerge or Unsplit DELETED has no row to follow: `withdrawal_history.
+    deleted_lineage` finds it from the audit trail, and nothing there is blanked.
     """
     if not speaker_ids:
         return ReachedTurns({}, {})

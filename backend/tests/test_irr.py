@@ -75,12 +75,16 @@ _HAS_IRR = r_support.HAS_IRR
 
 
 def _r_irr(rows: list[list], n: int, method: str = "nominal") -> dict:
-    """Run rows (units × coders, None→NA) through R's irr; return {alpha,kappa,agree}."""
+    """Run rows (units × coders, None→NA) through R's irr; return {alpha,kappa,agree}.
+
+    α goes through irr's MISSING-DATA branch (`cbind(t(m), NA)`), as the R export
+    calls it since #1325: irr's complete-data branch weights every pair 1, not
+    1/(m−1), which is wrong for three or more coders."""
     vals = ",".join("NA" if v is None else str(v) for row in rows for v in row)
     script = f"""
 suppressMessages(library(irr))
 m <- matrix(c({vals}), nrow={len(rows)}, ncol={n}, byrow=TRUE)
-cat("alpha", kripp.alpha(t(m), method="{method}")$value, "\\n")
+cat("alpha", kripp.alpha(cbind(t(m), NA), method="{method}")$value, "\\n")
 if (ncol(m) == 2) {{
   dc <- m[stats::complete.cases(m), , drop=FALSE]
   if (nrow(dc) > 0) {{
@@ -169,14 +173,16 @@ def test_alpha_metric_properties():
     (M_K2011, 4),          # the published 2011 example (missing → canonical regime)
     (M_MULTIDIGIT, 2),     # multi-digit values: numeric ranking must match R's
     ([[1, 1, 2], [2, 2, None], [10, 12, 10], [1, None, 1], [5, 5, 6], [None, 2, 2]], 3),
+    # #1325 — COMPLETE data from three coders, comparable since `_r_irr` calls
+    # irr through its missing-data branch (the export's call).
+    ([[1, 1, 2], [2, 2, 2], [3, 1, 3], [1, 1, 1], [2, 3, 2], [3, 3, 1]], 3),
 ])
 @pytest.mark.parametrize("metric", ["nominal", "ordinal", "interval", "ratio"])
 def test_alpha_metrics_match_r(rows, n, metric):
-    # NOTE: multi-coder fixtures deliberately include ≥1 missing cell — with ZERO
-    # missing cells irr::kripp.alpha skips the canonical 1/(m−1) pair weighting
-    # (its complete-data coincidence matrix deviates from Krippendorff's canonical
-    # definition for ≥3 raters), so complete-data 3+-coder matrices are not
-    # comparable to R.
+    # NOTE: with ZERO missing cells irr::kripp.alpha skips the canonical 1/(m−1)
+    # pair weighting (its `mc <- rep(1, …)` branch — wrong for ≥3 raters, exact
+    # for two); `_r_irr` therefore calls `kripp.alpha(cbind(t(m), NA))`, which is
+    # how the R export calls it too since #1325 (D39).
     r = _r_irr(rows, n, method=metric)
     assert _krippendorff_alpha(rows, metric=metric) == pytest.approx(r["alpha"], abs=1e-6)
 
@@ -418,7 +424,8 @@ class TestObservationClipsInIrr:
             _apply(db, ids["code"], 1, segment_id=sid)
             _apply(db, ids["code"], 2, segment_id=sid)
 
-        _coders, _applied, unit_source, _engaged, _multi, _ratings = gather_coder_applications(db, 80)
+        _coders, _applied, unit_source, _engaged, _multi, _ratings = gather_coder_applications(
+            db, 80, include_facilitator_turns=False, collapse_groups=True)
 
         assert unit_source[("seg", ids["frozen_clips"][0])] == ("obs", ids["frozen_obs"])
         assert all(sid is not None for (_tag, sid) in unit_source.values()), \
@@ -438,7 +445,8 @@ class TestObservationClipsInIrr:
             _apply(db, ids["code"], 1, segment_id=sid)
             _apply(db, ids["code"], 2, segment_id=sid)
 
-        _c, _a, unit_source, _e, multi, _r = gather_coder_applications(db, 81)
+        _c, _a, unit_source, _e, multi, _r = gather_coder_applications(
+            db, 81, include_facilitator_turns=False, collapse_groups=True)
 
         assert ("obs", ids["frozen_obs"]) in multi, "the frozen observation is a shared source"
         assert ("obs", ids["open_obs"]) not in multi, "the OPEN observation must not be a source"

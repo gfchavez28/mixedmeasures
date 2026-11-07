@@ -17,6 +17,7 @@
  * "Open in Analysis" link is the affordance for that.
  */
 import type {
+  CooccurrenceMatrixResponse,
   SourceFrequenciesResponse,
   SaturationResponse,
   DemographicComparisonResponse,
@@ -46,10 +47,11 @@ export interface QualChartRouterProps {
   saturation?: SaturationResponse
   comparison?: DemographicComparisonResponse
   /**
-   * Co-occurrence reports its own N once loaded (it is the one component that
-   * fetches for itself, so the parent cannot read the payload).
+   * Co-occurrence reports its payload once loaded (it is the one component that
+   * fetches for itself, so the parent cannot read it otherwise): the N
+   * (`n_units`, #1527 D83) and the figure's fingerprint (#1527 D90).
    */
-  onCooccurrenceLoad?: (info: { totalSegments: number; totalComments: number }) => void
+  onCooccurrenceLoad?: (data: CooccurrenceMatrixResponse) => void
 }
 
 export default function QualChartRouter({

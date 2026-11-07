@@ -26,6 +26,18 @@ to its *effective code* (the D3 equivalence-group seam) before counting, so
 The rule + counts are recorded in ``origin_context`` JSON so the reconciliation
 UI can show "2 of 3 agreed" and surface the majority flag.
 
+**A segment GROUP is decided ONCE (#1334 unit 3, D30–D33, 1.5.9).** A group of
+turns is coded as one unit (the apply, a rating and a set selection fan out to
+every member), so its consensus is one decision over the group — a coder's codes
+are the union over its VISIBLE members, facilitator turns included (D16: this
+layer covers prompts); a coder's two different ratings of one code on it are no
+rating (D22, `segment_groups.merge_unit_rating`) — and that decision is written
+as identical rows on EVERY visible member, the same fan-out an apply makes, so
+the layer keeps the turn grain every human layer has. Deciding per turn let a
+group whose coders sit on different turns (a coding made before grouping,
+`bulk_code`, a merged copy) produce no consensus at all, while the participant
+score and the reliability figures read the same group as one unit.
+
 **Project scoping (ADJ-1, load-bearing).** The consensus coder is GLOBAL (one
 row, no ``project_id`` on ``User``); its applications span every project. A
 rebuild therefore DELETEs only consensus rows whose target belongs to THIS
@@ -65,6 +77,7 @@ from .coding_layers import (
 )
 from .code_sets import CodeSetIndex, build_code_set_index
 from .magnitude import read_scale
+from .segment_groups import GROUP_RATING_CONFLICT, UNIT_TAG_GROUP, merge_unit_rating
 
 
 def consensus_enabled(db: Session) -> bool:
@@ -489,26 +502,55 @@ def recompute_consensus_for_target(
 ) -> int:
     """Recompute the consensus layer for ONE target (write-side, synchronous).
 
-    The cheap path: used inline by single apply/remove and by the staleness sweep
-    (Slab 5). DELETE this target's consensus rows + re-derive from its voters via
-    ``_decide_consensus``. A single target can't span projects, so ADJ-1's
-    project-scoping is automatic; ``project_id`` is needed only for the
-    effective-code map (equivalence resolution — a no-op query when the project
-    has no groups). Returns the number of consensus rows written. Flush-only.
+    The cheap path: the staleness sweep's (Slab 5). DELETE this target's
+    consensus rows + re-derive from its voters via ``decide_target``. A single
+    target can't span projects, so ADJ-1's project-scoping is automatic;
+    ``project_id`` is needed only for the effective-code map (equivalence
+    resolution — a no-op query when the project has no groups). Returns the
+    number of consensus rows written. Flush-only.
+
+    🔴 **A GROUPED turn recomputes its whole GROUP (#1334 unit 3, D33).** The
+    group is decided once (module docstring), so a marker on any member is a
+    marker on the unit: the voters are read over the group's VISIBLE members,
+    the consensus rows are DELETED on EVERY member — hidden ones too, the
+    cleaner's superset (a merge of grouped turns leaves the originals in the
+    group, hidden, carrying the rows it wrote) — and the decision is written on
+    each visible member. Read from the turn's own ``group_id``, so a hidden
+    member's marker still reaches its group.
     """
     if (segment_id is None) == (dataset_value_id is None):
         raise ValueError("exactly one of segment_id / dataset_value_id is required")
 
     consensus_user = get_or_create_consensus_user(db)
     effective_map = build_effective_code_map(db, project_id)
-    target_filter = (
-        CodeApplication.segment_id == segment_id
-        if segment_id is not None
-        else CodeApplication.dataset_value_id == dataset_value_id
+    group_id = (
+        db.query(Segment.group_id).filter(Segment.id == segment_id).scalar()
+        if segment_id is not None else None
     )
+    if group_id is not None:
+        members = select(Segment.id).where(Segment.group_id == group_id)
+        target_filter = CodeApplication.segment_id.in_(members)
+        # The decision lands on each VISIBLE, eligible member — the scope the
+        # vote query below reads (a group is conversation-only, so eligibility
+        # is the shared clause's no-op, kept so the rule stays in one place).
+        write_targets = [
+            {"segment_id": sid} for (sid,) in db.query(Segment.id).filter(
+                Segment.group_id == group_id,
+                *visible_segment_filter(),
+                consensus_eligible_segment_clause(),
+            ).order_by(Segment.id)
+        ]
+    elif segment_id is not None:
+        target_filter = CodeApplication.segment_id == segment_id
+        write_targets = [{"segment_id": segment_id}]
+    else:
+        target_filter = CodeApplication.dataset_value_id == dataset_value_id
+        write_targets = [{"dataset_value_id": dataset_value_id}]
 
     voters = (
-        db.query(CodeApplication.user_id, CodeApplication.code_id, CodeApplication.magnitude)
+        # The ballot rows' shape (`_fold_votes`): the target column first.
+        db.query(CodeApplication.segment_id, CodeApplication.user_id,
+                 CodeApplication.code_id, CodeApplication.magnitude)
         .join(Code, CodeApplication.code_id == Code.id)
         .join(User, CodeApplication.user_id == User.id)
         .filter(
@@ -543,14 +585,11 @@ def recompute_consensus_for_target(
             *visible_segment_filter(),
             consensus_eligible_segment_clause(),
         )
-    rows = voters.all()
-    per_coder: dict[int, set[int]] = {}
     # #35 — each voter's RATINGS, keyed by the RAW code (the instrument is the
-    # code's own scale; `_rating_values` says why they are never pooled).
-    ratings: dict[int, dict[int, float | None]] = {}
-    for user_id, code_id, magnitude in rows:
-        per_coder.setdefault(user_id, set()).add(resolve_effective_code(effective_map, code_id))
-        ratings.setdefault(user_id, {})[code_id] = magnitude
+    # code's own scale; `_rating_values` says why they are never pooled). The
+    # fold is the ballots' own (`_fold_votes`), so a group decided here and the
+    # same group decided by the rebuild cannot disagree.
+    per_coder, ratings = _fold_votes(voters.all(), effective_map)
 
     db.query(CodeApplication).filter(
         CodeApplication.origin == CONSENSUS_ORIGIN,
@@ -560,18 +599,20 @@ def recompute_consensus_for_target(
 
     decisions = decide_target(per_coder, build_code_set_index(db, project_id, effective_map))
     scales = scales_for_project(db, project_id) if decisions else {}
+    written = 0
     for eff, rule, agree, voters, code_set in decisions:
         rating = (
             _decide_magnitude(_rating_values(ratings, per_coder, eff), scales[eff])
             if eff in scales else None
         )
-        db.add(CodeApplication(**_consensus_row(
-            consensus_user.id, eff, rule, agree, voters, rating,
-            segment_id=segment_id, dataset_value_id=dataset_value_id,
-            code_set=code_set,
-        )))
+        for target in write_targets:
+            db.add(CodeApplication(**_consensus_row(
+                consensus_user.id, eff, rule, agree, voters, rating,
+                code_set=code_set, **target,
+            )))
+            written += 1
     db.flush()
-    return len(decisions)
+    return written
 
 
 #: The two kinds of coding target — `CodeApplication`'s segment-XOR-value
@@ -579,10 +620,55 @@ def recompute_consensus_for_target(
 #: ``(kind, target_id)``, so these are also its sort order.
 TARGET_SEGMENT = "seg"
 TARGET_VALUE = "val"
+#: A segment GROUP decided as one unit (#1334 unit 3, D32) — only the WRITER asks
+#: for these (`gather_target_votes(group_units=True)`). The tag is
+#: `segment_groups.UNIT_TAG_GROUP`, the reliability gather's own, so a group's
+#: key reads the same wherever a group is a unit.
+TARGET_GROUP = UNIT_TAG_GROUP
 
 #: The `CodeApplication` column each kind's id belongs in. A lookup, never a
 #: conditional: a third kind raises here instead of writing a row with no target.
+#: ⚠️ A GROUP has no column — its decision is written on each visible member — so
+#: `TargetBallot.target()` RAISES for one, which is the point: a consumer that
+#: forgot groups exist fails loudly rather than writing to a group id as if it
+#: were a segment id.
 _TARGET_COLUMN = {TARGET_SEGMENT: "segment_id", TARGET_VALUE: "dataset_value_id"}
+
+
+def _fold_votes(rows, effective_map) -> tuple[dict[int, set[int]], dict[int, dict[int, float | None]]]:
+    """ONE unit's vote rows ``(target, user_id, code_id, magnitude)`` → ``(per_coder, ratings)``.
+
+    The rows are the ballot query's own shape (the target column first, unread
+    here), so the stream hands its rows over without reshaping each one — this
+    runs once per vote row of a whole project (#958: 518,096 on BES).
+
+    🔴 **The fold every ballot is built by — the stream's and the per-target
+    recompute's — so a group decided by the rebuild and by the sweep cannot
+    disagree.** A unit is a turn, a dataset value or (#1334, D31) a segment
+    GROUP, whose members' rows arrive together: a coder's codes are the UNION
+    over them (present anywhere, D21), and a coder's rating of one RAW code is
+    `segment_groups.merge_unit_rating`'s answer — two different ratings settle
+    to ``None`` (D22: no rating, never a number between them). On a turn or a
+    value each (coder, code) has ONE row (the per-coder unique indexes), so the
+    fold there is the plain assignment it always was.
+    """
+    per_coder: dict[int, set[int]] = {}
+    ratings: dict[int, dict[int, float | None]] = {}
+    contradicted = False
+    for _target, user_id, code_id, magnitude in rows:
+        per_coder.setdefault(user_id, set()).add(resolve_effective_code(effective_map, code_id))
+        mine = ratings.setdefault(user_id, {})
+        if code_id in mine:
+            mine[code_id] = merged = merge_unit_rating(mine[code_id], magnitude)
+            contradicted = contradicted or merged is GROUP_RATING_CONFLICT
+        else:
+            mine[code_id] = magnitude
+    if contradicted:  # only a GROUP can get here — a turn holds one row per (coder, code)
+        for mine in ratings.values():
+            for code_id, value in mine.items():
+                if value is GROUP_RATING_CONFLICT:
+                    mine[code_id] = None
+    return per_coder, ratings
 
 
 class TargetBallot(NamedTuple):
@@ -624,13 +710,7 @@ def _stream_ballots(query, target_col, kind: str, effective_map) -> Iterator[Tar
     """
     rows = query.order_by(target_col).yield_per(GATHER_STREAM_BATCH)
     for target_id, group in groupby(rows, key=itemgetter(0)):
-        per_coder: dict[int, set[int]] = {}
-        ratings: dict[int, dict[int, float | None]] = {}
-        for _target, user_id, code_id, magnitude in group:
-            per_coder.setdefault(user_id, set()).add(
-                resolve_effective_code(effective_map, code_id)
-            )
-            ratings.setdefault(user_id, {})[code_id] = magnitude
+        per_coder, ratings = _fold_votes(group, effective_map)
         yield TargetBallot(kind, target_id, per_coder, ratings)
 
 
@@ -648,16 +728,18 @@ class TargetVotes:
     propagates a defect verbatim rather than merely rotting.
 
     The per-project CONTEXT is read once, on construction. The VOTES are not:
-    `ballots()` runs the two queries as it is iterated and yields one
+    `ballots()` runs its queries (two; a third, for segment groups, when the
+    consumer asks for ``group_units``) as it is iterated and yields one
     `TargetBallot` per target, so no consumer holds a project's votes at once.
     Each call re-reads the database; iterate it once.
     """
 
-    def __init__(self, db: Session, project_id: int, scope, min_voters: int):
+    def __init__(self, db: Session, project_id: int, scope, min_voters: int, group_units: bool):
         self._db = db
         self._project_id = project_id
         self._scope = scope
         self._min_voters = min_voters
+        self._group_units = group_units
         self.effective_map: dict[int, int] = build_effective_code_map(db, project_id)
         # #35 — the declared instruments, once per gather.
         self.scales: dict[int, dict] = scales_for_project(db, project_id)
@@ -671,12 +753,18 @@ class TargetVotes:
 
     def ballots(self) -> Iterator[TargetBallot]:
         """Every target with at least ``min_voters`` eligible voters, segments
-        then dataset values, each in ascending target id."""
+        then (with ``group_units``) segment groups, then dataset values, each in
+        ascending id."""
         db, project_id, scope = self._db, self._project_id, self._scope
         seg_query = _seg_votes(db, project_id, scope, (
             CodeApplication.segment_id, CodeApplication.user_id, CodeApplication.code_id,
             CodeApplication.magnitude,
         ))
+        if self._group_units:
+            # #1334 unit 3 (D32) — a grouped turn is not a target of its own: its
+            # votes reach the GROUP arm below. A filter on the already-joined
+            # Segment, so the ≥N plan #958 measured is otherwise unchanged.
+            seg_query = seg_query.filter(Segment.group_id.is_(None))
         val_query = _val_votes(db, project_id, (
             CodeApplication.dataset_value_id, CodeApplication.user_id, CodeApplication.code_id,
             CodeApplication.magnitude,
@@ -701,6 +789,22 @@ class TargetVotes:
         yield from _stream_ballots(
             seg_query, CodeApplication.segment_id, TARGET_SEGMENT, self.effective_map,
         )
+        if self._group_units:
+            # 🔴 NO ≥N-voter SQL filter on this arm, and that is the point (D32):
+            # a group's two voters can sit on two DIFFERENT members (a coding made
+            # before grouping, `bulk_code`, a merged copy), each of which has ONE
+            # voter — exactly what the per-segment filter drops. Voters are counted
+            # on the folded ballot instead, so the arm keeps this method's promise.
+            # Groups are made by hand, so the arm is small beside the others.
+            group_query = _seg_votes(db, project_id, scope, (
+                Segment.group_id, CodeApplication.user_id, CodeApplication.code_id,
+                CodeApplication.magnitude,
+            )).filter(Segment.group_id.isnot(None))
+            for ballot in _stream_ballots(
+                group_query, Segment.group_id, TARGET_GROUP, self.effective_map,
+            ):
+                if len(ballot.per_coder) >= self._min_voters:
+                    yield ballot
         yield from _stream_ballots(
             val_query, CodeApplication.dataset_value_id, TARGET_VALUE, self.effective_map,
         )
@@ -774,7 +878,7 @@ def _targets_with_voters(votes_query, target_col, min_voters: int):
 
 
 def gather_target_votes(
-    db: Session, project_id: int, *, segment_scope: str, min_voters: int,
+    db: Session, project_id: int, *, segment_scope: str, min_voters: int, group_units: bool,
 ) -> TargetVotes:
     """Every voter application in one project, as a STREAM of per-target ballots.
 
@@ -804,6 +908,15 @@ def gather_target_votes(
     (caught by the corpus oracle, 2026-09-08). Anything that only WRITES
     consensus wants `consensus_eligible`; anything that reports on coverage or
     exclusions wants `project`.
+
+    🔴 **`group_units` has NO DEFAULT either (#1334 unit 3, D32).** True: a
+    grouped turn's votes arrive in ONE ballot per segment GROUP (kind
+    `TARGET_GROUP`), the unit the WRITER decides once and writes on every
+    visible member. False: every turn is its own ballot — the ROLLUP's form,
+    because it routes each member to its own participant (a group spanning two
+    people is one passage of EACH, D21) and folds the group itself. A consumer
+    that inherited either reading silently would decide a group per turn, or
+    attribute one person's turn to another.
     """
     try:
         scope = _SEGMENT_SCOPES[segment_scope]
@@ -814,7 +927,9 @@ def gather_target_votes(
         ) from None
     if not isinstance(min_voters, int) or isinstance(min_voters, bool) or min_voters < 1:
         raise ValueError(f"min_voters must be a positive int, not {min_voters!r}")
-    return TargetVotes(db, project_id, scope, min_voters)
+    if not isinstance(group_units, bool):
+        raise ValueError(f"group_units must be True or False, not {group_units!r}")
+    return TargetVotes(db, project_id, scope, min_voters, group_units)
 
 
 def _insert_consensus_rows(db: Session, rows: list[dict]) -> None:
@@ -860,8 +975,20 @@ def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
         db, project_id, segment_scope=SEGMENT_SCOPE_CONSENSUS_ELIGIBLE,
         # Only targets that CAN produce a row (#958 — see the docstring there).
         min_voters=MIN_CONSENSUS_VOTERS,
+        # #1334 unit 3 — a group is decided once (module docstring).
+        group_units=True,
     )
     scales = votes.scales
+    # Where each GROUP's decision is written: its visible, eligible members, as
+    # plain ids (one int per grouped turn — the measured 30,000-turn corpus held
+    # 8 MB more as one dict per turn).
+    group_members: dict[int, list[int]] = {}
+    for sid, gid in (
+        consensus_scoped_segments(db.query(Segment.id, Segment.group_id), project_id)
+        .filter(Segment.group_id.isnot(None), *visible_segment_filter())
+        .order_by(Segment.id)
+    ):
+        group_members.setdefault(gid, []).append(sid)
 
     # Project-scoped DELETE of the prior consensus layer (ADJ-1).
     # The CLEANER's scope — deliberately BROADER than the writer's (which is
@@ -890,27 +1017,37 @@ def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
 
     for ballot in votes.ballots():
         targets += 1
+        # A group's decision lands on each visible member (D30); a turn's or a
+        # value's on itself. `target()` raises for a group, so this branch is
+        # the only way a group ballot can be written.
+        written_to = (
+            [{"segment_id": sid} for sid in group_members.get(ballot.target_id, ())]
+            if ballot.kind == TARGET_GROUP else [ballot.target()]
+        )
         for eff, rule, agree, voters, code_set in decide_target(ballot.per_coder, votes.set_index):
             rating = (
                 _decide_magnitude(_rating_values(ballot.ratings, ballot.per_coder, eff), scales[eff])
                 if eff in scales else None
             )
-            pending.append(_consensus_row(
-                consensus_user.id, eff, rule, agree, voters, rating,
-                code_set=code_set, **ballot.target(),
-            ))
-            created += 1
-            if rule == "unanimous":
-                unanimous += 1
-            else:
-                majority += 1
-            if rating is not None:
-                rated += 1
-            if len(pending) >= CONSENSUS_REBUILD_INSERT_BATCH:
-                # Safe mid-stream: the prior layer's DELETE was flushed above, and
-                # `decide_target` never repeats a code within a target, so no
-                # batch can collide with another on the per-coder unique index.
-                _insert_consensus_rows(db, pending)
+            for target in written_to:
+                pending.append(_consensus_row(
+                    consensus_user.id, eff, rule, agree, voters, rating,
+                    code_set=code_set, **target,
+                ))
+                created += 1
+                if rule == "unanimous":
+                    unanimous += 1
+                else:
+                    majority += 1
+                if rating is not None:
+                    rated += 1
+                if len(pending) >= CONSENSUS_REBUILD_INSERT_BATCH:
+                    # Safe mid-stream: the prior layer's DELETE was flushed above,
+                    # `decide_target` never repeats a code within a target, and a
+                    # grouped turn is never ALSO a turn ballot (the segment arm
+                    # leaves grouped turns out), so no batch can collide with
+                    # another on the per-coder unique index.
+                    _insert_consensus_rows(db, pending)
     _insert_consensus_rows(db, pending)
 
     return {
@@ -920,7 +1057,9 @@ def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
         "majority": majority,
         # #35 — consensus rows that also carry a rating consensus (a median).
         "rated": rated,
-        # Targets with ≥ MIN_CONSENSUS_VOTERS eligible voters — the ones that
-        # COULD decide. Before #958's filter this counted every coded target.
+        # Units with ≥ MIN_CONSENSUS_VOTERS eligible voters — the ones that
+        # COULD decide; a segment group counts ONCE (#1334 unit 3), while
+        # `created` counts the rows written on each of its members. Before
+        # #958's filter this counted every coded target.
         "targets": targets,
     }

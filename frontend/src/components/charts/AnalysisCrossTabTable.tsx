@@ -4,6 +4,7 @@ import type { AnalysisCrossTabResponse } from '@/lib/api'
 import { resolveHeatmapColors, DISPLAY_PRECISION, mergeFormatting, formatPValue } from '@/lib/chart-data'
 import { formatStat, undefinedTooltip } from '@/lib/stat-format'
 import { useChartColors } from '@/lib/theme-context'
+import { getHslTextColor } from '@/lib/utils'
 import type { ChartFormatting } from '@/lib/chart-data'
 
 interface AnalysisCrossTabTableProps {
@@ -83,13 +84,19 @@ export default function AnalysisCrossTabTable({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rowValues, colValues, display, data.matrix, rowIndexMap, colIndexMap])
 
+  // #1560 — a filled cell's text colour comes from its fill through #271's
+  // `getHslTextColor` (pure black or white at the WCAG crossover), never a
+  // hand-written lightness cut. `L < 55 ? white : #1a1a1a` put white on mid
+  // greens at 1.69:1 and on purple at 3.20:1, in both themes and in the PNG.
   const cellStyle = (value: number): { backgroundColor: string; color: string } => {
-    if (maxValue === 0) return { backgroundColor: 'transparent', color: '#1a1a1a' }
+    // No fill: the cell keeps the page's own text colour. A fixed `#1a1a1a`
+    // here was near-black on the dark surface (1.09:1).
+    if (maxValue === 0) return { backgroundColor: 'transparent', color: 'inherit' }
     const intensity = value / maxValue
     const L = 95 - intensity * 60
     return {
       backgroundColor: `hsl(${heatmap.hue}, ${heatmap.saturation}%, ${L}%)`,
-      color: L < 55 ? '#ffffff' : '#1a1a1a',
+      color: getHslTextColor(heatmap.hue, heatmap.saturation, L),
     }
   }
 

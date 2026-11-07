@@ -24,7 +24,13 @@ from ..schemas.comparison import GroupComparisonRequest, GroupComparisonResponse
 # to label its columns for the same test the service actually ran, and a second
 # copy of "which test does this group count get?" is the shape of defect this
 # module is being fixed for.
-from ..services.comparisons import compute_group_comparison, _resolve_test_type
+from ..services.comparisons import (
+    P_METHOD_CSV_LABEL,
+    TEST_OMITTED_CSV_TEXT,
+    _resolve_test_type,
+    compute_group_comparison,
+    untested_groups_note,
+)
 
 router = APIRouter(tags=["comparisons"])
 
@@ -90,6 +96,25 @@ def _significance_stars(p: float | None) -> str:
     return ""
 
 
+def _fmt_df(value: float | None) -> str:
+    """A whole df prints as an integer; Welch's fractional df keeps two decimals."""
+    if value is None:
+        return ""
+    return str(int(value)) if float(value).is_integer() else _fmt_stat(value)
+
+
+def _row_note(row) -> str:
+    """#1543: why a row's test left a group out, or was not run — the screen's own
+    sentences (`untested-groups.ts`, `stat-format.ts`), so the file and the table
+    beside it say the same thing. Blank when there is nothing to say."""
+    parts = []
+    if not row.get("test"):
+        reason = TEST_OMITTED_CSV_TEXT.get(row.get("test_omitted_reason") or "")
+        parts.append(reason or ("Not computed." if row.get("test_omitted_reason") else ""))
+    parts.append(untested_groups_note(row.get("untested_groups")) or "")
+    return " ".join(p for p in parts if p)
+
+
 def _test_columns(effective_test: str, is_two_group: bool, groups: list[str]):
     """The test-result columns: header label and cell value defined TOGETHER.
 
@@ -125,7 +150,23 @@ def _test_columns(effective_test: str, is_two_group: bool, groups: list[str]):
         }.get(effective_test, "t")
         cols = [(label, lambda row, test: _fmt_stat(test["statistic"]))]
 
+    # #1543 (1.6.0): the degrees of freedom, so a reader can see which groups a test
+    # was over — an F on df 1 is two groups, whatever the header lists — and report
+    # it. Mann–Whitney's U has none.
+    if effective_test == "one_way_anova":
+        cols.append(("df1", lambda row, test: _fmt_df(test.get("df"))))
+        cols.append(("df2", lambda row, test: _fmt_df(test.get("df2"))))
+    elif effective_test in ("independent_t_test", "kruskal_wallis"):
+        cols.append(("df", lambda row, test: _fmt_df(test.get("df"))))
+
     cols.append(("p", lambda row, test: _fmt_p(test["p"])))
+    if effective_test == "mann_whitney_u":
+        # #1326 STAT-12 (D58): the data chooses this p's method, per row, so the
+        # file says which — in words (`P_METHOD_CSV_LABEL`), never the wire key.
+        cols.append((
+            "p method",
+            lambda row, test: P_METHOD_CSV_LABEL.get(test.get("p_method") or "", ""),
+        ))
 
     if effective_test == "one_way_anova":
         # #732: BOTH, not either. The strip and the comparison table display
@@ -210,6 +251,11 @@ async def group_comparison_csv(
     # ANNOTATED. The screen's significance toggles are the second kind: the
     # p-value is in the file either way, so the full ladder is written and the
     # file says so rather than silently differing from the screen beside it.
+    # #1543: the excluded groups — the comment above said they were disclosed in a
+    # `Scope:` line, and none was written, so a group left out by choice vanished from
+    # the file without a word.
+    if excl:
+        writer.writerow([csv_safe(f"Scope: groups excluded: {', '.join(excl)}")])
     writer.writerow([csv_safe(
         "Significance: * p < .05, ** p < .01, *** p < .001 "
         "(full ladder; the screen's display settings are not applied)"
@@ -226,6 +272,7 @@ async def group_comparison_csv(
             header.extend([csv_safe(f"{g}_n"), csv_safe(f"{g}_M"), csv_safe(f"{g}_SD")])
 
     header.extend(label for label, _ in test_cols)
+    header.append("Note")          # #1543: who a test left out, or why it did not run
 
     writer.writerow(header)
 
@@ -251,6 +298,7 @@ async def group_comparison_csv(
             csv_row.extend(cell(row, test) for _, cell in test_cols)
         else:
             csv_row.extend([""] * len(test_cols))
+        csv_row.append(csv_safe(_row_note(row)))
 
         writer.writerow(csv_row)
 

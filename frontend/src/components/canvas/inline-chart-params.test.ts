@@ -32,6 +32,7 @@ import {
   isCrossTabMaterialConfig,
 } from './inline-chart-params'
 import type { QualChartType } from '@/lib/qual-analysis-types'
+import { cooccurrenceFilterParams } from '@/lib/qual-comparison'
 
 /** A real `qual_heatmap` config, shaped as `buildCurrentConfig` writes it. */
 function qualConfig(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -337,19 +338,41 @@ describe('the slab-2 request builders each mirror their own live caller', () => 
     expect(buildQualComparisonRequest(none)).toBeNull()
   })
 
-  it('the comparison request omits documents and observations by design', () => {
-    // Grouping runs through participant demographics, and neither documents nor
-    // observation clips carry a speaker→participant link. The analysis view
-    // sends conversations + text columns only; mirroring that is correct.
+  it('the comparison request sends exactly the saved selection, every kind (#1297/#1298)', () => {
+    // Since 1.5.9 documents and open-text answers reach a person and are counted;
+    // an unselected kind is `[]` ("none"), never omitted (omitted = "all"). This
+    // test asserted the OPPOSITE until then — "omits documents by design".
     const params = extractQualComputeParams(
-      qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: 'role', conversation_ids: [7] }),
+      qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: 'role', conversation_ids: [7],
+                   document_ids: [3], observation_ids: [] }),
     )
     const req = buildQualComparisonRequest(params)! as unknown as Record<string, unknown>
 
     expect(req.group_by_subtype).toBe('role')
     expect(req.conversation_ids).toEqual([7])
-    expect('document_ids' in req).toBe(false)
-    expect('observation_ids' in req).toBe(false)
+    expect(req.document_ids).toEqual([3])
+    expect(req.text_column_ids).toEqual([])          // HEAD: undefined — read as ALL
+    expect(req.observation_ids).toEqual([])
+  })
+
+  it('a saved text-only comparison does not count every conversation (#1297)', () => {
+    const params = extractQualComputeParams(
+      qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: 'role', text_column_ids: [9],
+                   observation_ids: [] }),
+    )
+    const req = buildQualComparisonRequest(params)! as unknown as Record<string, unknown>
+    expect(req.conversation_ids).toEqual([])         // HEAD: undefined — every conversation
+    expect(req.text_column_ids).toEqual([9])
+  })
+
+  it('control: a comparison saved with nothing selected still covers every source', () => {
+    const params = extractQualComputeParams(
+      qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: 'role', observation_ids: [] }),
+    )
+    const req = buildQualComparisonRequest(params)! as unknown as Record<string, unknown>
+    for (const k of ['conversation_ids', 'text_column_ids', 'document_ids', 'observation_ids']) {
+      expect(req[k]).toBeUndefined()   // absent on the wire = every source of that kind
+    }
   })
 
   it('co-occurrence params carry no code_ids', () => {
@@ -390,9 +413,49 @@ describe('the co-occurrence embed reproduces the view’s filter scope', () => {
     expect(filter.coder_ids).toBe('2,3')
     expect(filter.layer_scope).toBe('human')
     expect(filter.source).toBe('all')
-    // Empty lists must be omitted, not sent as empty strings.
-    expect(filter.document_ids).toBeUndefined()
+    // #1527 D84: with something selected, an unselected KIND is sent as '' — none of it.
+    // It was omitted until 1.5.9, which the server read as ALL: a saved matrix of two
+    // interviews counted every document. A participant list is not a source kind and
+    // stays omitted when empty.
+    expect(filter.document_ids).toBe('')
+    expect(filter.text_column_ids).toBe('')
     expect(filter.participant_ids).toBeUndefined()
+  })
+
+  it('a saved matrix with nothing selected sends no source list at all (every source)', () => {
+    const params = extractQualComputeParams(qualConfig({
+      chart_type: 'cooccurrence', conversation_ids: [], observation_ids: [],
+      document_ids: [], text_column_ids: [],
+    }))
+    const filter = buildQualCooccurrenceParams(params)
+    for (const key of ['conversation_ids', 'text_column_ids', 'document_ids', 'observation_ids'] as const) {
+      expect(filter[key]).toBeUndefined()
+    }
+  })
+})
+
+describe('#1527 D84 — the co-occurrence request reads the selection exactly', () => {
+  it('replaces the four source lists and keeps every other field', () => {
+    const base = {
+      exclude_facilitator: false, conversation_ids: '1,2', document_ids: '9',
+      source: 'all' as const, coder_ids: '4', layer_scope: 'human' as const, level: 'source' as const,
+    }
+    const out = cooccurrenceFilterParams(base, {
+      conversations: [1], textColumns: [], documents: [], observations: [],
+    })
+    expect(out).toEqual({
+      exclude_facilitator: false, source: 'all', coder_ids: '4', layer_scope: 'human', level: 'source',
+      conversation_ids: '1', text_column_ids: '', document_ids: '', observation_ids: '',
+    })
+  })
+
+  it('nothing selected drops every source list', () => {
+    // Every kind in the base, so dropping any one of the four deletes is seen.
+    const out = cooccurrenceFilterParams({
+      conversation_ids: '1', text_column_ids: '2', document_ids: '3', observation_ids: '4',
+      source: 'all',
+    }, { conversations: [], textColumns: [], documents: [], observations: [] })
+    expect(out).toEqual({ source: 'all' })
   })
 })
 

@@ -86,6 +86,10 @@ SENTINELS = (
     "LIMA",       # a turn merged and unmerged (leaves an orphan combined speaker)
     "MIKE",       # a survey answer whose quote was deleted BEFORE, its embed kept (#1473)
     "NOVEMBER",   # an audit entry of an action no list would name
+    "OSCAR",      # a turn merged with another's, the merge result EDITED, then
+                  # unmerged: the edit's audit entry outlives the segment (#1473 b)
+    "PAPA",       # a turn merged with another's, quoted on the canvas ACROSS the
+                  # join, then unmerged: the quote went, its embed stayed (#1473 b)
     "Zelenka",    # their name — speaker name, labels, combined speakers
     "ROLESENT",   # their role
     "DEMOSENT",   # their demographics
@@ -238,8 +242,9 @@ COLUMN_CLASS: dict[str, str] = {
     "participants.demographics": PERSON,
     "participants.role_auto_filled_from": PERSON,
     "participants.uuid": STRUCTURAL,
-    # #1190 — ids and a one-way hash, kept ON PURPOSE after a withdrawal: they are
-    # what stops a merge, an import or a link bringing the person back.
+    # #1190 — ids and one-way hashes (of the ID, and since #1472 of the names she was
+    # known by — the `participant_name` kind), kept ON PURPOSE after a withdrawal: they
+    # are what stops a merge, an import or a link bringing the person back.
     "removal_tombstones.project_uuid": STRUCTURAL,
     "removal_tombstones.entity_type": STRUCTURAL,
     "removal_tombstones.entity_uuid": STRUCTURAL,
@@ -403,7 +408,8 @@ EXPORTS = {
     "r_data": ("GET", "/api/projects/{pid}/export/r-data", _scan_zip),
     "canvas_docx": ("POST", "/api/projects/{pid}/canvases/{canvas}/export-docx", _scan_zip),
     "mmproject": ("GET", "/api/projects/{pid}/export-project", _scan_zip),
-    "code_frequencies_csv": ("GET", "/api/projects/{pid}/export/code-frequencies", _scan_text),
+    # (No `code_frequencies_csv`: #1528 D87 deleted the route — the Frequencies CSV is written in
+    # the browser from `source-frequencies`, whose CSV twin is excluded below with its reason.)
     "code_cooccurrence_csv": ("GET", "/api/projects/{pid}/export/code-cooccurrence", _scan_text),
     "codebook_csv": ("GET", "/api/projects/{pid}/export/codebook", _scan_text),
     "codebook_mmcodebook": ("GET", "/api/projects/{pid}/export-codebook", _scan_text),
@@ -413,7 +419,7 @@ EXPORTS = {
 #: codebook or code counts, never a turn or an answer. Exercised anyway: after the
 #: withdrawal they must still answer, and still carry none.
 EXPORTS_WITHOUT_PERSON_DATA = {
-    "code_frequencies_csv", "code_cooccurrence_csv", "codebook_csv", "codebook_mmcodebook",
+    "code_cooccurrence_csv", "codebook_csv", "codebook_mmcodebook",
 }
 
 
@@ -479,6 +485,10 @@ def census():
             (sp_m, "JULIET orphan quote words.", her),                       # 10
             (sp_m, "LIMA words.", her),                                      # 11 ┐ merge,
             (sp_i, "Interviewer asks.", "Interviewer"),                      # 12 ┘ unmerge
+            (sp_m, "OSCAR merged then edited.", her),                        # 13 ┐ merge, edit
+            (sp_s, "Sam joins in SAMWORDS.", "Sam"),                         # 14 ┘ the result, unmerge
+            (sp_m, "PAPA quoted across the join.", her),                     # 15 ┐ merge, quote
+            (sp_s, "Sam finishes SAMWORDS.", "Sam"),                         # 16 ┘ across it, unmerge
         ]
         segs = []
         for i, (sp, words, label) in enumerate(plan):
@@ -578,6 +588,21 @@ def census():
         m4 = ok(c.post(f"{seg_url}/merge", json={"segment_ids": [segs[11], segs[12]]},
                        headers=H))["merged_segment"]["id"]
         ok(c.post(f"{seg_url}/{m4}/unmerge", headers=H))
+        # #1473 (b) — a merge result EDITED, then unmerged: only the edit's audit
+        # entry still holds their words, keyed on a segment that no longer exists
+        # (and, SQLite reusing the newest id, on the id m4 held and m6 will hold).
+        m5 = ok(c.post(f"{seg_url}/merge", json={"segment_ids": [segs[13], segs[14]]},
+                       headers=H))["merged_segment"]
+        # Load-bearing: three lifetimes of ONE id are what tell "the first deletion
+        # after it was made" from "the first deletion of the id" (`withdrawal_history`).
+        assert m5["id"] == m4, "precondition: SQLite reused m4's id for m5"
+        ok(c.patch(f"{seg_url}/{m5['id']}", json={"text": m5["text"] + " Later edit."},
+                   headers=H))
+        ok(c.post(f"{seg_url}/{m5['id']}/unmerge", headers=H))
+        # Its Canvas sibling: quoted across the join below, unmerged after the snapshot.
+        m6 = ok(c.post(f"{seg_url}/merge", json={"segment_ids": [segs[15], segs[16]]},
+                       headers=H))["merged_segment"]
+        assert m6["id"] == m4, "precondition: SQLite reused the id again for m6"
         ok(c.patch(f"/api/projects/{pid}/datasets/{ids['ds']}/values/{ids['v_q1']}",
                    json={"value_text": "FOXTROT new answer"}, headers=H))
 
@@ -589,6 +614,11 @@ def census():
         e_j = ok(c.post(ex, json={"segment_id": segs[10]}, headers=H))
         e_k = ok(c.post(ex, json={"dataset_value_id": ids["v_q2"]}, headers=H))
         e_m = ok(c.post(ex, json={"dataset_value_id": ids["v_q3"]}, headers=H))
+        across = m6["text"].index("Sam finishes") + len("Sam finishes")
+        e_p = ok(c.post(ex, json={"segment_id": m6["id"], "start_offset": 0,
+                                  "end_offset": across}, headers=H))
+        assert e_p["excerpt_text"] == "PAPA quoted across the join. Sam finishes", (
+            "the fixture needs a quote across the merge's join")
         ok(c.post(f"/api/conversations/{cid}/notes",
                   json={"segment_id": m1, "content": "Researcher note on the merged turn."},
                   headers=H))
@@ -607,7 +637,7 @@ def census():
             "type": "doc", "content": [
                 {"type": "paragraph", "content": [{"type": "text", "text": "Prose by the researcher."}]},
                 embed(e1, cid), embed(e2, cid), embed(e_sam, cid), embed(e_j, cid),
-                embed(e_k, None), embed(e_m, None),
+                embed(e_k, None), embed(e_m, None), embed(e_p, cid),
             ]}}, headers=H))
         ok(c.post(f"/api/projects/{pid}/canvases/{canvas}/pending-items",
                   json={"item_type": "excerpt", "source_id": e2["id"]}, headers=H))
@@ -617,6 +647,9 @@ def census():
         # the same for a quote of an answer, whose embed names no conversation.
         ok(c.delete(f"{ex}/{e_j['id']}", headers=H))
         ok(c.delete(f"{ex}/{e_m['id']}", headers=H))
+        # #1473 (b) — the Unmerge deletes m6 and the quote on it; the embed stays,
+        # its words inside neither original turn.
+        ok(c.post(f"{seg_url}/{m6['id']}/unmerge", headers=H))
         ids.update(canvas=canvas, theme=theme, m1=m1, m2=m2["id"], m3=m3["id"],
                    children=[ch["id"] for ch in children], e_sam=e_sam["id"])
 
@@ -892,8 +925,9 @@ class TestWhatTheOutcomeRecords:
     def test_the_canvas_and_the_derived_copies(self, census):
         o = census.outcome
         # Theme: ALPHA, BRAVO, KILO by id; JULIET as an orphan (D8); MIKE as an
-        # orphan of an answer (#1473). The snapshot holds the same five.
-        assert o["canvas_embeds_scrubbed"] == 10
+        # orphan of an answer (#1473); PAPA as an orphan of a DELETED merge result
+        # (#1473 b). The snapshot holds the same six.
+        assert o["canvas_embeds_scrubbed"] == 12
         assert o["canvas_snapshots_rewritten"] == 1
         # The live inbox item for BRAVO, and its copy in the snapshot.
         assert o["canvas_inbox_items_removed"] == 2
@@ -906,7 +940,7 @@ class TestWhatTheOutcomeRecords:
             for n in t["content"]["content"] if n["type"] == "excerpt-embed"
         ]
         scrubbed = [a for a in embeds if a["displayText"] == BLANKED_SEGMENT_TEXT]
-        assert len(scrubbed) == 5
+        assert len(scrubbed) == 6
         assert all(a["excerptId"] is None for a in scrubbed)
         assert census.canvas_after["pending_items"] == []
 

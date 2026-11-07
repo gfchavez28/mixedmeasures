@@ -97,7 +97,7 @@ def test_frequencies_source_text_returns_text_data(mixed_source_fixture, db_sess
     # Must have text data
     assert result["total_coded_texts"] > 0, \
         "BUG #344: source='text' returned empty text data"
-    assert result["total_rows"] > 0
+    # (`total_rows` was deleted by #1526 D81; the per-code `row_count` below carries records.)
 
     # Must NOT have segment data (text-only filter)
     assert result["total_coded_segments"] == 0

@@ -118,8 +118,9 @@ const LENGTH_TEST_SITES: Record<string, [number, string]> = {
   'components/SegmentRow.tsx': [2,
     'the unmerge dialog\'s data-loss warning, both arms — every coder\'s codes are lost, a model\'s too'],
   'components/ByRecordPanel.tsx': [1, 'the chip list\'s render condition; the list applies the lens itself'],
-  'components/qualitative-analysis/ContentBySource.tsx': [2,
-    'the chip lists\' render conditions (the document reader\'s COUNT is the server\'s since #1077 a)'],
+  // `ContentBySource` left this table on 2026-11-05c (#1531 D102): its two chip-list render
+  // conditions now read the blind-lensed list `shownCodeIds(…)` returns, never a payload's code
+  // list, and its document reader's COUNT is the server's since #1077 (a).
   'components/qualitative-analysis/QuoteBoardView.tsx': [3,
     'OPEN — #1077 (d): the Uncoded group; a model-only quote is filed under the model\'s code (#1060\'s class, a decision)'],
   'pages/DocumentCodingWorkbench.tsx': [3,

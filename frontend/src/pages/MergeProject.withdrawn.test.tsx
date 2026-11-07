@@ -42,6 +42,7 @@ const NONE: MergeAdditions = {
   sources: [], source_count: 0, participants: [], participant_count: 0,
   datasets: [], dataset_count: 0, records: [], record_count: 0,
   quotes: 0, notes: 0, memos: 0, withdrawn_participants: 0, withdrawn_items: 0,
+  withdrawn_here: [],
 }
 
 const REPORT: MergeReport = {

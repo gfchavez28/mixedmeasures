@@ -21,6 +21,10 @@ DBAPI connection, and the packaged app's driver is sqlcipher3.
 row at a time. Those tables hold a handful of rows in any real install, so the fixture
 keeps one project, one user and no groups. A new backfill over a table that GROWS with
 the research belongs in `_first_release_db`.
+
+#1597's `d4e8a1c7b2f6` (1.6.0) queues a consensus recompute for every turn of a segment
+group two people coded, so the fixture holds a second coder (a constant, like the first)
+and every turn grouped and coded by both — N rows in `code_applications` per coder.
 """
 import re
 import sqlite3
@@ -83,6 +87,8 @@ def _first_release_db(db: Path, key, n: int) -> Path:
     _upgrade(db, base)
     c = _connect(db, key)
     c.execute("INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (1, 'r', '', 1, ?)", (NOW,))
+    # A second coder, so #1597's `d4e8a1c7b2f6` has grouped turns two people coded to queue.
+    c.execute("INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (2, 'b', '', 0, ?)", (NOW,))
     c.execute("INSERT INTO projects (id, user_id, name, status, created_at, updated_at) VALUES (1, 1, 'p', 'active', ?, ?)", (NOW, NOW))
     ids = range(1, n + 1)
     c.executemany("INSERT INTO code_categories (id, project_id, name, display_order, created_at) VALUES (?, 1, 'c', ?, ?)", [(i, i, NOW) for i in ids])
@@ -92,7 +98,11 @@ def _first_release_db(db: Path, key, n: int) -> Path:
     c.executemany("INSERT INTO documents (id, project_id, name, source_filename, source_format, segmentation_mode, created_at, updated_at) VALUES (?, 1, ?, 'd.docx', 'docx', 'paragraph', ?, ?)", [(i, f"d{i}", NOW, NOW) for i in ids])
     c.executemany("INSERT INTO speakers (id, project_id, name, is_facilitator, color_index, created_at) VALUES (?, 1, ?, 0, 0, ?)", [(i, f"s{i}", NOW) for i in ids])
     c.executemany("INSERT INTO segment_groups (id, conversation_id, created_at) VALUES (?, 1, ?)", [(i, NOW) for i in ids])
-    c.executemany("INSERT INTO segments (id, conversation_id, speaker_id, sequence_order, text, created_at, is_starred, is_merge_result, is_split_result) VALUES (?, 1, 1, ?, 'a turn', ?, 0, 0, 0)", [(i, i, NOW) for i in ids])
+    c.executemany("INSERT INTO segments (id, conversation_id, speaker_id, sequence_order, text, group_id, created_at, is_starred, is_merge_result, is_split_result) VALUES (?, 1, 1, ?, 'a turn', ?, ?, 0, 0, 0)", [(i, i, i, NOW) for i in ids])
+    # Every turn in its own group, coded by both coders (the baseline's unique index is
+    # (turn, code), so each applies a different code) — `d4e8a1c7b2f6` queues them all.
+    c.executemany("INSERT INTO code_applications (segment_id, code_id, user_id, created_at) VALUES (?, ?, ?, ?)",
+                  [(i, i, 1, NOW) for i in ids] + [(i, i % n + 1, 2, NOW) for i in ids])
     c.execute("INSERT INTO datasets (id, project_id, name, created_at) VALUES (1, 1, 'ds', ?)", (NOW,))
     c.executemany("INSERT INTO datasets (id, project_id, name, created_at) VALUES (?, 1, 'ds', ?)", [(i, NOW) for i in range(2, n + 1)])
     c.executemany("INSERT INTO dataset_columns (id, dataset_id, column_text, column_type, sequence_order) VALUES (?, 1, 'q', 'numeric', ?)", [(i, i) for i in ids])
@@ -137,6 +147,19 @@ def test_an_upgrade_from_the_first_release_does_no_per_row_round_trips(tmp_path,
     }
     assert not grew, f"statements issued once per row: {list(grew.items())[:5]}"
     assert large[1] == small[1], f"parameter sets bound grew with the data: {small[1]} -> {large[1]}"
+
+
+def test_the_fixture_reaches_the_grouped_consensus_queue(tmp_path, key):
+    """Population check for #1597: the upgrade queued every grouped, two-coder turn, so
+    the statement-count comparison above measured a statement that did work."""
+    db = _first_release_db(tmp_path / "x.db", key, 40)
+    _upgrade(db, "head")
+    c = _connect(db, key)
+    try:
+        (queued,) = c.execute("SELECT COUNT(*) FROM consensus_stale_targets").fetchone()
+        assert queued == 40
+    finally:
+        c.close()
 
 
 def test_the_backfill_still_gives_every_row_its_own_uuid4(tmp_path, key):

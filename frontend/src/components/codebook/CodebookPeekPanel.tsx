@@ -8,6 +8,8 @@ import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import type { CodebookTreeResponse, CodebookCategoryNode, CodebookCodeNode } from '@/lib/api'
 import type { SelectionAnalysis } from './codebook-selection'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
+import { useAuth } from '@/lib/auth-context'
+import { useBlindMode } from '@/hooks/useBlindMode'
 import {
   AlertDialog,
   AlertDialogContent,
@@ -108,6 +110,10 @@ interface CategoryLookup {
   category: CodebookCategoryNode
   parentChain: CodebookCategoryNode[]
 }
+
+/** #1531 (1.5.9) — said under *Sample Segments* while blind mode is on. */
+export const BLIND_SAMPLES_NOTE =
+  "Blind mode is on — samples come from your own coding only. The counts above include every coder."
 
 function getCodeColor(code: CodebookCodeNode, categoryColor: string | null): string {
   return code.color || categoryColor || COLOR_DEFAULT
@@ -240,13 +246,29 @@ export default function CodebookPeekPanel({
 
   // ── Data queries ───────────────────────────────────────────────────────
 
-  // Sample segments for code peek
+  // Sample segments for code peek.
+  // #1531 (1.5.9, decided 2026-11-05c: "the codebook sample passages should follow blind mode") —
+  // the samples are PASSAGES, not counts: peeking a colleague's code showed the turns that colleague
+  // coded with it (measured: blind Alice read T1 and T3 under *Bob theme*). While blind mode
+  // WITHHOLDS they come from the viewer's own coding; the usage counts above stay every coder's
+  // (#454 decided the counts). The read waits for the blind state (#964) and fails closed with no
+  // viewer id; the scope is in the key, so a reveal asks again (#454's cache rule).
+  const { user } = useAuth()
+  const { blind, withholding, settled: blindSettled } = useBlindMode(projectId)
+  const self = user?.id ?? null
+  const sampleScope = withholding && self != null ? String(self) : undefined
   const { data: sampleSegments } = useQuery({
-    queryKey: ['code-sample-segments', projectId, entityId],
-    queryFn: () => codeAnalysisApi.segmentsWithContext(projectId, entityId, { limit: 3, context_size: 0 }),
-    enabled: !isMultiSelectMode && isCodeSelection && !!codeLookup && (codeLookup?.code.segment_count ?? 0) > 0,
+    queryKey: ['code-sample-segments', projectId, entityId, sampleScope ?? ''],
+    queryFn: () => codeAnalysisApi.segmentsWithContext(projectId, entityId, {
+      limit: 3, context_size: 0, ...(sampleScope ? { coder_ids: sampleScope } : {}),
+    }),
+    enabled: !isMultiSelectMode && isCodeSelection && !!codeLookup && (codeLookup?.code.segment_count ?? 0) > 0
+      && blindSettled && !(withholding && self == null),
     staleTime: 60_000,
   })
+  // The claim (`blind`) drives the words, the act (`withholding`) the scope (#964).
+  const blindSampleNote = blind && !isMultiSelectMode && isCodeSelection && (codeLookup?.code.segment_count ?? 0) > 0
+  const sampleList = sampleSegments?.conversations ?? []
 
   // Memos for code or category
   const memoEntityType = isCodeSelection ? 'code' : 'code_category'
@@ -681,12 +703,17 @@ export default function CodebookPeekPanel({
           )}
         </div>
 
-        {/* Sample segments */}
-        {sampleSegments && sampleSegments.conversations.length > 0 && (
+        {/* Sample segments. #1531: while blind they are the viewer's own (above), and the panel says
+            so — also when she has none, or the section would vanish under counts that say the code
+            is used (#517's rule: a blind-scoped surface labels its scope). */}
+        {(sampleList.length > 0 || blindSampleNote) && (
           <div>
             <div className="text-[10px] text-mm-text-faint uppercase tracking-wide mb-1">Sample Segments</div>
+            {blindSampleNote && (
+              <p className="text-xs text-mm-text-muted mb-1">{BLIND_SAMPLES_NOTE}</p>
+            )}
             <div className="space-y-1.5">
-              {sampleSegments.conversations.slice(0, 2).map(conv => (
+              {sampleList.slice(0, 2).map(conv => (
                 <div key={conv.conversation_id}>
                   <div className="text-[10px] text-mm-text-muted font-medium mb-0.5">{conv.conversation_name}</div>
                   {conv.segments.slice(0, 2).map(seg => (

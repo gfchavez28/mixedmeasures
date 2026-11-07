@@ -34,11 +34,14 @@ from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
 from ..services.participant_scores import mark_participant_scores_stale
 from ..services.coding_layers import (
-    build_effective_code_map, layer_scope_filter, non_consensus_filter,
+    build_effective_code_map, layer_scope_filter, narrow_to_coders, non_consensus_filter,
 )
 from ..services.id_set import in_id_set
 from ..services.text_analysis import substantive_text_clause
-from .helpers import _get_project_or_404, parse_int_list, sanitize_csv_filename, TEXT_TYPES
+from .helpers import (
+    _get_project_or_404, coder_scope_filename_suffix, parse_int_list, sanitize_csv_filename,
+    TEXT_TYPES,
+)
 from .export_helpers import csv_safe
 from ..schemas.code_set import CodeSetSelectionResponse, TextCodeSetSelectionRequest
 from ..schemas.text_coding import (
@@ -532,21 +535,9 @@ def list_records(
 
     rows = query.all()
 
-    # Get all code applications in one query
-    value_ids = [r[0] for r in rows]
-    coded_values = set()
-    if value_ids:
-        # grain-allow: existence guard (which values have ANY coding). A consensus
-        # row only exists where humans coded the same target, so origin-filtering
-        # this set is a no-op in steady state; left unfiltered intentionally.
-        # #956: every value of the selected columns — rows × columns, so
-        # never a bound list.
-        coded_dv_ids = (
-            db.query(func.distinct(CodeApplication.dataset_value_id))
-            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids))
-            .all()
-        )
-        coded_values = {dv_id for (dv_id,) in coded_dv_ids}
+    # #1526 D81 (1.5.9): no per-record CODED count. `coded_text_count` was read by no
+    # client, and its read counted an answer marked only with a universal code — or only
+    # by a model — as coded, where the Text Coding gauge (`coding_progress`) does not.
 
     # Group by record (DatasetRow)
     record_data = {}
@@ -564,12 +555,9 @@ def list_records(
                 "ds_id": r.ds_id,
                 "ds_name": r.ds_name,
                 "text_count": 0,
-                "coded_text_count": 0,
             }
         if not is_empty:
             record_data[row_id]["text_count"] += 1
-            if r[0] in coded_values:
-                record_data[row_id]["coded_text_count"] += 1
 
     # Get linked conversation IDs via Participant → Speaker → Conversation
     participant_ids = set(
@@ -614,7 +602,6 @@ def list_records(
             dataset_id=rd["ds_id"],
             dataset_name=rd["ds_name"],
             text_count=rd["text_count"],
-            coded_text_count=rd["coded_text_count"],
             linked_conversation_ids=linked_convs.get(pid, []) if pid else [],
         ))
 
@@ -1680,11 +1667,21 @@ def export_coded_texts(
     project_id: int,
     coded_only: bool = Query(False),
     column_ids: str | None = Query(None),
+    # #1530 D98 (1.5.9) — appended, BARE default (a `Query()` default leaks its
+    # sentinel into direct-call tests). The page sends it while blind.
+    coder_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """The Text Coding page's CSV: one row per substantive answer, its codes joined.
+
+    #1530 D95/D97 (1.5.9): with ``coder_ids`` an answer's *Applied Codes* are those
+    coders' only — the workbench's chips while blind — and ``coded_only`` keeps the
+    answers THEY coded. The file's NAME ends ``_coder-<name>``.
+    """
     project = _get_project_or_404(db, project_id, user.id)
     parsed_column_ids = parse_int_list(column_ids)
+    scope = parse_int_list(coder_ids)
 
     config = _get_config(db, project_id)
     treat_as_empty = _get_treat_as_empty(config)
@@ -1726,16 +1723,15 @@ def export_coded_texts(
     value_ids = [r[0] for r in rows]
     code_apps = defaultdict(list)
     if value_ids:
-        cas = (
+        cas = narrow_to_coders(
             db.query(CodeApplication.dataset_value_id, Code.name)
             .join(Code, CodeApplication.code_id == Code.id)
             # Human/working layer only + de-dup per coder: a code applied by N
             # coders is one name in the export, and the consensus canonical name
             # never leaks into this user-facing CSV (#448b / J2-B).
-            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), non_consensus_filter())
-            .distinct()
-            .all()
-        )
+            .filter(in_id_set(CodeApplication.dataset_value_id, value_ids), non_consensus_filter()),
+            scope,
+        ).distinct().all()
         for dv_id, code_name in cas:
             code_apps[dv_id].append(code_name)
 
@@ -1798,7 +1794,10 @@ def export_coded_texts(
 
     output.seek(0)
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    filename = sanitize_csv_filename(f"{project.name}_coded_texts_{now.strftime('%Y%m%d')}.csv")
+    # The suffix stays outside the sanitiser's 80-character cut, so a long
+    # project name cannot take it (or the extension) off.
+    stem = sanitize_csv_filename(f"{project.name}_coded_texts_{now.strftime('%Y%m%d')}")
+    filename = f"{stem}{coder_scope_filename_suffix(db, scope)}.csv"
 
     db.commit()
 

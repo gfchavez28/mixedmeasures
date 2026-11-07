@@ -62,6 +62,14 @@ interface ContentByCodeProps {
   blind?: boolean
   /** Flip blindness (reveal flow is confirmed + logged by BlindModeToggle). */
   onReveal?: (surface?: string) => void
+  /**
+   * #1531 D102 (1.5.9) — blind mode's ACT (`useBlindMode().withholding`, never the claim `blind`).
+   * True: each passage's chips follow `filterParams.coder_ids`, the scope that chose the
+   * passages — the list carries bare code ids, so no client lens can narrow them (measured: a
+   * blind coder's own passage listed a code only a colleague applied). False: a coder FILTER
+   * keeps the whole unit's codes as context. REQUIRED, so a new mount has to decide.
+   */
+  chipsFollowCoderIds: boolean
 }
 
 export default function ContentByCode({
@@ -83,6 +91,7 @@ export default function ContentByCode({
   onCodeChange,
   blind = false,
   onReveal,
+  chipsFollowCoderIds,
 }: ContentByCodeProps) {
   const [search, setSearch] = useState('')
   // eslint-disable-next-line react-hooks/set-state-in-effect -- reset search when selected code changes
@@ -141,12 +150,16 @@ export default function ContentByCode({
       filterParams.observation_ids,
       filterParams.coder_ids,
       filterParams.layer_scope,
+      // D102: the chips differ by it (#454 — a reveal must not serve the blind answer).
+      chipsFollowCoderIds,
     ],
     queryFn: ({ pageParam }) => codeAnalysisApi.segmentsWithContext(projectId, selectedContentCodeId!, {
       ...filterParams,
       context_size: 1,
       limit: CONTENT_PAGE_SIZE,
       offset: pageParam,
+      // Sent only while true: every non-blind request is exactly as before.
+      ...(chipsFollowCoderIds ? { chips_follow_coder_ids: true } : {}),
     }),
     initialPageParam: 0,
     // OFFSET arithmetic, never a count of the rows received: the three kinds page
@@ -395,6 +408,7 @@ export default function ContentByCode({
             textColumnIds={filterParams.text_column_ids}
             coderIds={filterParams.coder_ids}
             layerScope={filterParams.layer_scope}
+            chipsFollowCoderIds={chipsFollowCoderIds}
             search={search}
             focusedCodeId={focusedCodeId}
             onFocusCode={onFocusCode}
@@ -815,6 +829,7 @@ function CommentsSection({
   textColumnIds,
   coderIds,
   layerScope,
+  chipsFollowCoderIds,
   search,
   focusedCodeId,
   onFocusCode,
@@ -829,6 +844,8 @@ function CommentsSection({
   textColumnIds?: string
   coderIds?: string
   layerScope?: LayerScope
+  /** #1531 D102 — the answer's chips follow `coderIds` (see `ContentByCodeProps`). */
+  chipsFollowCoderIds: boolean
   search?: string
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
@@ -844,7 +861,7 @@ function CommentsSection({
   // #968 — an infinite query, as the passages above: the page is not in the key,
   // so *Load more* appends instead of replacing the section with a loading notice.
   const textsQuery = useInfiniteQuery({
-    queryKey: ['code-texts-context', projectId, codeId, participantIds, textColumnIds, coderIds, layerScope],
+    queryKey: ['code-texts-context', projectId, codeId, participantIds, textColumnIds, coderIds, layerScope, chipsFollowCoderIds],
     queryFn: ({ pageParam }) => codeAnalysisApi.textsWithContext(projectId, codeId, {
       participant_ids: participantIds,
       text_column_ids: textColumnIds,
@@ -852,6 +869,7 @@ function CommentsSection({
       layer_scope: layerScope,
       limit: CONTENT_PAGE_SIZE,
       offset: pageParam,
+      ...(chipsFollowCoderIds ? { chips_follow_coder_ids: true } : {}),
     }),
     initialPageParam: 0,
     getNextPageParam: (last, _all, lastParam) => (last.has_more ? lastParam + CONTENT_PAGE_SIZE : undefined),

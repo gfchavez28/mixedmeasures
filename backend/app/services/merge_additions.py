@@ -9,9 +9,13 @@ back silently. The preview cannot tell the two apart; it NAMES what a researcher
 recognise (sources, participants, datasets — each list capped at
 `MERGE_ADDITIONS_NAME_CAP`, its total beside it) and COUNTS the rest.
 
-🔴 **A withdrawn person is never named here** — not in `participants`, not anywhere: they
-are COUNTED in `withdrawn_participants`, with what the merge leaves out of theirs in
-`withdrawn_items`. The preview reaches a browser and any screenshot of it.
+🔴 **A withdrawn person is never named FROM THE FILE** — not in `participants`, not
+anywhere: they are COUNTED in `withdrawn_participants`, with what the merge leaves out of
+theirs in `withdrawn_items`. The preview reaches a browser and any screenshot of it.
+The one list of names is `withdrawn_here` (#1470, D70/D71): people THIS project still holds
+whom the file records as withdrawn, named by this project's own ID — the merge refuses over
+them (`tombstones.withdrawn_but_held`, the function the merge itself calls), and the
+researcher has to know whom to withdraw.
 
 🔴 **It predicts the act, so it asks the merge's questions** (the export ceiling's rule: a
 warning that predicts a refusal must be computed the way the refusal is):
@@ -301,4 +305,6 @@ def build_merge_additions_preview(db: Session, file_path: Path, target_project_i
         "memos": memo_count,
         "withdrawn_participants": len(withdrawn_people),
         "withdrawn_items": withdrawn_items,
+        # #1470 (D70) — the merge's own refusal, predicted by the merge's own function.
+        "withdrawn_here": tomb.withdrawn_but_held(db, target_project_id, removed),
     }

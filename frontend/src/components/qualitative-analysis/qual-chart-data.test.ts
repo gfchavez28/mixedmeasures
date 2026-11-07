@@ -2,9 +2,12 @@ import { describe, it, expect } from 'vitest'
 import type { CodeInfo, SourceEntry, SourceFrequenciesResponse } from '@/lib/api'
 import {
   applyCustomOrder,
+  codedSharePercent,
   shapeQualBarData,
+  shapeQualCodeSummary,
   shapeQualHeatmapData,
   shapeQualStackedBarData,
+  sharePercent,
 } from './qual-chart-data'
 
 // #504's resolver (`resolveRenderedBarEntry`) was retired by #1314: the bar label and clicks
@@ -149,5 +152,37 @@ describe('#675 — count ordering agrees across the three charts', () => {
     const stack = shapeQualStackedBarData(RESPONSE, 'codes-rows', 'count_desc', 'text_coverage', 'total', []).rows.map(r => r.label)
     expect(rows).toEqual(bars)
     expect(stack).toEqual(bars)
+  })
+})
+
+describe('#1526 D79 — a share of a CODED total is withheld on a universal row', () => {
+  it('is null for a universal code even when the total is not zero', () => {
+    expect(codedSharePercent(true, 3, 2)).toBeNull()      // the probe's Unclear: 150%
+    expect(codedSharePercent(true, 0, 2)).toBeNull()
+  })
+
+  it('is the plain share for any other code — a zero total stays null, a zero count 0', () => {
+    expect(codedSharePercent(false, 1, 2)).toBe(sharePercent(1, 2))
+    expect(codedSharePercent(false, 1, 2)).toBe(50)
+    expect(codedSharePercent(false, 1, 0)).toBeNull()
+    expect(codedSharePercent(false, 0, 2)).toBe(0)
+  })
+
+  it('reaches the summary row: a universal row carries its flag, its count and no share', () => {
+    const data = {
+      codes: [
+        { id: 1, name: 'Unclear', color: null, category_id: null, category_name: null,
+          category_color: null, is_universal: true, numeric_id: 1 },
+        { id: 2, name: 'A', color: null, category_id: null, category_name: null,
+          category_color: null, is_universal: false, numeric_id: 100 },
+      ],
+      sources: [{ source_type: 'document', source_id: 1, source_label: 'D1', coded_segments: 1,
+        total_segments: 3, total_word_count: 6,
+        code_counts: { '1': { count: 2, word_count: 4 }, '2': { count: 1, word_count: 2 } } }],
+      totals: { total_segments: 3, total_word_count: 6, coded_segments: 1 },
+    } as unknown as SourceFrequenciesResponse
+    const [unclear, a] = shapeQualCodeSummary(data)
+    expect([unclear.isUniversal, unclear.totalCount, unclear.segmentPercentage]).toEqual([true, 2, null])
+    expect([a.isUniversal, a.totalCount, a.segmentPercentage]).toEqual([false, 1, 100])
   })
 })

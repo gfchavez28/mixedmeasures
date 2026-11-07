@@ -17,16 +17,29 @@ surface, not a vote.) System coders (the consensus user + the merged-legacy
 **Scope note.** Per-SOURCE coverage applies ``visible_segment_filter()`` so the
 picklist mirrors the workbench's visible segments. The per-PROJECT count/list scope
 by ``Code.project_id`` — every ``CodeApplication`` references a project-scoped
-``Code``, so one group-by covers conversations, documents, AND dataset values
+``Code``, so one question covers conversations, documents, AND dataset values
 uniformly — and do NOT apply the visible filter (a coder who only coded a
 since-merged segment still "participated"). The two can differ only by such
 hidden-only coders (negligible), a deliberate definitional choice.
+
+🔴 **The per-PROJECT questions are asked PER CODER, never as a DISTINCT over codings
+(#1463, D59).** ``coded_in_project_clause`` asks, for each roster coder, whether ONE
+real coding of theirs exists on the project's codes; with
+``ix_code_applications_code_user`` that is one seek per (code, coder), stopping at the
+first hit — about 1 ms whatever the project holds. The DISTINCT it replaced visited
+every coding of the project (29 s on 3.6M codings, encrypted, against the client's
+30 s abort, on the Dashboard and every project page). ⚠️ **Neither half works alone**
+(measured): the per-coder form WITHOUT the index walks every coding once per coder who
+has none — slower than the DISTINCT — and the index without the per-coder form still
+visits every coding. A third site asks the same question install-wide:
+``machine_coder.locked_coder_ids``. Pinned by ``test_coder_question_work.py`` (a
+differential against the old statements and SQLite work counts).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import func
+from sqlalchemy import exists
 from sqlalchemy.orm import Session
 
 from ..auth import SYSTEM_CODER_TYPES
@@ -115,14 +128,35 @@ def source_coder_coverage(
     return _rows_to_coverage(rows)
 
 
+def coded_in_project_clause(project_id: int):
+    """Does the enclosing query's ``User`` hold a real coding in this project? (#1463 D59)
+
+    CORRELATED on ``User`` — splat it into a query that selects from ``User``. Every
+    clause of "a real coder's real coding" comes from ``_real_coding_filters``, so the
+    per-source and per-project questions cannot drift apart.
+
+    🔴 Asked this way it is one seek per (code, coder) through
+    ``ix_code_applications_code_user``, stopping at the first hit. Never rewrite it as
+    a join + DISTINCT over ``CodeApplication``: that visits every coding of the project
+    (see the module docstring for the measurements).
+    """
+    return (
+        exists()
+        .where(
+            CodeApplication.user_id == User.id,
+            CodeApplication.code_id == Code.id,
+            Code.project_id == project_id,
+            *_real_coding_filters(),
+        )
+        .correlate(User)
+    )
+
+
 def project_coder_coverage(db: Session, project_id: int) -> list[CoderCoverage]:
     """Distinct coders with ≥1 real coding ANYWHERE in the project (active first)."""
     rows = (
         db.query(User.id, User.username, User.display_color, User.archived, User.coder_type)
-        .join(CodeApplication, CodeApplication.user_id == User.id)
-        .join(Code, CodeApplication.code_id == Code.id)
-        .filter(Code.project_id == project_id, *_real_coding_filters())
-        .distinct()
+        .filter(coded_in_project_clause(project_id))
         .order_by(User.archived, User.username)
         .all()
     )
@@ -132,17 +166,13 @@ def project_coder_coverage(db: Session, project_id: int) -> list[CoderCoverage]:
 def project_coder_counts(db: Session, project_ids: list[int]) -> dict[int, int]:
     """Batch: distinct real-coder count per project (the Dashboard card badge, #1).
 
-    Grouped by ``Code.project_id`` — one query across every project, covering
-    conversations, documents, and dataset values uniformly.
+    One statement per project, each about 1 ms (#1463 D59: the roster is coders, never
+    respondents, so asking per coder is bounded). A project with no real coding is
+    ABSENT from the result, never a 0 entry.
     """
-    if not project_ids:
-        return {}
-    rows = (
-        db.query(Code.project_id, func.count(func.distinct(CodeApplication.user_id)))
-        .join(CodeApplication, CodeApplication.code_id == Code.id)
-        .join(User, CodeApplication.user_id == User.id)
-        .filter(Code.project_id.in_(project_ids), *_real_coding_filters())
-        .group_by(Code.project_id)
-        .all()
-    )
-    return {pid: count for pid, count in rows}
+    counts: dict[int, int] = {}
+    for pid in dict.fromkeys(project_ids):
+        n = db.query(User.id).filter(coded_in_project_clause(pid)).count()
+        if n:
+            counts[pid] = n
+    return counts

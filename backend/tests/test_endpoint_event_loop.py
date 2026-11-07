@@ -39,6 +39,14 @@ import pytest
 
 from app.routers.auth import archive_coder, unarchive_coder
 from app.routers.backup import backup_create
+from app.routers.code_analysis import (
+    code_cooccurrence, code_frequencies, comment_columns, demographic_comparison,
+    demographic_comparison_csv, source_frequencies, source_frequencies_csv,
+)
+from app.routers.excerpts import list_quoted_excerpts
+from app.routers.export import export_code_cooccurrence_csv
+from app.routers.codes import list_categories, list_codes
+from app.routers.conversations import list_conversations
 from app.routers.participants import list_participants, withdraw_participant
 from app.routers.dataset import (
     append_import, create_participants_dataset, get_linkable_rows, import_dataset,
@@ -48,6 +56,7 @@ from app.routers.dataset import (
 from app.routers.export_excel import export_datasets_excel, export_study_excel
 from app.routers.export_r import export_r_data
 from app.routers.metrics import get_row_matrix, get_row_matrix_csv
+from app.routers.projects import get_project_summary
 from app.routers.recode import apply_value_labels_endpoint, bulk_set_missing_values, bulk_type_update
 from app.routers.text_analysis import (
     code_density, cross_tabulation, export_cross_analysis, filtered_frequencies,
@@ -141,6 +150,55 @@ MUST_BE_SYNC = [
     # values, so it stays off the loop.
     (get_linkable_rows, "GSS 70.3s frozen loading every record; as def one page over HTTP "
                         "0.07-3.5s on GSS, 0.05-1.2s on BES, worst /health 0.04s (build, 2026-10-13c)"),
+    # #1323 D11 — the code-by-group comparison reads every passage in scope and runs
+    # an exact test per code (Freeman–Halton enumerates tables for 3+ groups; past
+    # its cap a 9,999-draw Monte Carlo). Measured by the 2026-10-31 pre-implementation
+    # review on its prototype, timed at the call:
+    (demographic_comparison, "0.13-0.64s at 2.4k-30k turns, +0.65s on the first scipy "
+                             "import (review r1, 2026-10-31)"),
+    (demographic_comparison_csv, "the same computation, then the CSV — the two move together"),
+    # #1463 D62 — TopRail reads the summary on EVERY project page. Measured by the
+    # 2026-11-02e review on the D12 corpus (1.2M turns, nine coders), encrypted, over
+    # HTTP: async, the whole call is the freeze; as def, [/health in brackets]. Its
+    # document and observation counts are planned from the parent since, but the
+    # conversation coded count still visits every coding of the project.
+    (get_project_summary, "10.7s alone, 18.9s inside the Overview's load, all on the loop "
+                          "[<=15 ms as def]"),
+    # #1463 D67 (session B, 2026-11-03) — the Qualitative analysis page's heavy requests. As
+    # `async` they ran one after another on the loop, so on the encrypted BES copy the page
+    # failed at the client's 30 s limit. Timed alone with curl on encrypted copies (BES:
+    # 1.38M codings; D12: 3.6M codings on 1.2M turns); [in brackets] the worst /health over
+    # two page loads as def, 595 probes. `list_coders` was in D67's list and stays `async`:
+    # 8 ms on both copies once D60 removed its cost (session A) — no measured freeze to pin.
+    (code_frequencies, "BES blind 7.5s alone (13.4s before D66's one pass), 10.4-11.0s inside "
+                       "the page; D12 24.6s (its conversation arm) [0.19s]"),
+    (list_codes, "BES 3.6-3.8s alone, 5.0-5.3s inside the page; D12 66.0s (its usage counts)"),
+    (list_categories, "D12 66.4s with include_codes (BES has no categories: 0.014s)"),
+    (list_conversations, "D12 12.8s over 900 conversations (BES has none)"),
+    (comment_columns, "BES 2.0-2.2s alone, 3.4-3.9s inside the page — the review's last /health "
+                      "stall (3.26s) [0.19s]"),
+    # #1526 D82 (2026-11-03e) — the Descriptives tab's own request, not in D67's list. Its
+    # service timed in-process on a migrated PLAINTEXT copy of scale_review.db's BES:
+    # 10.71-10.75s before D80's two clauses, 11.16-11.36s with them, all on the loop as async.
+    (source_frequencies, "BES plaintext 10.7s (11.2-11.4s with #1526 D80), service timed alone"),
+    # #1527 D89 (2026-11-04) — the Relationships tab's co-occurrence and its CSV run the one
+    # streaming tally #1335 measured on the D12 kit's 3.6M codings: the unit-level read
+    # 10.4-10.9s, on the loop as async (`multicoder.md`, #1335's bullet). NOT re-measured
+    # by #1527, which converted them on that measurement.
+    (code_cooccurrence, "D12 kit 10.4-10.9s for the unit-level tally (#1335's measurement)"),
+    (export_code_cooccurrence_csv, "the same tally, then the CSV — the two move together"),
+    # #1528 D89 (2026-11-04) — the Source Data CSV runs the Descriptives tab's own service,
+    # `get_source_frequencies`, measured for `source_frequencies` above (#1526 D82: 10.7s on BES
+    # plaintext). NOT re-measured by #1528, which converted it on that measurement.
+    (source_frequencies_csv, "the same service as source_frequencies, then the CSV — the two "
+                             "move together"),
+    # #1539 (1.6.0) — the Quote Board. Its preceding-turn read refused past ~995 quotes, so a
+    # large selection 500'd quickly; with the read fixed the board runs to completion. Timed
+    # at the call on a READ-ONLY plaintext copy of the D12 corpus (1.2M turns, 60,000 quotes);
+    # as `async def` the whole body is the freeze. Before the fix 964 quotes took 16.45s (the
+    # old read walked the install) and 4,957 refused.
+    (list_quoted_excerpts, "0.54s for 964 quotes, 1.70s for 4,957, 6.68s for 20,045, 19.9s for "
+                           "60,000 (the whole project) — D12 copy, at the call (#1539 review)"),
 ]
 
 # 🔴 NOT here, deliberately: `routers/projects.py::delete_project` (#1035) stays

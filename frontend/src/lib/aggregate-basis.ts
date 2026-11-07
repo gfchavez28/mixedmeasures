@@ -150,16 +150,30 @@ export function aggregateNCaveat(rd: {
  * So the cell names its unit. Unlike #693's case there is no better number to
  * show — the pooled total IS the n of this statistic — which is why this states
  * the unit rather than replacing the figure.
+ *
+ * #1330 (1.5.9, D53): the interval beside it now counts RECORDS, so the cell also
+ * says how many — "N values from M records" — read from the payload's
+ * `record_count`, never derived. A result computed before 1.5.9 carries none and
+ * keeps the bare "N values".
  */
-export function pooledNLabel(n: number): string {
-  return `${n.toLocaleString()} values`
+export function pooledNLabel(n: number, records?: number | null): string {
+  const values = `${n.toLocaleString()} values`
+  return typeof records === 'number' && Number.isFinite(records)
+    ? `${values} from ${records.toLocaleString()} ${records === 1 ? 'record' : 'records'}`
+    : values
 }
 
 /** The tooltip for that cell. */
-export function pooledNCaveat(n: number, memberCount?: number | null): string {
+export function pooledNCaveat(
+  n: number, memberCount?: number | null, records?: number | null,
+): string {
   const across = memberCount && memberCount > 0
     ? `the ${memberCount} variables in this group`
     : 'the variables in this group'
-  return `A mean over ${across}: their values are pooled into one list, so ${n.toLocaleString()} `
+  const base = `Pooled over ${across}: their values form one list, so ${n.toLocaleString()} `
     + 'is a count of VALUES, not of respondents — one person contributes once per variable.'
+  return typeof records === 'number' && Number.isFinite(records)
+    ? `${base} They come from ${records.toLocaleString()} `
+      + `${records === 1 ? 'record' : 'records'}, and the interval counts each record once.`
+    : base
 }

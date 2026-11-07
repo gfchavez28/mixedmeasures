@@ -168,8 +168,8 @@ def unreadable_database_guidance(db_path: Path, driver_text: str) -> str:
     and restoring a backup from Settings works, but a `-wal` left beside the renamed
     file is replayed into the new one, the old projects' files sit under the numbers
     a new project takes until the restore runs (#1185), and a Windows install may
-    have no backup at all (#1186). A *Restore the newest backup* button is 1.5.8's,
-    beside the recovery-key import (#1120). Unlike the shell's key messages
+    have no backup at all (#1186). A *Restore the newest backup* button, beside the
+    recovery-key import, is #1120's (open; planned for 1.5.8, not in it). Unlike the shell's key messages
     (`electron/key-manager.js::startFreshAdvice`), this one does NOT say to rename
     the folder: the key here is fine, so the backups in the folder are the way
     back, and a fresh folder would mint a key that cannot open them.

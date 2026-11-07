@@ -45,8 +45,14 @@ import {
   shapeLineChart,
   isGroupedMetrics,
   DISPLAY_PRECISION,
+  formatP,
   type ChartType,
 } from '@/lib/chart-data'
+import {
+  comparisonMethodNote, correctionName, deltaIntervalVisual, describeOmittedTest, unitCount,
+} from '@/lib/comparison-basis'
+import { ciLabel } from '@/lib/ci-label'
+import { COOCCURRENCE_RULE } from '@/lib/cooccurrence-rule'
 import {
   extractComputeParams,
   buildRequest,
@@ -64,6 +70,8 @@ import {
 } from '@/components/canvas/inline-chart-params'
 import { isQualitativeMaterialConfig } from '@/lib/material-kind'
 import { describeUndefined, NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
+import { pMethodShort } from '@/lib/p-method'
+import { untestedGroupsNote } from '@/lib/untested-groups'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -377,7 +385,7 @@ function crossTabExportTable(
 
 function comparisonExportTable(
   data: GroupComparisonResponse,
-): { headers: string[]; rows: string[][] } | null {
+): ExportTable | null {
   if (data.rows.length === 0) return null
   const headers = [
     'Variable',
@@ -394,21 +402,29 @@ function comparisonExportTable(
     }
     if (row.test) {
       cells.push(`${row.test.test_type} = ${row.test.statistic.toFixed(3)}`)
-      cells.push(row.test.p.toFixed(4))
+      // #1326 STAT-12 (D58): a p whose method the data chose says which.
+      const method = pMethodShort(row.test.p_method)
+      cells.push(`${row.test.p.toFixed(4)}${method ? ` (${method})` : ''}`)
     } else {
       cells.push(describeUndefined(row.test_omitted_reason) ?? 'Not computed')
       cells.push('—')
     }
     return cells
   })
-  return { headers, rows }
+  // #1329 (D51): the rendered table says which groups its tests left out, so
+  // the exported one does too — under it, as the figure's own words (#1323).
+  const several = data.rows.length > 1
+  const notes = data.rows
+    .map(r => untestedGroupsNote(r.untested_groups, several ? (r.full_label || r.label) : undefined))
+    .filter((n): n is string => n != null)
+  return notes.length ? { headers, rows, note: notes.join(' ') } : { headers, rows }
 }
 
 async function qualChartTable(
   projectId: number,
   params: QualComputeParams,
   timelineLens: TimelineExportLens,
-): Promise<{ headers: string[]; rows: string[][] } | null> {
+): Promise<ExportTable | null> {
   switch (qualChartKind(params)) {
     case 'timeline':
       return qualTimelineTable(projectId, params, timelineLens)
@@ -444,6 +460,9 @@ async function qualChartTable(
       return {
         headers: ['Code', ...codes.map(c => c.name)],
         rows: codes.map((code, i) => [code.name, ...codes.map((_, j) => String(data.matrix?.[i]?.[j] ?? 0))]),
+        // #1335 (D47): the rule the figure's caption says, under the table — a
+        // Markdown or HTML reader sees no caption.
+        note: COOCCURRENCE_RULE,
       }
     }
 
@@ -454,8 +473,27 @@ async function qualChartTable(
       const data = await codeAnalysisApi.demographicComparison(projectId, request)
       const groups = data.groups ?? []
       if (groups.length === 0) return null
+      // #1323: the unit is in the header ("Board (of 5 participants)") and the test
+      // rides with both p-values — the Markdown export has no image to carry them —
+      // and the method note the figure prints beneath itself rides as the table's
+      // `note` (session B). The scope sentence is not here: the figure does not
+      // carry it either (it is RelationshipsPanel's).
+      const basis = data.basis
+      const tested = basis != null && basis.test_omitted_reason == null
+      // D3: two groups carry Δ, and over a tested unit its interval — labelled by
+      // `ciLabel` (the level, then "(unadjusted)"), because the p beside it IS adjusted.
+      const twoGroups = groups.length === 2
+      const ci = (data.codes ?? []).find(c => c.delta_ci)?.delta_ci
       return {
-        headers: ['Code', ...groups.map(g => `${g} n`), ...groups.map(g => `${g} %`)],
+        headers: [
+          'Code',
+          // No basis (a payload from before it existed): the old header, unrelabelled.
+          ...groups.map(g => (basis ? `${g} (of ${unitCount(basis.unit, data.group_totals?.[g]?.n ?? 0)})` : `${g} n`)),
+          ...groups.map(g => `${g} %`),
+          ...(twoGroups ? ['Δ (percentage points)'] : []),
+          ...(twoGroups && ci ? [`Δ ${ciLabel(ci.method, ci.level)}`] : []),
+          ...(tested ? ['p', `p adjusted (${correctionName(basis.correction)})`] : []),
+        ],
         rows: (data.codes ?? []).map(entry => [
           entry.code_name,
           ...groups.map(g => String(entry.by_group?.[g]?.count ?? 0)),
@@ -463,12 +501,24 @@ async function qualChartTable(
             const cell = entry.by_group?.[g]
             const p = cell?.proportion
             if (p != null) return `${(p * 100).toFixed(1)}%`
-            // #1421: a group with no segments has no share — `—` and the server's
+            // #1421: a group with no material has no share — `—` and the server's
             // reason, #1363's rule for an undefined cell (a blank reads as a broken
             // export). An absent cell keeps its blank.
             return cell ? `${NO_VALUE} ${undefinedTooltip(cell.undefined_reason)}` : ''
           }),
+          ...(twoGroups
+            ? [entry.delta_proportion != null
+                ? `${entry.delta_proportion >= 0 ? '+' : ''}${(entry.delta_proportion * 100).toFixed(1)}`
+                : NO_VALUE]
+            : []),
+          ...(twoGroups && ci ? [deltaIntervalVisual(entry.delta_ci) ?? NO_VALUE] : []),
+          ...(tested
+            ? entry.test
+              ? [formatP(entry.test.p_value), entry.test.p_adjusted != null ? formatP(entry.test.p_adjusted) : NO_VALUE]
+              : [NO_VALUE, describeOmittedTest(entry.test_omitted_reason) ?? NO_VALUE]
+            : []),
         ]),
+        note: comparisonMethodNote(data) ?? undefined,
       }
     }
 
@@ -625,6 +675,14 @@ function fmtFrequencyShare(v: number | null | undefined, reason?: string | null)
 export interface ExportTable {
   headers: string[]
   rows: string[][]
+  /**
+   * #1323 — a paragraph printed UNDER the table in the Markdown and HTML renderings:
+   * the words the rendered figure carries beneath itself (the comparison's method
+   * note), which a Markdown reader otherwise never sees. ⚠️ The `.docx` fallback
+   * table does not carry it — the server reads `headers` and `rows` only
+   * (`routers/canvas.py::_decode_chart_tables`); the Word export's captured image does.
+   */
+  note?: string
 }
 
 /**
@@ -639,7 +697,11 @@ export interface ChartExportTable {
 }
 
 function tableExport(materialId: number, table: ExportTable) {
-  return { materialId, md: mdTable(table.headers, table.rows), html: htmlTable(table.headers, table.rows), table }
+  // A plain paragraph, not emphasis: the note is generated prose, and an `*` or `_`
+  // inside it would unbalance Markdown emphasis.
+  const md = mdTable(table.headers, table.rows) + (table.note ? `\n\n${table.note}` : '')
+  const html = htmlTable(table.headers, table.rows) + (table.note ? `\n<p>${esc(table.note)}</p>` : '')
+  return { materialId, md, html, table }
 }
 
 function mdTable(headers: string[], rows: string[][]): string {

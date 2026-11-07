@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from 'react'
+import { useState, useMemo, useRef, useEffect, useId } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Download, Clock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -30,6 +30,16 @@ import CodeDensityPanel from './CodeDensityPanel'
 import ResponseLengthPanel from './ResponseLengthPanel'
 import { availableLayerScopes, effectiveLayerScope, layerScopeLabel, showLayerPicker, type LayerScope } from '@/lib/coding-layers'
 import { useProjectCoderKinds } from '@/hooks/useCoderCoverage'
+import { useBlindMode } from '@/hooks/useBlindMode'
+import BlindScopeNotice from '@/components/qualitative-analysis/BlindScopeNotice'
+import { MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
+import {
+  readyFilters,
+  hasUnfinishedFilter,
+  notComparedSentence,
+  UNFINISHED_FILTER_REASON,
+  FILTERS_REACH_NOTE,
+} from '@/lib/subgroup-filters'
 
 interface CrossAnalysisPanelProps {
   projectId: number
@@ -73,9 +83,18 @@ export default function CrossAnalysisPanel({
   // existing, a model can be archived) — no setState-in-effect. 🔴 It dropped the
   // Machine layer outright (#1038 g): choosing it sent `human`.
   const layerScope: LayerScope = effectiveLayerScope(layerScopePref, layerAvailability)
+  // #1531 D99 (1.5.9) — the panel follows blind mode, as the analysis page does (DEC-G): while
+  // it WITHHOLDS (the act, #964 — never the claim `blind`) every request, and so every count
+  // and the CSV, is the viewer's own coding (the page's effective scope, #499), the coder
+  // filter is not rendered, and the queries wait for `settled`. Before, the filter listed
+  // colleagues BY NAME on a blind coder's screen and the counts were every coder's.
+  const { blind, withholding, settled, toggleReveal } = useBlindMode(projectId)
+  const self = user?.id ?? null
   const coderInclude = useMemo(
-    () => hiddenCoders.size === 0 ? undefined : coders.filter(c => !hiddenCoders.has(c.id)).map(c => c.id),
-    [coders, hiddenCoders],
+    () => withholding && self != null
+      ? [self]
+      : hiddenCoders.size === 0 ? undefined : coders.filter(c => !hiddenCoders.has(c.id)).map(c => c.id),
+    [withholding, self, coders, hiddenCoders],
   )
   const coderIncludeArr = coderInclude ?? null
   const coderIncludeCsv = coderInclude ? coderInclude.join(',') : undefined
@@ -96,25 +115,26 @@ export default function CrossAnalysisPanel({
 
   const filtersJSON = JSON.stringify(debouncedFilters)
 
-  // Only request if filters are non-empty and all have valid column_ids and values
-  const filtersReady = debouncedFilters.length > 0 && debouncedFilters.every(f => {
-    if (!f.column_id) return false
-    if (['equals', 'in'].includes(f.operator) && (!f.values || f.values.length === 0)) return false
-    if (['gte', 'lte'].includes(f.operator) && !f.value) return false
-    return true
-  })
+  // #1534 D103 — ONE decision of which filters count, for the comparison AND its CSV
+  // (`lib/subgroup-filters.ts`): every filter when all are finished, else none.
+  const comparedFilters = readyFilters(debouncedFilters)
+  const filtersReady = comparedFilters !== null
+  const unfinishedFilter = hasUnfinishedFilter(filters)
 
   // Filtered frequencies query
   const freqQuery = useQuery({
     queryKey: ['text-filtered-freq', projectId, columnIdsStr, filtersJSON, coderIncludeCsv, layerScope],
     queryFn: () => textAnalysisApi.filteredFrequencies(projectId, {
       column_ids: focalColumnIds,
-      filters: debouncedFilters,
+      // Enabled only when `comparedFilters` is a list (D103's one decision).
+      filters: comparedFilters ?? [],
       include_overall: true,
       coder_ids: coderIncludeArr,
       layer_scope: layerScope,
     }),
-    enabled: filtersReady,
+    // The four reads are server-scoped by the blind state: each waits for it (#964), and each
+    // key carries the EFFECTIVE scope (`coderIncludeCsv`), so a reveal is a new key (#454).
+    enabled: filtersReady && settled,
   })
   const freqData = freqQuery.data
   /**
@@ -139,7 +159,7 @@ export default function CrossAnalysisPanel({
       coder_ids: coderIncludeArr,
       layer_scope: layerScope,
     }),
-    enabled: crossColumnId !== null,
+    enabled: crossColumnId !== null && settled,
   })
   const crossTabData = crossTabQuery.data
   /**
@@ -160,7 +180,7 @@ export default function CrossAnalysisPanel({
       coder_ids: coderIncludeCsv,
       layer_scope: layerScope,
     }),
-    enabled: focalColumnIds.length > 0,
+    enabled: focalColumnIds.length > 0 && settled,
   })
 
   // Response length query
@@ -171,7 +191,7 @@ export default function CrossAnalysisPanel({
       coder_ids: coderIncludeCsv,
       layer_scope: layerScope,
     }),
-    enabled: focalColumnIds.length > 0,
+    enabled: focalColumnIds.length > 0 && settled,
   })
 
   // Get columns for cross-tab and density group-by selectors
@@ -210,19 +230,37 @@ export default function CrossAnalysisPanel({
     ? { records: freqData.filtered.row_count, comments: freqData.filtered.text_count }
     : null
 
+  // #1534 D103 — the export waits while a filter is unfinished: a file reading
+  // "Filters: None" beside a visible filter is the claim the fix exists to stop.
+  // Read off the LIVE list (the pills), not the debounced one, so the reason appears
+  // as the filter does.
+  const exportBlocked = !settled || unfinishedFilter
   const handleExport = () => {
+    // #1531: the file follows the panel, so it waits for the same scope (`aria-disabled`
+    // below says so; this refusal is what it does — #754).
+    if (exportBlocked) return
     textAnalysisApi.exportCrossAnalysis(projectId, {
       column_ids: columnIdsStr,
-      filters: debouncedFilters.length > 0 ? JSON.stringify(debouncedFilters) : undefined,
+      // 🔴 #1534: `filters_json` is the route's name. This sent `filters` from the day it
+      // was written, which FastAPI dropped silently — the file never held the comparison.
+      filters_json: comparedFilters ? JSON.stringify(comparedFilters) : undefined,
       coder_ids: coderIncludeCsv,
       layer_scope: layerScope,
     })
   }
+  const exportReasonId = useId()
+  const notCompared = freqData ? notComparedSentence(freqData.filter_scope.unfiltered_datasets) : null
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto" role="region" aria-label="Cross-analysis">
       {/* Screen reader announcements */}
       <div aria-live="polite" className="sr-only">{srAnnouncement}</div>
+
+      {/* #1531 D99 — the scope said once, with the logged reveal. Not under the consensus
+          layer: one synthetic coder, viewable while blind (DEC-H), and no coder scope applies. */}
+      <BlindScopeNotice blind={blind && layerScope !== 'consensus'} onReveal={toggleReveal} surface="cross_analysis">
+        Blind mode is on — these counts and the CSV hold only your own coding.
+      </BlindScopeNotice>
 
       {/* Subgroup filters + per-coder lens (multi-coder only) */}
       <div className="flex items-start gap-3">
@@ -235,6 +273,10 @@ export default function CrossAnalysisPanel({
             onFiltersChange={setFilters}
             matchCount={matchCount}
           />
+          {/* #1534 D108 — the filters reach the comparison only; nothing said so. */}
+          {filters.length > 0 && (
+            <p className="text-xs text-mm-text-muted mt-1">{FILTERS_REACH_NOTE}</p>
+          )}
         </div>
         {showLayerPicker(layerAvailability) && (
           <div className="pt-1 shrink-0 flex items-center gap-2">
@@ -259,8 +301,9 @@ export default function CrossAnalysisPanel({
             )}
           </div>
         )}
-        {/* Per-coder filter is moot on the single consensus layer (UX-2). */}
-        {multiCoder && layerScope !== 'consensus' && (
+        {/* Per-coder filter is moot on the single consensus layer (UX-2), and not rendered
+            while blind mode withholds (DEC-G, #1531 D99): it lists colleagues by name. */}
+        {multiCoder && layerScope !== 'consensus' && !withholding && (
           <div className="pt-1 shrink-0">
             <CoderFilterPopover
               coders={coders}
@@ -285,6 +328,7 @@ export default function CrossAnalysisPanel({
             filtered={freqData!.filtered}
             overall={freqData!.overall ?? null}
             filterDescription={freqData!.filter_description}
+            notCompared={notCompared}
           />
         )
       )}
@@ -357,8 +401,18 @@ export default function CrossAnalysisPanel({
       </div>
 
       {/* Export */}
-      <div className="flex justify-end pt-2">
-        <Button variant="outline" size="sm" className="text-xs gap-1" onClick={handleExport}>
+      <div className="flex justify-end items-center gap-3 pt-2">
+        {unfinishedFilter && (
+          <p id={exportReasonId} className="text-xs text-mm-text-muted min-w-0">{UNFINISHED_FILTER_REASON}</p>
+        )}
+        <Button
+          variant="outline"
+          size="sm"
+          className={`text-xs gap-1 shrink-0 ${exportBlocked ? MODE_DISABLED_CLASS : ''}`}
+          aria-disabled={exportBlocked || undefined}
+          aria-describedby={unfinishedFilter ? exportReasonId : undefined}
+          onClick={handleExport}
+        >
           <Download className="w-3.5 h-3.5" />
           Export Cross-Analysis (CSV)
         </Button>

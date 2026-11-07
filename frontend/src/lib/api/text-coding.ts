@@ -70,7 +70,6 @@ export interface TextCodingRecord {
   dataset_id: number
   dataset_name: string
   text_count: number
-  coded_text_count: number
   linked_conversation_ids: number[]
 }
 
@@ -231,10 +230,13 @@ export const textCodingApi = {
     api.patch<TextCodingViewConfig>(`/projects/${pid}/text-coding/config`, data).then(r => r.data),
 
   // Export
-  exportCoded: (pid: number, params?: { coded_only?: boolean; column_ids?: string }) => {
+  /** `coder_ids` (#1530 D98): the page sends the viewer's own id while blind mode withholds —
+   *  each answer's codes are then hers; absent = every coder. */
+  exportCoded: (pid: number, params?: { coded_only?: boolean; column_ids?: string; coder_ids?: string }) => {
     const searchParams = new URLSearchParams()
     if (params?.coded_only) searchParams.append('coded_only', 'true')
     if (params?.column_ids) searchParams.append('column_ids', params.column_ids)
+    if (params?.coder_ids) searchParams.append('coder_ids', params.coder_ids)
     const qs = searchParams.toString()
     return downloadFromApi(`/projects/${pid}/text-coding/export${qs ? '?' + qs : ''}`, 'text-coding.csv')
   },

@@ -21,6 +21,7 @@ import SlashCommandList from './SlashCommandList'
 import type { SlashCommandListRef } from './SlashCommandList'
 import { COMMANDS, DEFERRED_SLASH_TYPES, type SlashCommand as SlashCommandItem } from './extensions/slash-commands'
 import { describeRewrites } from './canvas-utils'
+import { CURRENT_FIGURE_EPOCH } from './figure-baseline'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -303,8 +304,12 @@ const ThemeEditor = forwardRef<InsertNodeHandle, ThemeEditorProps>(function Them
     (attrs: Record<string, unknown>) => insertWithPendingSlash('excerpt-embed', attrs),
     [insertWithPendingSlash],
   )
+  // #1323 D12: every chart embed is placed under the current fingerprint generation —
+  // this is the ONE door (the Materials drawer, a pending item, a drag; the server
+  // creates none), so an embed without `figureEpoch` was placed before it existed.
   const insertChart = useCallback(
-    (attrs: Record<string, unknown>) => insertWithPendingSlash('chart-embed', attrs),
+    (attrs: Record<string, unknown>) =>
+      insertWithPendingSlash('chart-embed', { ...attrs, figureEpoch: CURRENT_FIGURE_EPOCH }),
     [insertWithPendingSlash],
   )
   const insertMemo = useCallback(

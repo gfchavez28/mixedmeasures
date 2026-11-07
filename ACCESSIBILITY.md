@@ -5,7 +5,8 @@ author. This statement aims to be accurate rather than reassuring: it records wh
 been built and measured, what is known to be broken, and — most importantly — what has
 **not** been tested.
 
-**Last reviewed:** 27 August 2026 · **Applies to:** version 1.4.0
+**Last reviewed:** 27 August 2026, for version 1.4.0 · later releases have not been
+re-reviewed as a whole
 
 **Scope of the most recent review.** The 1.4.0 round covered the new Variables view, the
 Data view, the Canvas (including snapshot comparison) and the quantitative analysis
@@ -23,8 +24,8 @@ This is a **self-assessment**, not a conformance claim.
 - The target we work against is **WCAG 2.2 Level AA**.
 
 Findings here come from code review, automated checks, values computed from the
-shipped stylesheet, and browser verification. **Screen-reader testing has happened
-once, in July 2026, and three releases have shipped since** — see
+shipped stylesheet, and browser verification. **Screen-reader testing has been done
+only with NVDA on Windows, most recently on 18 August 2026, before 1.4.0 shipped** — see
 [Screen-reader testing](#screen-reader-testing), which is the section that matters
 most for anyone evaluating this tool for institutional use.
 
@@ -68,7 +69,9 @@ SC 1.4.11 (3:1) on every surface in both themes, and every text token clears SC 
 (4.5:1) on every background it is actually painted over. Both are held by a
 token × surface contrast matrix that reads the shipped stylesheet, composites the
 translucent tints the app really paints, and fails the build if a new text token is
-added without stating where it lands.
+added without stating where it lands. Text coloured outside the token set is not
+covered by that check, and some amber warning text measures below 4.5:1 in light
+mode.
 
 *This replaced a fourth "faint" text tier.* At AA that tier could not exist: to clear
 4.5:1 it needed to be within ~1.5 points of the tier above it, which is not a visible
@@ -84,8 +87,10 @@ the page rather than only scrolling it — so the next Tab continues inside the 
 instead of returning to the navigation. Without it, reaching page content cost 17 tab
 stops on every navigation.
 
-**Reduced motion.** A global `prefers-reduced-motion: reduce` rule disables animations,
-transitions and smooth scrolling throughout the app — not per-component, not partial.
+**Reduced motion.** A global `prefers-reduced-motion: reduce` rule cuts animations and
+transitions to near zero and turns off CSS smooth scrolling throughout the app. Scrolls
+the app requests in code — jumping to a record, a passage or a canvas theme — are still
+smooth.
 
 **Colour is not the only signal.** Coder attribution uses initials as well as colour.
 Text drawn on a user-chosen colour (code and speaker colours) has its foreground computed
@@ -187,7 +192,7 @@ it. We have not tested how other screen readers behave in that moment.
 
 ## Screen-reader testing
 
-**Last verified: 12 August 2026, with NVDA on Windows.** An earlier pair of
+**Last verified: 18 August 2026, with NVDA on Windows** (passes on 12, 17 and 18 August; see below). An earlier pair of
 listen-throughs ran on 1 July 2026 against a large stress-test project — one covering the
 conversation, document and text coding workbenches plus the reconciliation grid, and a
 second confirming a fix.

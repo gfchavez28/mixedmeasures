@@ -97,8 +97,23 @@ const VALUE_MODE_OPTIONS: { value: QualValueMode; label: string; description: st
 
 const DENOMINATOR_OPTIONS: { value: QualDenominatorMode; label: string; description: string }[] = [
   { value: 'total', label: 'All segments', description: 'Divide by total segments in source' },
-  { value: 'coded', label: 'Coded only', description: 'Divide by segments with any code' },
+  // #1529 D92: "with any code" was false — the base is the coded segments (invariant J-A), which
+  // leaves out one marked only with a universal code; such codes are then left off the chart.
+  { value: 'coded', label: 'Coded only', description: 'Divide by coded segments — one marked only with a universal code (such as Unclear) is not coded' },
 ]
+
+/**
+ * #1561 — what a CLOSED picker shows: the chosen option's LABEL, never its description.
+ * `components/ui/select.tsx`'s `SelectItem` wraps every child in Radix's `ItemText`, and
+ * an empty `<SelectValue />` mirrors the selected item's whole `ItemText` into the
+ * 28 px trigger — label AND description. #1529 lengthened *Coded only*'s description to
+ * ~95 characters, which then ran to five lines and painted over *Value display* and
+ * *Sort*. Passing the label as `SelectValue`'s children stops the mirror (Radix 2.x:
+ * `valueNodeHasChildren`); the open menu still shows both lines.
+ */
+function optionLabel(options: { value: string; label: string }[], value: string): string | undefined {
+  return options.find(o => o.value === value)?.label
+}
 
 const SORT_OPTIONS: { value: QualSortOrder; label: string }[] = [
   { value: 'import', label: 'Import order' },
@@ -207,7 +222,7 @@ export default function QualChartOptionsPanel({
             <OptionRow icon={Percent} label="Value display">
               <Select value={valueMode} onValueChange={v => onValueModeChange(v as QualValueMode)}>
                 <SelectTrigger className="h-7 text-xs">
-                  <SelectValue />
+                  <SelectValue>{optionLabel(VALUE_MODE_OPTIONS, valueMode)}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {VALUE_MODE_OPTIONS.map(opt => (
@@ -225,7 +240,7 @@ export default function QualChartOptionsPanel({
             <OptionRow icon={Percent} label="Denominator">
               <Select value={denominatorMode} onValueChange={v => onDenominatorModeChange(v as QualDenominatorMode)}>
                 <SelectTrigger className="h-7 text-xs">
-                  <SelectValue />
+                  <SelectValue>{optionLabel(DENOMINATOR_OPTIONS, denominatorMode)}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {DENOMINATOR_OPTIONS.map(opt => (

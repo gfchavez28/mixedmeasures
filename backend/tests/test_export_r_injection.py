@@ -143,6 +143,16 @@ def _proportion(key):
     return build
 
 
+def _exclusions(mtype, metric_type):
+    """#1326 STAT-07 (D57): an analysis's exclusion list reaches live code."""
+    def build(db, pid, value):
+        col_ids = _base(db, pid)
+        _material(db, pid, 1, mtype, "descriptives",
+                  {"metric_type": metric_type, "column_ids": [col_ids["i1"]],
+                   "exclude_values": [value]})
+    return build
+
+
 def _correlation(db, pid, value):
     col_ids = _base(db, pid)
     _material(db, pid, 1, "correlation_table", "correlations",
@@ -246,6 +256,16 @@ SITES = [
     ("corr_type", _correlation,
      f'pearson"); writeLines("1", "{PWN}_corr"); cor(1:3, 1:3, method = "pearson',
      "spearman", r'method = "spearman"\)$'),
+    ("exclusion_descriptives", _exclusions("summary_table", "mean"),
+     f'99")); writeLines("1", "{PWN}_excl"); list(c("99', "99",
+     r'^mean\(\.mm_drop_excluded\(\.mm_num\(data\$i1, "i1"\), c\("99"\), by = data\$i1\),'
+     r' na\.rm = TRUE\)$'),
+    ("exclusion_chart", _exclusions("vertical_bar", "frequency_distribution"),
+     f'99"))); writeLines("1", "{PWN}_exch"); list(c("99', "99",
+     r'^ch_i1 <- as\.data\.frame\(table\(\.mm_drop_excluded\(data\$i1, c\("99"\)\)\)\)$'),
+    ("exclusion_stacked", _exclusions("stacked_bar", "frequency_distribution"),
+     f'99"))); writeLines("1", "{PWN}_exsb"); list(c("99', "99",
+     r'^  tbl <- table\(\.mm_drop_excluded\(data\[\[col\]\], c\("99"\)\)\)$'),
     ("proportion_operator", _proportion("operator"),
      f'>= 0); writeLines("1", "{PWN}_op"); sum(0 +', "<=",
      r"^count_meeting <- sum\(i1_valid <= 4\)$"),
@@ -434,6 +454,9 @@ SAFE_CALLS = {
     "_dataset_r_prefix": IDENT, "_score_column_base": IDENT,
     "_r_number": NUMBER,
     "_numeric_vector_r": COMPOSED, "_text_vector_r": COMPOSED,
+    # #1325 (D40) — the app's undefined reasons, keyed by id; both parts checked
+    # inside (an int key, a member of UNDEFINED_REASONS).
+    "_r_reason_vector": COMPOSED,
 }
 
 _R_NAMES = "an R name from col_meta / domain_key_by_id / score_col_by_domain, built by the slug family"
@@ -488,7 +511,25 @@ CLASSIFIED = {
     ("_build_r_script", "hm_src"): (COMPOSED, "_numeric_vector_r"),
     ("_build_r_script", "dom_slug"): (IDENT, "domain_key_by_id or _make_r_identifier"),
     ("_build_r_script", "label"): (VOCAB, "Cronbach's alpha / Split-half reliability"),
-    ("_build_r_script", "frame"): (IDENT, "dom_slug + `_items`"),
+    ("_build_r_script", "frame"): (IDENT, "dom_slug + `_items`, or `cmp_<kind>_` + two R names"),
+    # #1326 STAT-07 (D57): an analysis's exclusions, each value escaped inside c().
+    ("_build_r_script", "excl_r"): (COMPOSED, "_exclusion_vector_r: escaped values in c()"),
+    ("_build_r_script", "hm_excl_r"): (COMPOSED, "_exclusion_vector_r: escaped values in c()"),
+    ("_build_r_script", "ev_r"): (COMPOSED, "_exclusion_vector_r: escaped values in c()"),
+    ("_build_r_script", "sb_ev_r"): (COMPOSED, "_exclusion_vector_r: escaped values in c()"),
+    ("_build_r_script", "excl_filter"): (COMPOSED, "a literal filter() over an R name and excl_r, or ''"),
+    # #1330 (D55): the pooled proportion's "meets the rule" matrix.
+    ("_build_r_script", "pool_hit"): (COMPOSED, "valid_obj + r_op + thresh, or valid_obj + escaped vals_str"),
+    ("_build_r_script", "hm_freq"): (COMPOSED, "_text_vector_r, optionally inside .mm_drop_excluded"),
+    ("_build_r_script", "tab_src"): (COMPOSED, "`data$` + an R name, optionally inside .mm_drop_excluded"),
+    ("_build_r_script", "sb_src"): (COMPOSED, "`data[[col]]`, optionally inside .mm_drop_excluded"),
+    # #1329 (D52): the `.mm_testable` frames' inputs.
+    ("_build_r_script", "st_y"): (COMPOSED, "`.mm_num(data$<R name>, \"<R name>\")`"),
+    ("_build_r_script", "st_g"): (COMPOSED, "`data$` + an R name"),
+    ("_build_r_script", "y_expr"): (COMPOSED, "`.mm_num(<data_ref>$<R name>, \"<R name>\")`"),
+    ("_build_r_script", "g_expr"): (COMPOSED, "data_ref + `$` + an R name"),
+    ("_build_r_script", "kind"): (VOCAB, "rank / t / aov"),
+    ("_build_r_script", "order"): (COMPOSED, _PARTS),
     ("_build_r_script", "c"): (IDENT, _R_NAMES),
     ("_build_r_script", "cols_str"): (COMPOSED, _PARTS),
     ("_build_r_script", "i"): (NUMBER, "enumerate"),
@@ -505,8 +546,6 @@ CLASSIFIED = {
     ("_build_r_script", "vr"): (IDENT, _R_NAMES),
     ("_build_r_script", "data_ref"): (VOCAB, "`data` or `comp_data`"),
     ("_build_r_script", "n_groups"): (NUMBER, "len()"),
-    ("_build_r_script", "t_ref"): (IDENT, "`tt_data_` + an R name, or data_ref"),
-    ("_build_r_script", "pair"): (COMPOSED, _PARTS),
     ("_build_r_script", "aov_obj"): (IDENT, "two R names"),
     ("_build_r_script", "col_r"): (IDENT, _R_NAMES),
     ("_build_r_script", "row_r"): (IDENT, _R_NAMES),
@@ -521,7 +560,6 @@ CLASSIFIED = {
     ("_build_r_script", "ref_line"): (NUMBER, "_r_number; None leaves the line out"),
     ("_build_r_script", "tr_name"): (IDENT, _R_NAMES),
     ("_build_r_script", "var_name"): (IDENT, "`ch_` + _slugify"),
-    ("_build_r_script", "ev_str"): (COMPOSED, _PARTS),
     ("_build_r_script", "co_str"): (COMPOSED, _PARTS),
     ("_build_r_script", "aes_x"): (COMPOSED, "literals, or reorder() over an R name"),
     ("_build_r_script", "bar_size / 30"): (NUMBER, "_r_number-checked, formatted :.2f"),
@@ -549,6 +587,12 @@ CLASSIFIED = {
     ("export_r_data", "project_slug"): (NOT_SCRIPT, "a zip member name"),
     ("export_r_data", "date_str"): (NOT_SCRIPT, "a file name"),
     ("export_r_data", "filename"): (NOT_SCRIPT, "the Content-Disposition header"),
+    ("export_r_data", "coder_scope_filename_suffix(db, scope)"): (
+        NOT_SCRIPT, "the archive's file name (#1530 `_coder-<name>`, ASCII through sanitize_content_disposition)",
+    ),
+    ("_r_reason_vector", "key"): (NUMBER, "an int id, refused otherwise (bools too)"),
+    ("_r_reason_vector", "reason"): (VOCAB, "a member of undefined_stats.UNDEFINED_REASONS, refused otherwise"),
+    ("_r_reason_vector", "', '.join(parts)"): (COMPOSED, _PARTS),
 }
 
 
@@ -641,6 +685,11 @@ BOUND = {
     "thresh": r"_r_number\(",
     "r_op": r"_R_PROPORTION_OPERATORS\.get\(",
     "corr_method": r'"spearman" if .* else "pearson"$',
+    # #1326 STAT-07 (D57): user-typed exclusion values, escaped inside c().
+    "excl_r": r"_exclusion_vector_r\(",
+    "hm_excl_r": r"_exclusion_vector_r\(",
+    "ev_r": r"_exclusion_vector_r\(",
+    "sb_ev_r": r"_exclusion_vector_r\(",
 }
 
 

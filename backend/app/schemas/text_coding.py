@@ -135,7 +135,7 @@ class RecordResponse(BaseModel):
     dataset_id: int
     dataset_name: str
     text_count: int
-    coded_text_count: int
+    # (coded_text_count was deleted by #1526 D81: no reader, and not J-A.)
     linked_conversation_ids: list[int]
 
 

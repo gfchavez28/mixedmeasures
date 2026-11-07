@@ -30,15 +30,15 @@ class CodeFrequencyItem(BaseModel):
     category_name: str | None
     category_color: str | None
     segment_count: int
-    segment_percentage: float
+    # None for a universal code (#1526 D79 — `frontend/src/lib/universal-share.ts`).
+    segment_percentage: float | None
     conversation_count: int
     conversation_percentage: float
     participant_count: int
     participant_percentage: float
     text_count: int = 0
-    text_percentage: float = 0.0
     row_count: int = 0
-    row_percentage: float = 0.0
+    # text_percentage / row_percentage / total_rows were deleted by #1526 D81 (no reader since #749).
 
 
 class CodeFrequencySummary(BaseModel):
@@ -49,7 +49,6 @@ class CodeFrequencySummary(BaseModel):
     total_codes_active: int
     unlinked_speaker_count: int
     total_coded_texts: int = 0
-    total_rows: int = 0
     source: str = "conversations"
 
 
@@ -182,8 +181,10 @@ class CooccurrenceMatrixResponse(BaseModel):
     codes: list[CooccurrenceCodeInfo]
     matrix: list[list[int]]
     max_cooccurrence: int
-    total_coded_segments: int
-    total_coded_texts: int = 0
+    # #1527 D83: the units the matrix was counted over (the source level: sources) —
+    # replaced `total_coded_segments` + `total_coded_texts`, which left documents and
+    # clips out of the figure's N.
+    n_units: int
     source: str = "conversations"
 
 
@@ -308,8 +309,14 @@ class SourceFrequenciesResponse(BaseModel):
 class DemographicComparisonRequest(BaseModel):
     code_ids: list[int] | None = None
     group_by_subtype: str
+    # Per source kind: None = every source of that kind; a list = exactly those
+    # ([] = none of that kind) — #1297/#1298.
     conversation_ids: list[int] | None = None
     text_column_ids: list[int] | None = None
+    document_ids: list[int] | None = None
+    # Observations have no participant link; sent only so the result can say how
+    # many were left out.
+    observation_ids: list[int] | None = None
     exclude_facilitator: bool = True
     participant_ids: list[int] | None = None
     # Track J · J1 item 4 — scope analysis output to selected coders (None/empty = all coders)
@@ -318,25 +325,48 @@ class DemographicComparisonRequest(BaseModel):
 
 
 class GroupTotal(BaseModel):
-    total_segments: int
+    # #1323: the denominator in the result's unit (`basis.unit`) — participants
+    # with material in scope, or passages.
+    n: int
+    participants: int
+    total_segments: int  # passages in scope (turns, document segments, answers)
     total_word_count: int
 
 
 class GroupCodeStats(BaseModel):
-    count: int
-    # #1421: None when the group has no segments in the material compared —
+    count: int  # in the result's unit
+    # #1421: None when the group has no material in the sources compared —
     # `undefined_reason` (services/undefined_stats.py) says why.
     proportion: float | None
     undefined_reason: str | None = None
+    passages: int  # #1323: always the passage count — a description, never tested
 
 
 class StatTestResult(BaseModel):
     method: str
     statistic: float | None
     p_value: float
+    # #1323: the p corrected across the codes tested in this result
+    # (`basis.correction`); `significant` reads THIS one.
+    p_adjusted: float | None
     significant: bool
     effect_size: float | None = None
     effect_size_label: str | None = None
+    # #1323: the smallest p these margins can produce, and whether — under the
+    # stated correction — this code could EVER reach significance at these sizes.
+    min_attainable_p: float | None = None
+    can_reach_significance: bool | None = None
+
+
+class ComparisonInterval(BaseModel):
+    """#1323, D3 — Δ's interval, with the method that made it (the stated-basis
+    family's `ci_method`). The field names are `IrrInterval`'s; it carries no
+    `unavailable_reason` because Δ's interval exists exactly when Δ does."""
+    lower: float
+    upper: float
+    level: float
+    #: `comparison_basis.CI_METHOD_NEWCOMBE_HYBRID` — mirrored in `lib/ci-label.ts`.
+    method: str
 
 
 class CodeComparisonEntry(BaseModel):
@@ -345,13 +375,40 @@ class CodeComparisonEntry(BaseModel):
     category_name: str | None
     by_group: dict[str, GroupCodeStats]
     delta_proportion: float | None
+    # Two groups, a tested unit and both shares defined; None otherwise.
+    delta_ci: ComparisonInterval | None = None
     test: StatTestResult | None
+    test_omitted_reason: str | None = None  # comparison_basis.TEST_OMITTED_REASONS
+
+
+class ComparisonBasis(BaseModel):
+    """#1323 — the stated basis (`services/comparison_basis.py` ↔ `lib/comparison-basis.ts`)."""
+    unit: str
+    correction: str
+    family_size: int
+    family_reachable: int
+    tarone_family_size: int
+    alpha: float
+    tested_groups: list[str]
+    test_omitted_reason: str | None
+
+
+class ComparisonScope(BaseModel):
+    """#1297/#1298 — what was counted, and what was left out, said by the server."""
+    conversations: int
+    documents: int
+    text_columns: int
+    observations_left_out: int
+    unassigned_passages: int
+    participants_without_group: int
 
 
 class DemographicComparisonResponse(BaseModel):
     groups: list[str]
     group_totals: dict[str, GroupTotal]
     codes: list[CodeComparisonEntry]
+    basis: ComparisonBasis
+    scope: ComparisonScope
 
 
 # ── Saturation ────────────────────────────────────────────────────────────
@@ -431,15 +488,28 @@ class IrrCodeResult(BaseModel):
     kappa_interpretation: str | None = None
     krippendorff_alpha: float | None = None
     alpha_interpretation: str | None = None
+    #: #1505 (D43) — why κ and α carry NO band word although they have values:
+    #: `reliability_basis.VERDICT_WITHHELD_*` (fewer comparable units than
+    #: `IrrResponse.verdict_min_units`). ``None`` when the bands stand, when the
+    #: coefficients are undefined (`undefined_reason` says why), and on payloads
+    #: from before 1.5.9.
+    verdict_withheld_reason: str | None = None
     #: #829 — why κ/α are None here. `no_variance` = nobody applied this code
     #: in scope (or everybody did), so there is nothing to agree about; reporting
     #: κ = 1 "almost perfect" was the defect (#689's rule, one surface over).
+    #: `insufficient_n` = one comparable unit (#1505, D42): over one unit α is 0
+    #: for any disagreement — an identity, not a measurement.
     undefined_reason: str | None = None
     #: #43 — each coefficient's own interval. Separate objects because the two
     #: are produced by different methods, so one shared `ci_method` would have
     #: to lie about one of them.
     kappa_ci: IrrInterval | None = None
     alpha_ci: IrrInterval | None = None
+    #: #1333 — facilitator turns in scope carrying this code by any coder. They
+    #: are NOT units (the stated `unit_basis`), so a non-zero count is the coding
+    #: the exclusion left out, said rather than dropped. ``None`` when facilitator
+    #: turns are units, and on payloads from before the field.
+    facilitator_turns_coded: int | None = None
     #: #35 — how α scored a difference: `reliability_basis.ALPHA_METRIC_*`,
     #: mirrored in `lib/reliability-basis.ts`. Nominal here (presence/absence).
     alpha_metric: str | None = None
@@ -474,10 +544,12 @@ class IrrMagnitudeResult(BaseModel):
     mean_abs_difference: float | None = None
     krippendorff_alpha: float | None = None
     alpha_interpretation: str | None = None
+    #: #1505 (D43) — as `IrrCodeResult.verdict_withheld_reason`.
+    verdict_withheld_reason: str | None = None
     #: `reliability_basis.ALPHA_METRIC_*` — interval, by the declaration.
     alpha_metric: str
-    #: `insufficient_n` (no unit rated by two coders) · `no_variance` (every
-    #: compared rating identical) · None.
+    #: `insufficient_n` (fewer than two units rated by two coders — #1505 D42) ·
+    #: `no_variance` (every compared rating identical) · None.
     undefined_reason: str | None = None
     alpha_ci: IrrInterval | None = None
 
@@ -498,6 +570,8 @@ class IrrSetMemberResult(BaseModel):
     percent_agreement: float | None = None
     krippendorff_alpha: float | None = None
     alpha_interpretation: str | None = None
+    #: #1505 (D43) — as `IrrCodeResult.verdict_withheld_reason`.
+    verdict_withheld_reason: str | None = None
     undefined_reason: str | None = None
 
 
@@ -550,8 +624,11 @@ class IrrSetResult(BaseModel):
     kappa_interpretation: str | None = None
     krippendorff_alpha: float | None = None
     alpha_interpretation: str | None = None
+    #: #1505 (D43) — as `IrrCodeResult.verdict_withheld_reason`.
+    verdict_withheld_reason: str | None = None
     #: `degenerate` (fewer than two values — a binary code wearing a costume) ·
-    #: `insufficient_n` · `no_variance` · None.
+    #: `insufficient_n` (fewer than two comparable units — #1505 D42) ·
+    #: `no_variance` · None.
     undefined_reason: str | None = None
     kappa_ci: IrrInterval | None = None
     alpha_ci: IrrInterval | None = None
@@ -583,16 +660,36 @@ class IrrResponse(BaseModel):
     per_code: list[IrrCodeResult] = []
     overall_alpha: float | None = None
     overall_alpha_interpretation: str | None = None
+    #: #1505 (D43) — the headline's band withheld: its units (passages, not
+    #: passage × code rows) are fewer than `verdict_min_units`.
+    overall_verdict_withheld_reason: str | None = None
     #: #43 — a CLUSTER bootstrap over units. The headline pools every code, so a
     #: unit contributes one row per code and those rows move together; treating
     #: them as independent would report an interval that is too narrow.
     overall_alpha_ci: IrrInterval | None = None
     interpretation_thresholds: dict = {}
+    #: #1505 (D43) — `reliability_basis.VERDICT_MIN_UNITS`: below this many
+    #: comparable units no row carries a band word. ``None`` on payloads from
+    #: before 1.5.9 (every row carried one).
+    verdict_min_units: int | None = None
     #: #35 — the stated basis: every α here is over CODERS
     #: (`reliability_basis.RELIABILITY_FACET_*`). ⚠️ Declared on the schema or
     #: the endpoint's `response_model` drops it silently — the half-landed-wire
     #: class `test_reliability_basis.py` pins.
     reliability_facet: str | None = None
+    #: #1333 / #1334 — what one UNIT is (`reliability_basis.UNIT_BASIS_*`): whether
+    #: a facilitator's turns count, with a group of turns counted once either way.
+    #: The client says it beside "Units" and never infers it. ``None`` = a payload
+    #: from before 1.5.9, which counted every turn of a group separately.
+    unit_basis: str | None = None
+    #: #1333 — facilitator turns in scope that the basis left out of the units
+    #: (``None`` when it keeps them). Beside each code's `facilitator_turns_coded`.
+    facilitator_turns_excluded: int | None = None
+    #: D18 — the names of the speakers whose turns were left out as a facilitator's,
+    #: sorted (``None`` when facilitator turns are units). The exclusion keys on a
+    #: flag the import sets only for an "Interviewer"/"Facilitator" label, so the
+    #: researcher must be able to see who it caught. Transcript speakers, not coders.
+    facilitator_speakers: list[str] | None = None
     #: #35 — rating agreement per scaled code. Empty when no code declares a
     #: scale, or none was applied in scope.
     magnitude_per_code: list[IrrMagnitudeResult] = []
@@ -632,7 +729,8 @@ class ReconciliationCodeInfo(BaseModel):
 
 
 class ReconciliationUnit(BaseModel):
-    """One coding unit (a segment XOR a dataset value) pivoted across coders.
+    """One coding unit (a segment, a segment GROUP or a dataset value) pivoted
+    across coders.
 
     ``by_coder`` / ``consensus`` hold EFFECTIVE code ids (D3 equivalence-resolved);
     map them to names via the response's ``codes`` legend. ``by_coder`` and
@@ -641,8 +739,19 @@ class ReconciliationUnit(BaseModel):
     TARGET-level (the coders who coded THIS unit) so it matches the materialized
     layer. A unit can have a consensus AND ``has_disagreement`` (a dissenting
     minority/blank worth reviewing)."""
-    unit_type: str  # "segment" | "dataset_value"
+    #: "segment" | "group" | "dataset_value" — `reconciliation._UNIT_TYPE`'s values,
+    #: mirrored by the client's union (held equal by `test_reconciliation_groups.py`;
+    #: a plain `str` here, so an unknown kind would fail silently in the browser).
+    unit_type: str
+    #: The segment's, the GROUP's or the value's own id — for a group, never a turn.
     unit_id: int
+    #: #1334 unit 3 (D35) — the turn the row's link and own-cell actions address:
+    #: the segment itself, a group's FIRST visible turn (remove and rate find the
+    #: coder's code on any member, D36; an apply fans out), None for a value.
+    anchor_segment_id: int | None = None
+    #: A group's visible turns in transcript order (its `text` is theirs, one per
+    #: line); empty for any other unit.
+    member_segment_ids: list[int] = []
     source_type: str  # "conversation" | "document" | "observation" | "column"
     source_id: int
     source_label: str
@@ -689,6 +798,14 @@ class ReconciliationUnit(BaseModel):
     #: coders chose different values of one set. *Needs review* and `j`/`k` mean
     #: ANY of the four; the badge says which.
     has_set_disagreement: bool = False
+    #: #1334 unit 3 (D37) — str(coder_id) → {str(code_id): [the two or more
+    #: ratings that coder gave the code on different turns of this GROUP],
+    #: ascending}. Such a coder has NO rating on the group (D22), so the code is
+    #: absent from their `ratings_by_coder` and from the median; this says why.
+    group_rating_conflicts_by_coder: dict[str, dict[str, list[float]]] = {}
+    #: …and a FIFTH review fact (groups only), never folded into the merge one:
+    #: its words would name a merged copy, a false cause. Rating again settles it.
+    has_group_rating_conflict: bool = False
 
 
 class ReconciliationResponse(BaseModel):
@@ -824,7 +941,10 @@ class MachineCodeAgreement(BaseModel):
     prevalence: float | None = None
     #: `no_variance` / `insufficient_n` from `services/undefined_stats.py` — an
     #: undefined statistic is None WITH a reason, never 0.0 (#689).
+    #: `insufficient_n` covers ONE comparable unit too (#1505, D42).
     undefined_reason: str | None = None
+    #: #1505 (D43) — as `IrrCodeResult.verdict_withheld_reason`.
+    verdict_withheld_reason: str | None = None
 
 
 class MachinePairAgreementResponse(BaseModel):
@@ -846,3 +966,8 @@ class MachineAgreementResponse(BaseModel):
     #: sentences, distinct remedies — a silence here reads as "still thinking".
     unavailable_reason: str | None = None
     pairs: list[MachinePairAgreementResponse] = []
+    #: #1333 / #1334 — the unit basis this table shares with the human one
+    #: (`IrrResponse.unit_basis`). Same vocabulary, same constant.
+    unit_basis: str | None = None
+    #: #1505 (D43) — as `IrrResponse.verdict_min_units`.
+    verdict_min_units: int | None = None

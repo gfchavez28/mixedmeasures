@@ -159,14 +159,23 @@ class MergeAdditionRecordsItem(BaseModel):
     count: int
 
 
+class MergeWithdrawnHereItem(BaseModel):
+    """#1470 (D70/D71) — a participant THIS project still holds whom the file records as
+    withdrawn, named by this project's own ID (never the file's words)."""
+    participant_id: int
+    identifier: str
+
+
 class MergeAdditions(BaseModel):
     """#1190 (D15) — what a merge would ADD that the target does not hold
     (`services/merge_additions.py`). A file-only item is the colleague's new work or
     something deleted here since the copy was made, and no plain delete is recorded until
     1.5.9, so names are given where a researcher would recognise them — each list capped
     at `MERGE_ADDITIONS_NAME_CAP`, its `*_count` the true total — and the rest counted.
-    🔴 A withdrawn person is never named: `withdrawn_participants` / `withdrawn_items`
-    count what the merge will LEAVE OUT."""
+    🔴 A withdrawn person is never named FROM THE FILE: `withdrawn_participants` /
+    `withdrawn_items` count what the merge will LEAVE OUT. `withdrawn_here` (#1470) is
+    the merge's REFUSAL predicted — non-empty means the merge will be refused until each
+    is withdrawn in this project — and names them by this project's own ID."""
     sources: list[MergeAdditionSourceItem]
     source_count: int
     participants: list[str]
@@ -180,6 +189,7 @@ class MergeAdditions(BaseModel):
     memos: int
     withdrawn_participants: int
     withdrawn_items: int
+    withdrawn_here: list[MergeWithdrawnHereItem]
 
 
 class ImportValidationResult(BaseModel):

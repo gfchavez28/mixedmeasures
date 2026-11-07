@@ -1,5 +1,6 @@
 import type { CrossTabulationResponse } from '@/lib/api'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
+import { getHslTextColor } from '@/lib/utils'
 
 interface CrossTabTableProps {
   /**
@@ -41,11 +42,15 @@ export default function CrossTabTable({ data }: CrossTabTableProps) {
     }
   }
 
+  // #1560 — a filled cell sets its text colour from the fill (#271's
+  // `getHslTextColor`). It used to set none, so the cell's words were the
+  // theme's: near-white on fills as light as 95% in dark mode (1.0:1), and the
+  // muted "(N%)" at 1.25:1 on the deepest fill in light mode.
   const cellBg = (pct: number): React.CSSProperties => {
     if (pct === 0 || maxPct === 0) return {}
     const intensity = pct / maxPct
     const l = 95 - intensity * 60
-    return { backgroundColor: `hsl(142, 50%, ${l}%)` }
+    return { backgroundColor: `hsl(142, 50%, ${l}%)`, color: getHslTextColor(142, 50, l) }
   }
 
   return (
@@ -96,7 +101,9 @@ export default function CrossTabTable({ data }: CrossTabTableProps) {
                       {count > 0 ? (
                         <span>
                           <span className="font-medium">{count}</span>
-                          <span className="text-mm-text-muted ml-0.5">({pct.toFixed(0)}%)</span>
+                          {/* #1560 — the cell's own colour, never a muted token: a muted
+                              colour on a fill cannot follow the fill's contrast. */}
+                          <span className="ml-0.5">({pct.toFixed(0)}%)</span>
                         </span>
                       ) : (
                         <span className="text-mm-text-faint">{'\u2013'}</span>

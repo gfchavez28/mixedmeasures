@@ -33,6 +33,7 @@ that one walk and this function acts on it, so the two cannot disagree.
 | a combined speaker ("Maria & Sam") | renamed from the turns' history ("Withdrawn participant 3 & Sam"), or re-pointed to a row already called that; an unreferenced one naming them is deleted | its name is their name, on no participant link |
 | `Excerpt` on any reached turn or response | DELETED | a quote is a POINTER INTO the text — after blanking its offsets address nothing, and a quote of removed words is exactly what a withdrawal is about |
 | a canvas copy of such a quote | rewritten: embed text blanked, its link cleared, in themes AND snapshots; inbox items deleted (`canvas_embed_scrub`) | an embed is a snapshot of the words, not a pointer |
+| a merge result or split child their words passed through that an Unmerge or Unsplit DELETED (#1473 b) | found from the audit trail (`withdrawal_history.deleted_lineage`, each id read as one LIFETIME — SQLite reuses ids): its entries are redacted as below, and a canvas quote across its join is rewritten as above | the row is gone, so no link reaches it; the edit's entry kept their words and the embed's words sat inside neither original turn |
 | `CodeApplication` on any reached TURN | KEPT | the researcher's analysis, not the participant's personal data — and deleting it would silently change every κ/α figure other coders' work feeds |
 | `Note` on their turns, `Memo` on their records | KEPT and REPORTED | researcher-authored prose that may QUOTE the person; a machine cannot judge that, so it is surfaced for human review rather than guessed at |
 | `Note` and `CodeApplication` on their ANSWERS | DELETED and counted (`notes_deleted`, `code_applications_deleted`, #1473) | they hang off the answer, which is deleted — a note's only parent is it — so the confirm lists them as removed, not kept |
@@ -102,8 +103,10 @@ from ..models.row_score import RowScore
 from ..models.code_application import CodeApplication
 from .canvas_embed_scrub import scrub_excerpt_embeds
 from . import tombstones as tomb
+from .identifier_match import normalize_key
 from ..models.project import Project
 from .staleness import mark_metrics_stale
+from .withdrawal_history import deleted_lineage, wording_in
 from .withdrawal_report import build_withdrawal_report, reached_turns
 
 
@@ -412,30 +415,15 @@ def _audit_entries_keyed_on(
     return found
 
 
-#: The keys of a segment's audit `details` that hold the turn's WORDS. Only these
-#: feed D8's orphan-embed match: the same entries also carry structural strings
-#: (#1319's `quote_rebase` outcomes "silent" / "edge" / "straddle" / "gone"), and a
-#: short orphan embed reading "go" is a substring of "gone".
-_EDIT_WORDING_KEYS = ("old_text", "new_text")
-
-
-#: The same for an answer's audit `details` (`value_updated`, `routers/dataset.py`):
-#: what an orphan embed of an answer is matched against, beside its current text
-#: (#1473).
+#: The keys of an answer's audit `details` (`value_updated`, `routers/dataset.py`)
+#: that hold its WORDS: what an orphan embed of an answer is matched against, beside
+#: its current text (#1473). A turn's are `withdrawal_history.SEGMENT_WORDING_KEYS`,
+#: declared there because that walk reads the same entries of a DELETED segment.
 _ANSWER_WORDING_KEYS = ("old_value", "new_value")
 
-
-def _edit_wording_in(raw: str | None, keys=_EDIT_WORDING_KEYS) -> list[str]:
-    try:
-        parsed = json.loads(raw) if raw else None
-    except (TypeError, ValueError):
-        return []
-    if not isinstance(parsed, dict):
-        return []
-    return [
-        v for k in keys
-        if isinstance(v := parsed.get(k), str) and v
-    ]
+#: One reader of an entry's wording for both (`withdrawal_history.wording_in`) —
+#: the name the edit-wording guard imports.
+_edit_wording_in = wording_in
 
 
 def _metrics_reading(db: Session, project_id: int, column_ids: list[int]) -> set[int]:
@@ -520,11 +508,21 @@ def apply_withdrawal(db: Session, participant: Participant) -> RedactionOutcome:
         words_by_conversation.setdefault(conv_of[entry.entity_id], []).extend(
             _edit_wording_in(entry.details)
         )
+    # #1473 (b) — the merge results and split children their words passed through
+    # that an Unmerge or Unsplit has since DELETED: their audit entries and what they
+    # held, read from the trail before anything here is blanked (D5).
+    lineage = deleted_lineage(db, project_id, reached)
 
     # #1190 — every uuid this removes or blanks, so no later import or link can
     # bring it back (`services/tombstones.py`). Read BEFORE each delete.
     removed = tomb.Tombstones()
     removed.add(tomb.PARTICIPANT, participant.uuid, tomb.identifier_hash(participant.identifier))
+    # #1472 (D73) — and every other name she was known by here, as its own kind, read
+    # only by the speaker-label door: a transcript labelled "Maria" re-created M01.
+    # The ID is the `participant` kind's already; a spelling equal to it adds nothing.
+    for n in her_names:
+        if normalize_key(n) != normalize_key(participant.identifier):
+            removed.add(tomb.PARTICIPANT_NAME, None, tomb.name_hash(n))
     for t in turns:
         removed.add(tomb.SEGMENT_BLANKED, t.uuid)
     speaker_uuids_before = {
@@ -738,22 +736,29 @@ def apply_withdrawal(db: Session, participant: Participant) -> RedactionOutcome:
         replacement_text=BLANKED_SEGMENT_TEXT,
         words_by_conversation=words_by_conversation,
         answer_words=answer_words,
+        deleted_wordings=lineage.wordings_by_conversation(),
     )
 
     # ── The audit trail: strip the words, keep the entries (D9) ───────────
     #
     # Keyed by ENTITY: every entry about their record, their speakers (and the
     # combined ones), the turns reached, their rows, responses and quotes — whatever
-    # its action. The endpoint writes the `withdrawn` entry AFTER this.
-    redacted = 0
-    for entry in _audit_entries_keyed_on(db, project_id, {
+    # its action. Plus, by entry id, each deleted segment's entries within its own
+    # lifetime (#1473 b — an id keyed alone would also name the next segment given
+    # it). One entry once. The endpoint writes the `withdrawn` entry AFTER this.
+    to_redact = {e.id: e for e in _audit_entries_keyed_on(db, project_id, {
         AUDIT_ENTITY_PARTICIPANT: {participant.id},
         AUDIT_ENTITY_SPEAKER: set(speaker_ids) | set(renamed_speakers) | set(orphan_speakers),
         AUDIT_ENTITY_SEGMENT: set(turn_ids),
         AUDIT_ENTITY_EXCERPT: removed_excerpt_ids,
         AUDIT_ENTITY_VALUE: set(value_ids),
         AUDIT_ENTITY_ROW: set(row_ids),
-    }):
+    })}
+    for chunk in _chunks(lineage.audit_entry_ids - set(to_redact)):
+        for e in db.query(AuditEntry).filter(AuditEntry.id.in_(chunk)):
+            to_redact[e.id] = e
+    redacted = 0
+    for entry in to_redact.values():
         if entry.action in AUDIT_KEPT_ACTIONS:
             continue
         entry.details = redacted_details(entry.details)

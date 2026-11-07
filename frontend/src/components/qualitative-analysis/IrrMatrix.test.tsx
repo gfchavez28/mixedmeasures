@@ -689,3 +689,325 @@ describe('#43 rider — a band colour is withdrawn when the interval spans its c
     expect(row.textContent).not.toContain('spans a cutoff')
   })
 })
+
+describe('#1333 / #1334 — the stated unit basis', () => {
+  beforeEach(() => irr.mockReset())
+
+  it('says what a unit is, from the payload, beside the table', async () => {
+    irr.mockResolvedValue({ ...TWO_CODER, unit_basis: 'participant_passages' })
+    renderMatrix()
+    const line = await screen.findByTestId('irr-unit-basis')
+    expect(line).toHaveTextContent(/turns are left out/)
+    expect(line).toHaveTextContent(/a group of turns counts once/)
+    const units = screen.getByRole('columnheader', { name: 'Units' })
+    expect(units.getAttribute('title')).toMatch(/turns are left out/)
+  })
+
+  it('says nothing for a payload from before the field', async () => {
+    irr.mockResolvedValue(TWO_CODER)
+    renderMatrix()
+    await screen.findByText('Empathy')
+    expect(screen.queryByTestId('irr-unit-basis')).not.toBeInTheDocument()
+  })
+})
+
+describe('#1333 / D18 — what the facilitator exclusion left out, and whose turns they were', () => {
+  beforeEach(() => irr.mockReset())
+
+  it('counts the turns left out, names their speakers and a code a coder applied to one', async () => {
+    irr.mockResolvedValue({
+      ...TWO_CODER, unit_basis: 'participant_passages', facilitator_turns_excluded: 6,
+      facilitator_speakers: ['Interviewer'],
+      per_code: [{ ...TWO_CODER.per_code[0], facilitator_turns_coded: 2 }],
+    })
+    renderMatrix()
+    const line = await screen.findByTestId('irr-unit-basis')
+    expect(line).toHaveTextContent(
+      '6 facilitator turns (Interviewer) are left out here; coded anyway: Empathy on 2.',
+    )
+    // #1067 c — ONE text node, so Chrome cannot drop the space between sentences.
+    expect(line.childNodes).toHaveLength(1)
+    // …and the row carries its own share, in its name and on the Units cell.
+    const row = screen.getByRole('row', { name: /^Empathy:/ })
+    expect(row).toHaveAccessibleName(/prevalence 0\.34; 2 facilitator turns carrying it are left out$/)
+    expect(within(row).getByText('25')).toHaveAttribute('title', '2 facilitator turns carrying it are left out')
+  })
+
+  it('says when no coder coded a facilitator turn', async () => {
+    irr.mockResolvedValue({
+      ...TWO_CODER, unit_basis: 'participant_passages', facilitator_turns_excluded: 6,
+      facilitator_speakers: ['Interviewer'],
+      per_code: [{ ...TWO_CODER.per_code[0], facilitator_turns_coded: 0 }],
+    })
+    renderMatrix()
+    expect(await screen.findByTestId('irr-unit-basis')).toHaveTextContent('and no coder coded one.')
+  })
+})
+
+describe('#1505 (D43) — below the floor a coefficient keeps its number and loses its verdict', () => {
+  // `Rare` is compared on 7 units, under the payload's floor of 18: the server
+  // keeps κ and α and sends no band, with the reason on the row. `Empathy` (25)
+  // keeps its bands — the positive control for every absence asserted below.
+  const RARE = {
+    ...TWO_CODER.per_code[0],
+    code_id: 11, code_name: 'Rare', n_units: 7, percent_agreement: 0.86, prevalence: 0.21,
+    cohens_kappa: 0.4, kappa_interpretation: null,
+    krippendorff_alpha: 0.38, alpha_interpretation: null,
+    verdict_withheld_reason: 'too_few_units',
+    undefined_reason: null, kappa_ci: null, alpha_ci: null,
+  }
+  const BELOW = {
+    ...TWO_CODER,
+    sources: [], source: null,
+    per_code: [
+      { ...TWO_CODER.per_code[0], undefined_reason: null, kappa_ci: null, alpha_ci: null, verdict_withheld_reason: null },
+      RARE,
+    ],
+    interpretation_thresholds: { kappa: {}, alpha: { tentative: 0.667, reliable: 0.8 } },
+    overall_alpha_ci: null,
+    verdict_min_units: 18,
+  }
+
+  beforeEach(() => irr.mockReset())
+
+  it('says "too few to judge" where the band word would be, in no band colour, and the row says its count against the floor', async () => {
+    irr.mockResolvedValue(BELOW)
+    renderMatrix()
+    const row = await screen.findByRole('row', { name: /^Rare:/ })
+
+    const alpha = within(row).getByText('0.38').closest('span')!
+    expect(alpha.textContent).toBe('0.38 too few to judge')
+    for (const colour of ['text-emerald-600', 'text-amber-600', 'text-rose-600']) {
+      expect(alpha.className).not.toContain(colour)
+    }
+    expect(alpha).toHaveAttribute('title', '7 of the 18 units a verdict needs')
+    expect(within(row).getByText('0.40').closest('span')!.textContent).toBe('0.40 too few to judge')
+
+    // The whole fact in the name a browse-mode reader hears — the count ONCE,
+    // at the end, because κ and α rest on the same units.
+    expect(row).toHaveAccessibleName(
+      'Rare: κ=0.40 too few to judge; α=0.38 too few to judge; 86% agreement; '
+      + 'prevalence 0.21; 7 of the 18 units a verdict needs',
+    )
+
+    // The control: a row over the floor keeps its band and says no count.
+    const kept = screen.getByRole('row', { name: /^Empathy:/ })
+    expect(kept).toHaveAccessibleName(/κ=0\.72 substantial; α=0\.70 tentative;/)
+    expect(kept).not.toHaveAccessibleName(/verdict needs/)
+    expect(within(kept).getByText('0.72').closest('span')!.className).toContain('text-emerald-600')
+  })
+
+  it('explains the floor ONCE below the tables, however many rows in however many tables it applies to', async () => {
+    irr.mockResolvedValue({
+      ...BELOW,
+      per_code: [...BELOW.per_code, { ...RARE, code_id: 12, code_name: 'Rarer', n_units: 3 }],
+      magnitude_per_code: [{
+        code_id: 20, code_name: 'District support',
+        scale: { min: -1, max: 1, step: 0.5, anchors: [] },
+        n_units: 5, n_applications: 13, n_rated: 12, mean_abs_difference: 0.2,
+        krippendorff_alpha: 0.74, alpha_interpretation: null, alpha_metric: 'interval',
+        verdict_withheld_reason: 'too_few_units', undefined_reason: null, alpha_ci: null,
+      }],
+    })
+    renderMatrix()
+    await screen.findByRole('row', { name: /^Rare:/ })
+    const notes = screen.getAllByTestId('irr-verdict-withheld-note')
+    expect(notes).toHaveLength(1)
+    expect(notes[0]).toHaveTextContent(/^Too few to judge: a coefficient over fewer than 18 units judged by two or more coders is shown without a verdict\./)
+  })
+
+  it('takes the floor from the payload, never from a constant of its own', async () => {
+    irr.mockResolvedValue({ ...BELOW, verdict_min_units: 25 })
+    renderMatrix()
+    const row = await screen.findByRole('row', { name: /^Rare:/ })
+    expect(row).toHaveAccessibleName(/7 of the 25 units a verdict needs$/)
+    expect(screen.getByTestId('irr-verdict-withheld-note')).toHaveTextContent('fewer than 25 units')
+  })
+
+  it('says nothing new when no row is below the floor — or the payload predates the fields', async () => {
+    // Over the floor: the field is present and null.
+    irr.mockResolvedValue({ ...BELOW, per_code: [BELOW.per_code[0]] })
+    renderMatrix()
+    await screen.findByRole('row', { name: /^Empathy:/ })
+    expect(screen.queryByTestId('irr-verdict-withheld-note')).not.toBeInTheDocument()
+    expect(screen.queryByText(/too few to judge/)).not.toBeInTheDocument()
+    cleanup()
+
+    // An older payload: no verdict fields at all.
+    irr.mockResolvedValue(TWO_CODER)
+    renderMatrix()
+    await screen.findByRole('row', { name: /^Empathy:/ })
+    expect(screen.queryByTestId('irr-verdict-withheld-note')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('irr-overall-verdict-withheld')).not.toBeInTheDocument()
+  })
+
+  it('withholds the HEADLINE verdict in words beside it, and the icon is not a failed band’s X', async () => {
+    irr.mockResolvedValue({
+      ...BELOW,
+      per_code: [RARE],
+      overall_alpha: 0.38, overall_alpha_interpretation: null,
+      overall_verdict_withheld_reason: 'too_few_units',
+    })
+    const { container } = renderMatrix()
+    await screen.findByRole('row', { name: /^Rare:/ })
+    expect(screen.getByText(/Overall α 0\.38/).textContent).toBe('Overall α 0.38 · too few to judge')
+    expect(screen.getByTestId('irr-overall-verdict-withheld')).toHaveTextContent(
+      'Too few to judge: the overall α rests on fewer than 18 units judged by two or more coders, so it is shown without a verdict.',
+    )
+    expect(container.querySelector('svg.lucide-circle-dashed')).not.toBeNull()
+    expect(container.querySelector('svg.lucide-circle-x')).toBeNull()
+  })
+
+  it('a headline that keeps its band keeps its icon and says nothing about a floor', async () => {
+    irr.mockResolvedValue({ ...BELOW, overall_verdict_withheld_reason: null })
+    const { container } = renderMatrix()
+    await screen.findByRole('row', { name: /^Empathy:/ })
+    expect(screen.getByText(/Overall α 0\.68/).textContent).toBe('Overall α 0.68 · tentative')
+    expect(screen.queryByTestId('irr-overall-verdict-withheld')).not.toBeInTheDocument()
+    expect(container.querySelector('svg.lucide-circle-alert')).not.toBeNull()
+  })
+
+  it('a rating row below the floor says it in its cell and its name — and alone, brings the note', async () => {
+    irr.mockResolvedValue({
+      ...BELOW,
+      // Only the RATING row is below the floor, so the note below can come from it alone.
+      per_code: [BELOW.per_code[0]],
+      magnitude_per_code: [{
+        code_id: 20, code_name: 'District support',
+        scale: { min: -1, max: 1, step: 0.5, anchors: [] },
+        n_units: 5, n_applications: 13, n_rated: 12, mean_abs_difference: 0.2,
+        krippendorff_alpha: 0.74, alpha_interpretation: null, alpha_metric: 'interval',
+        verdict_withheld_reason: 'too_few_units', undefined_reason: null, alpha_ci: null,
+      }],
+    })
+    renderMatrix()
+    const row = await screen.findByRole('row', { name: /^District support:/ })
+    expect(within(row).getByText('0.74').closest('span')!.textContent).toBe('0.74 too few to judge')
+    expect(row).toHaveAccessibleName(
+      'District support: scale −1 to 1; α=0.74 too few to judge; 12 of 13 applications rated; '
+      + 'coders differ by 0.20 on average; 5 of the 18 units a verdict needs',
+    )
+    expect(screen.getByTestId('irr-verdict-withheld-note')).toHaveTextContent(/fewer than 18 units/)
+  })
+})
+
+describe('#1505 (D42) — one comparable unit is not a measurement, and the tab says why', () => {
+  const ONE = {
+    ...TWO_CODER,
+    sources: [], source: null,
+    per_code: [{
+      ...TWO_CODER.per_code[0], n_units: 1, percent_agreement: 0, prevalence: 0.5,
+      cohens_kappa: null, kappa_interpretation: null, krippendorff_alpha: null, alpha_interpretation: null,
+      undefined_reason: 'insufficient_n', kappa_ci: null, alpha_ci: null,
+    }],
+    overall_alpha: null, overall_alpha_interpretation: null, overall_alpha_ci: null,
+    verdict_min_units: 18,
+  }
+
+  beforeEach(() => irr.mockReset())
+
+  it('explains a single unit once below the table — not with the app-wide "missing data" sentence alone', async () => {
+    irr.mockResolvedValue(ONE)
+    renderMatrix()
+    await screen.findByRole('row', { name: /^Empathy:/ })
+    expect(screen.getByTestId('irr-one-unit-note')).toHaveTextContent(
+      /^No coefficient over a single unit: where only one passage was coded by two or more coders, α is 0 whenever they differ/,
+    )
+    // No verdict words where there is no number.
+    expect(screen.queryByText(/too few to judge/)).not.toBeInTheDocument()
+  })
+
+  it('says nothing about a single unit for a rating row over NO unit, or a row over two', async () => {
+    irr.mockResolvedValue({
+      ...ONE,
+      per_code: [{ ...ONE.per_code[0], n_units: 2, undefined_reason: 'no_variance' }],
+      magnitude_per_code: [{
+        code_id: 21, code_name: 'Enthusiasm',
+        scale: { min: 0, max: 10, step: 1, anchors: [] },
+        n_units: 0, n_applications: 3, n_rated: 3, mean_abs_difference: null,
+        krippendorff_alpha: null, alpha_interpretation: null, alpha_metric: 'interval',
+        undefined_reason: 'insufficient_n', alpha_ci: null,
+      }],
+    })
+    renderMatrix()
+    await screen.findByRole('row', { name: /^Enthusiasm:/ })
+    expect(screen.queryByTestId('irr-one-unit-note')).not.toBeInTheDocument()
+  })
+
+  it('a rating row, or a set row, over one unit brings the note on its own', async () => {
+    const overTwo = [{ ...ONE.per_code[0], n_units: 2, undefined_reason: 'no_variance' }]
+    irr.mockResolvedValue({
+      ...ONE, per_code: overTwo,
+      magnitude_per_code: [{
+        code_id: 21, code_name: 'Enthusiasm',
+        scale: { min: 0, max: 10, step: 1, anchors: [] },
+        n_units: 1, n_applications: 3, n_rated: 3, mean_abs_difference: 2,
+        krippendorff_alpha: null, alpha_interpretation: null, alpha_metric: 'interval',
+        undefined_reason: 'insufficient_n', alpha_ci: null,
+      }],
+    })
+    renderMatrix()
+    await screen.findByRole('row', { name: /^Enthusiasm:/ })
+    expect(screen.getByTestId('irr-one-unit-note')).toBeInTheDocument()
+    cleanup()
+
+    irr.mockResolvedValue({
+      ...ONE, per_code: overTwo,
+      set_agreement: [{
+        set_id: 4, label: 'Stance', exhaustive: false, set_basis: 'missing', alpha_metric: 'nominal',
+        n_units: 1, n_values: 2, n_multiple_selection: 0, axis: [31, 32], value_names: { 31: 'For', 32: 'Against' },
+        percent_agreement: 0, cohens_kappa: null, kappa_interpretation: null,
+        krippendorff_alpha: null, alpha_interpretation: null, undefined_reason: 'insufficient_n',
+        kappa_ci: null, alpha_ci: null, members: [], confusion: [],
+      }],
+    })
+    renderMatrix()
+    await screen.findByRole('row', { name: /^Stance:/ })
+    expect(screen.getByTestId('irr-one-unit-note')).toBeInTheDocument()
+  })
+})
+
+describe('Row 48 — the set table (#1505: a verdict withheld, an interval with no spread)', () => {
+  // The set table had no client test at all before 1.5.9's session B.
+  const NO_SPREAD = {
+    lower: null, upper: null, level: 0.95,
+    method: 'alpha_bootstrap_units', n_resamples: 2000, unavailable_reason: 'no_spread',
+  }
+  const SET = {
+    set_id: 4, label: 'Stance', exhaustive: false, set_basis: 'missing',
+    alpha_metric: 'nominal', n_units: 10, n_values: 3, n_multiple_selection: 0,
+    axis: [31, 32, 33], value_names: { 31: 'For', 32: 'Against', 33: 'Mixed' },
+    percent_agreement: 1, cohens_kappa: 1, kappa_interpretation: null,
+    krippendorff_alpha: 1, alpha_interpretation: null,
+    verdict_withheld_reason: 'too_few_units', undefined_reason: null,
+    kappa_ci: null, alpha_ci: NO_SPREAD, members: [], confusion: [],
+  }
+  const WITH_SET = {
+    ...TWO_CODER,
+    sources: [], source: null,
+    per_code: [{ ...TWO_CODER.per_code[0], undefined_reason: null, kappa_ci: null, alpha_ci: null }],
+    overall_alpha_ci: null,
+    interpretation_thresholds: { kappa: {}, alpha: { tentative: 0.667, reliable: 0.8 } },
+    verdict_min_units: 18,
+    set_agreement: [SET],
+  }
+
+  beforeEach(() => irr.mockReset())
+
+  it('says "too few to judge", marks the refused interval, and explains both once below the tables', async () => {
+    irr.mockResolvedValue(WITH_SET)
+    renderMatrix()
+    const row = await screen.findByRole('row', { name: /^Stance:/ })
+    // κ and α each keep their number (perfect agreement over ten passages) and lose the verdict.
+    const cells = within(row).getAllByText('1.00').map(el => el.closest('span')!.textContent)
+    expect(cells).toEqual(['1.00 too few to judge', '1.00 too few to judge'])
+    // [1.00, 1.00] is not drawn: the marker, and the sentence for it.
+    expect(within(row).getByText('no interval')).toBeInTheDocument()
+    expect(screen.getByText(/^No confidence interval: on these passages it comes out with no width/)).toBeInTheDocument()
+    expect(row).toHaveAccessibleName(
+      'Stance: 3 values; α=1.00 too few to judge, no confidence interval; 100% agreement over 10 passages; '
+      + '10 of the 18 units a verdict needs',
+    )
+    expect(screen.getByTestId('irr-verdict-withheld-note')).toHaveTextContent(/fewer than 18 units/)
+  })
+})

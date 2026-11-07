@@ -99,6 +99,12 @@ const OBSERVERS = new Set(['useQuery', 'useInfiniteQuery', 'useSuspenseQuery', '
 const KEY_CONSTANTS: Record<string, string> = {
   CODERS_QUERY_KEY: 'coders', ALL_CODERS_QUERY_KEY: 'coders', SAFETY_COPIES_QUERY_KEY: 'backup-safety-copies',
 }
+/** Key FUNCTIONS the scan resolves by name, and the file each lives in — the self-check below
+ *  reads each one's own returned array, so this table cannot name a root its function does not
+ *  build (#1531: the Quote Board's two readers share one key function). */
+const KEY_FUNCTIONS: Record<string, { root: string; file: string }> = {
+  quotedExcerptsQueryKey: { root: 'excerpts-quoted', file: 'lib/quoted-excerpts-key.ts' },
+}
 
 function parse(text: string, fileName: string): ts.SourceFile {
   return ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true,
@@ -121,6 +127,9 @@ function rootOf(expr: ts.Expression, sf: ts.SourceFile): string | null {
     return null
   }
   if (ts.isAsExpression(expr) || ts.isParenthesizedExpression(expr)) return rootOf(expr.expression, sf)
+  if (ts.isCallExpression(expr) && ts.isIdentifier(expr.expression) && KEY_FUNCTIONS[expr.expression.text]) {
+    return KEY_FUNCTIONS[expr.expression.text].root
+  }
   if (ts.isIdentifier(expr)) {
     if (KEY_CONSTANTS[expr.text]) return KEY_CONSTANTS[expr.text]
     let found: string | null = null
@@ -204,6 +213,25 @@ describe('#1337 — every query-key root says whether a coding moves it', () => 
     expect(FOUND.get('coders')?.some(s => s.startsWith('hooks/useCoders.ts:'))).toBe(true)              // a constant
     expect(FOUND.get('backup-safety-copies')?.length).toBeGreaterThan(0)                                // a spread constant
     expect(FOUND.get('rating-queue')?.some(s => s.startsWith('pages/RatingSweep.tsx:'))).toBe(true)     // shorthand + local const
+    expect(FOUND.get('excerpts-quoted')?.some(s => s.startsWith('pages/QualitativeAnalysisView.tsx:'))).toBe(true) // a key function
+  })
+
+  it('self-check: each key function builds the root the table says it does', () => {
+    for (const [name, { root, file }] of Object.entries(KEY_FUNCTIONS)) {
+      const abs = FILES.find(f => srcRel(f) === file)
+      expect(abs, `${file} is in the scanned tree`).toBeDefined()
+      const sf = parse(readFileSync(abs!, 'utf8'), abs!)
+      let built: string | null = null
+      const visit = (n: ts.Node) => {
+        if (ts.isFunctionDeclaration(n) && n.name?.text === name && n.body) {
+          const ret = n.body.statements.find(ts.isReturnStatement)
+          if (ret?.expression) built = rootOf(ret.expression, sf)
+        }
+        ts.forEachChild(n, visit)
+      }
+      visit(sf)
+      expect(built, name).toBe(root)
+    }
   })
 
   it('every key resolves to a root (an unreadable key fails rather than escaping the table)', () => {
@@ -310,6 +338,38 @@ describe('#1337 — every query-key root says whether a coding moves it', () => 
       offenders.push(rel)
     }
     expect(doors).toBeGreaterThanOrEqual(9)   // four workbenches, the sweep, the scale dialog, the three above
+    expect(offenders).toEqual([])
+  })
+
+  /**
+   * #1333 / #1334 — a GROUPING or a speaker's ROLE writes no coding and no rating, so
+   * neither scan above finds it, yet it changes what a reliability UNIT is (a group
+   * counts once; a facilitator's turn is not one) and which passages reach a
+   * participant's score (the server marks the scores stale). Such a door moves the
+   * derived counts (`irr`, `machine-agreement`) AND what a rating moves (the rating α's
+   * units, the participant table's marker, the rating queue's buckets).
+   *
+   * ⚠️ Per FILE, like the rating scan: `CodingWorkbench.tsx` calls both helpers for other
+   * doors too, so this cannot see its grouping handlers lose theirs (they share ONE
+   * `invalidateAfterGrouping`, which is what keeps the four calls from drifting apart).
+   * It does pin a NEW file, and `SegmentRow`'s role change, which calls nothing else.
+   */
+  const UNIT_WRITE = /\bsegmentsApi\.(createGroup|deleteGroup|updateSpeakerRole)\(/
+
+  it('🔴 every door that changes what a unit is reaches BOTH helpers', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
+    const offenders: string[] = []
+    let doors = 0
+    for (const abs of FILES) {
+      const rel = srcRel(abs)
+      const raw = readFileSync(abs, 'utf8')
+      if (!UNIT_WRITE.test(raw) || rel.startsWith('lib/api/') || /\.test\.tsx?$/.test(rel)) continue
+      const text = stripComments(raw, abs)
+      if (!UNIT_WRITE.test(text)) continue
+      doors++
+      if (!/\binvalidateDerivedCounts\(/.test(text)) offenders.push(`${rel}: invalidateDerivedCounts`)
+      if (!RATING_REACHES.test(text)) offenders.push(`${rel}: invalidateAfterRating`)
+    }
+    expect(doors).toBeGreaterThanOrEqual(2)   // self-check: the conversation workbench and its row
     expect(offenders).toEqual([])
   })
 

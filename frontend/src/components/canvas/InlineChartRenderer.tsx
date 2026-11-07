@@ -12,7 +12,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { useQuery } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { metricsApi, codeAnalysisApi, comparisonsApi } from '@/lib/api'
-import type { MetricDefinitionResponse, AnalysisCrossTabResponse } from '@/lib/api'
+import type { MetricDefinitionResponse, AnalysisCrossTabResponse, CooccurrenceMatrixResponse } from '@/lib/api'
 import {
   detectChartType,
   shapeScalarBarFigure,
@@ -55,6 +55,7 @@ import {
   buildQualComparisonRequest,
   qualChartKind,
   qualChartHasEnoughToFetch,
+  sourceFrequencyDrawsCodedShare,
   extractComparisonParams,
   quantChartKind,
   extractCrossTabParams,
@@ -63,7 +64,9 @@ import {
 import ComparisonChartRouter from './ComparisonChartRouter'
 import {
   fingerprintComparison,
+  fingerprintCooccurrence,
   fingerprintMetrics,
+  fingerprintQualComparison,
   fingerprintSourceFrequencies,
   type FigureFingerprint,
 } from './figure-baseline'
@@ -252,13 +255,14 @@ export default function InlineChartRenderer({
     staleTime: 5 * 60 * 1000,
   })
 
-  // Co-occurrence fetches for itself, so its N arrives by callback rather than
-  // from a payload we hold. The setter is guarded because the child reports on
-  // every data change and an unconditional set would re-render in a loop.
-  const [cooccurrenceN, setCooccurrenceN] = useState<number | null>(null)
-  const handleCooccurrenceLoad = useCallback((info: { totalSegments: number; totalComments: number }) => {
-    const next = info.totalSegments + info.totalComments
-    setCooccurrenceN(prev => (prev === next ? prev : next))
+  // Co-occurrence fetches for itself, so its payload arrives by callback rather than
+  // from a query we hold. The setter is guarded because the child reports on every
+  // data change and an unconditional set would re-render in a loop. Its N is
+  // `n_units` (#1527 D83) and the payload is fingerprinted below (#1527 D90), so the
+  // callback is wired whether or not *Chart N* is shown.
+  const [cooccurrenceData, setCooccurrenceData] = useState<CooccurrenceMatrixResponse | null>(null)
+  const handleCooccurrenceLoad = useCallback((data: CooccurrenceMatrixResponse) => {
+    setCooccurrenceData(prev => (prev === data ? prev : data))
   }, [])
 
   // #808 — one place computes what this embed drew, whichever branch drew it.
@@ -272,11 +276,26 @@ export default function InlineChartRenderer({
         : null
     }
     if (isQual) {
-      return qualData ? fingerprintSourceFrequencies(qualData) : null
+      // #1323 D12 — a qualitative comparison draws from its own query; before this
+      // branch it had no fingerprint, so its figures changed with no word.
+      if (isComparison) {
+        return qualComparison && qualComparison.codes.length > 0
+          ? fingerprintQualComparison(qualComparison)
+          : null
+      }
+      // #1527 D90 — the co-occurrence matrix, from the payload its own query reported.
+      if (kind === 'cooccurrence') {
+        return cooccurrenceData ? fingerprintCooccurrence(cooccurrenceData) : null
+      }
+      // #1529 D94 — whether the embed draws a share of the coded total decides whether its
+      // universal rows (withheld there) are part of what it drew.
+      return qualData
+        ? fingerprintSourceFrequencies(qualData, { codedShare: sourceFrequencyDrawsCodedShare(qualParams) })
+        : null
     }
     const ms = computeResult?.metrics ?? []
     return ms.length > 0 ? fingerprintMetrics(ms) : null
-  }, [isComparisonMaterial, isQual, comparisonData, qualData, computeResult])
+  }, [isComparisonMaterial, isQual, isComparison, kind, comparisonData, qualComparison, cooccurrenceData, qualData, qualParams, computeResult])
 
   useEffect(() => { onFigure(figure) }, [figure, onFigure])
 
@@ -402,8 +421,9 @@ export default function InlineChartRenderer({
     if (isComparison) {
       if (comparisonLoading) return spinner
       if (comparisonError || !qualComparison) return notice('Chart unavailable')
+      // #1323: N in the result's unit, as the analysis view counts it.
       const comparisonN = Object.values(qualComparison.group_totals ?? {})
-        .reduce((sum, g) => sum + g.total_segments, 0)
+        .reduce((sum, g) => sum + g.n, 0)
       return frame(
         <QualChartRouter projectId={projectId} params={qualParams} formatting={formatting} comparison={qualComparison} />,
         qualParams.showChartN ? comparisonN : null,
@@ -433,9 +453,9 @@ export default function InlineChartRenderer({
           projectId={projectId}
           params={qualParams}
           formatting={formatting}
-          onCooccurrenceLoad={qualParams.showChartN ? handleCooccurrenceLoad : undefined}
+          onCooccurrenceLoad={handleCooccurrenceLoad}
         />,
-        qualParams.showChartN ? cooccurrenceN : null,
+        qualParams.showChartN ? (cooccurrenceData?.n_units ?? null) : null,
       )
     }
 

@@ -71,10 +71,10 @@ def hidden_target_project(db_session):
 def test_codes_list_usage_excludes_hidden_targets(hidden_target_project, db_session):
     from app.routers.codes import list_codes
 
-    resp = _run(list_codes(
+    resp = list_codes(  # def since #1463 D67
         project_id=760, include_inactive=False, category_id=None,
         layer_scope=None, user=hidden_target_project, db=db_session,
-    ))
+    )
     wait = next(c for c in resp.codes if c.name == "Wait times")
     assert wait.usage_count == 2, (
         "hidden merged-original's application leaked into usage_count (#500)"

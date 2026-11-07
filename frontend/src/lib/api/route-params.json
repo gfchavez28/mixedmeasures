@@ -1,0 +1,2440 @@
+{
+ "DELETE /api/backup/archives/{filename}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/backup/safety-copies/{filename}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/conversations/{conversation_id}/segments/group/{group_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/analysis-domains/{domain_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/canvases/{canvas_id}": {
+  "body": null,
+  "query": [
+   "permanent"
+  ]
+ },
+ "DELETE /api/projects/{project_id}/canvases/{canvas_id}/pending-items/{item_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/canvases/{canvas_id}/snapshots/{snapshot_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/canvases/{canvas_id}/theme-relationships/{rel_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/canvases/{canvas_id}/themes/{theme_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/categories/{category_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/code-equivalence-groups/{group_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/code-sets/{set_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/conversations/{conversation_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/conversations/{conversation_id}/media": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/datasets/{dataset_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/computed": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/manual": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/recodes/{definition_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/datasets/{dataset_id}/rows/{row_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/documents/{document_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/documents/{document_id}/images/{image_index}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/equivalence-groups/{group_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/excerpts/{excerpt_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/material-collections/{collection_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/material-collections/{collection_id}/materials/{material_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/memos/{memo_id}": {
+  "body": null,
+  "query": [
+   "permanent"
+  ]
+ },
+ "DELETE /api/projects/{project_id}/metrics/{metric_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/notes/{note_id}": {
+  "body": null,
+  "query": [
+   "permanent"
+  ]
+ },
+ "DELETE /api/projects/{project_id}/observations/{observation_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/observations/{observation_id}/media": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/observations/{observation_id}/segments/{segment_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/participants/{participant_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/scratchpad/{entry_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/statistical-tests/{test_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/projects/{project_id}/text-coding/code": {
+  "body": null,
+  "query": [
+   "code_id",
+   "dataset_value_id"
+  ]
+ },
+ "DELETE /api/projects/{project_id}/text-coding/notes/{note_id}": {
+  "body": null,
+  "query": []
+ },
+ "DELETE /api/segments/{segment_id}/codes/{code_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/auth/coders": {
+  "body": null,
+  "query": [
+   "include_archived"
+  ]
+ },
+ "GET /api/auth/me": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/auth/status": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/auth/users": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/backup/archives/{filename}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/backup/list": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/backup/safety-copies": {
+  "body": null,
+  "query": [
+   "limit"
+  ]
+ },
+ "GET /api/backup/safety-copies/{filename}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/backup/status": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/conversations/{conversation_id}/coding-progress": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/conversations/{conversation_id}/notes": {
+  "body": null,
+  "query": [
+   "include_archived"
+  ]
+ },
+ "GET /api/conversations/{conversation_id}/segments": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/conversations/{conversation_id}/segments/{segment_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/all-notes": {
+  "body": null,
+  "query": [
+   "include_archived",
+   "search"
+  ]
+ },
+ "GET /api/projects/{project_id}/analysis-domains": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/analysis-domains/suggest": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/canvas-images/{image_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/canvases": {
+  "body": null,
+  "query": [
+   "include_archived"
+  ]
+ },
+ "GET /api/projects/{project_id}/canvases/{canvas_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/canvases/{canvas_id}/pending-items": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/canvases/{canvas_id}/snapshots": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/canvases/{canvas_id}/snapshots/{snapshot_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/categories": {
+  "body": null,
+  "query": [
+   "include_codes",
+   "layer_scope"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/binned-kappa": {
+  "body": null,
+  "query": [
+   "bin_seconds",
+   "coder_ids",
+   "observation_id"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/coder-coverage": {
+  "body": null,
+  "query": [
+   "conversation_id",
+   "document_id",
+   "observation_id",
+   "text_column_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/codes/{code_id}/segments": {
+  "body": null,
+  "query": [
+   "chips_follow_coder_ids",
+   "coder_ids",
+   "context_size",
+   "conversation_ids",
+   "document_ids",
+   "exclude_facilitator",
+   "layer_scope",
+   "limit",
+   "observation_ids",
+   "offset",
+   "participant_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/codes/{code_id}/texts": {
+  "body": null,
+  "query": [
+   "chips_follow_coder_ids",
+   "coder_ids",
+   "layer_scope",
+   "limit",
+   "offset",
+   "participant_ids",
+   "text_column_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/consensus-status": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/code-analysis/cooccurrence": {
+  "body": null,
+  "query": [
+   "code_ids",
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "exclude_facilitator",
+   "layer_scope",
+   "level",
+   "observation_ids",
+   "participant_ids",
+   "source",
+   "text_column_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/demographic-comparison/csv": {
+  "body": null,
+  "query": [
+   "code_ids",
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "exclude_facilitator",
+   "group_by_subtype",
+   "layer_scope",
+   "observation_ids",
+   "participant_filter_label",
+   "participant_ids",
+   "text_column_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/demographic-filters": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/code-analysis/frequencies": {
+  "body": null,
+  "query": [
+   "code_ids",
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "exclude_facilitator",
+   "layer_scope",
+   "observation_ids",
+   "participant_ids",
+   "source"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/irr": {
+  "body": null,
+  "query": [
+   "coder_ids",
+   "source"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/machine-agreement": {
+  "body": null,
+  "query": [
+   "human_id"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/reconciliation": {
+  "body": null,
+  "query": [
+   "coder_ids",
+   "disagreements_only",
+   "limit",
+   "offset",
+   "source_id",
+   "source_type"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/saturation": {
+  "body": null,
+  "query": [
+   "category_level",
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "exclude_facilitator",
+   "layer_scope",
+   "observation_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/source-frequencies/csv": {
+  "body": null,
+  "query": [
+   "code_ids",
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "exclude_facilitator",
+   "group_by_subtype",
+   "layer_scope",
+   "observation_ids",
+   "participant_filter_label",
+   "participant_ids",
+   "text_column_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-analysis/text-columns": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/code-analysis/unitizing-alpha": {
+  "body": null,
+  "query": [
+   "coder_ids",
+   "observation_id"
+  ]
+ },
+ "GET /api/projects/{project_id}/code-equivalence-groups": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/code-sets": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/codebook/tree": {
+  "body": null,
+  "query": [
+   "conversation_ids",
+   "exclude_facilitator",
+   "include_inactive",
+   "layer_scope",
+   "max_segments",
+   "min_segments",
+   "text_column_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/codes": {
+  "body": null,
+  "query": [
+   "category_id",
+   "include_inactive",
+   "layer_scope"
+  ]
+ },
+ "GET /api/projects/{project_id}/codes/{code_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/conversations": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/conversations/{conversation_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/conversations/{conversation_id}/media/stream": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/data-quality/summary/csv": {
+  "body": null,
+  "query": [
+   "column_ids",
+   "include_empty_as_missing",
+   "include_na_as_missing"
+  ]
+ },
+ "GET /api/projects/{project_id}/datasets/": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/columns": {
+  "body": null,
+  "query": [
+   "dataset_id",
+   "search",
+   "ungrouped"
+  ]
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/columns": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/frequencies": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/re-key/plan": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/recodes": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/recodes/{definition_id}/dependents": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/recodes/{definition_id}/derive-plan": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/recodes/{definition_id}/re-derive/plan": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/removal-plan": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/data": {
+  "body": null,
+  "query": [
+   "limit",
+   "offset"
+  ]
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/domain-scores": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/linkable-rows": {
+  "body": null,
+  "query": [
+   "limit",
+   "offset",
+   "q"
+  ]
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/removal-plan": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/rows/{row_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/datasets/{dataset_id}/rows/{row_id}/position": {
+  "body": null,
+  "query": [
+   "limit"
+  ]
+ },
+ "GET /api/projects/{project_id}/documents": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/documents/{document_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/documents/{document_id}/images/{image_index}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/documents/{document_id}/notes": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/documents/{document_id}/original": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/equivalence-groups": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/equivalence-groups/suggest": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/excerpts": {
+  "body": null,
+  "query": [
+   "conversation_id",
+   "has_note",
+   "search",
+   "speaker"
+  ]
+ },
+ "GET /api/projects/{project_id}/excerpts/export": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/excerpts/starred": {
+  "body": null,
+  "query": [
+   "code_ids",
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "exclude_facilitator",
+   "participant_ids",
+   "source",
+   "text_column_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/excerpts/{excerpt_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/export-ceiling": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/export-codebook": {
+  "body": null,
+  "query": [
+   "format"
+  ]
+ },
+ "GET /api/projects/{project_id}/export-project": {
+  "body": null,
+  "query": [
+   "include_media"
+  ]
+ },
+ "GET /api/projects/{project_id}/export/code-cooccurrence": {
+  "body": null,
+  "query": [
+   "code_ids",
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "exclude_facilitator",
+   "layer_scope",
+   "level",
+   "observation_ids",
+   "participant_filter_label",
+   "participant_ids",
+   "source",
+   "text_column_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/export/codebook": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/export/coded-segments": {
+  "body": null,
+  "query": [
+   "code_ids",
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "exclude_facilitator",
+   "observation_ids",
+   "participant_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/export/csv": {
+  "body": null,
+  "query": [
+   "coder_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/export/datasets-excel": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/export/excel": {
+  "body": null,
+  "query": [
+   "coder_ids",
+   "include_audit",
+   "include_codebook",
+   "include_coded_data",
+   "include_cooccurrence",
+   "include_matrix",
+   "include_memos",
+   "include_notes",
+   "include_quotes",
+   "include_ratings",
+   "include_sources"
+  ]
+ },
+ "GET /api/projects/{project_id}/export/r-data": {
+  "body": null,
+  "query": [
+   "coder_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/material-collections": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/material-collections/all-materials": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/material-collections/{collection_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/memos": {
+  "body": null,
+  "query": [
+   "entity_id",
+   "entity_type",
+   "include_archived"
+  ]
+ },
+ "GET /api/projects/{project_id}/memos/{memo_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/metrics": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/metrics/analysis-columns": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/metrics/correlation-matrix/csv": {
+  "body": null,
+  "query": [
+   "bonferroni",
+   "column_ids",
+   "correlation_type",
+   "domain_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/metrics/group-comparison/csv": {
+  "body": null,
+  "query": [
+   "column_ids",
+   "domain_ids",
+   "exclude_groups",
+   "grouping_column_id",
+   "grouping_column_id_2",
+   "nonparametric",
+   "test_type"
+  ]
+ },
+ "GET /api/projects/{project_id}/metrics/row-matrix": {
+  "body": null,
+  "query": [
+   "metric_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/metrics/row-matrix/csv": {
+  "body": null,
+  "query": [
+   "metric_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/metrics/scatter-data/csv": {
+  "body": null,
+  "query": [
+   "column_ids",
+   "domain_ids",
+   "group_column_id",
+   "id_type"
+  ]
+ },
+ "GET /api/projects/{project_id}/metrics/{metric_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/metrics/{metric_id}/results": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/notes/{note_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/observations": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/observations/{observation_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/observations/{observation_id}/media/stream": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/observations/{observation_id}/notes": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/observations/{observation_id}/segments": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/participants": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/participants/{participant_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/participants/{participant_id}/withdrawal-report": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/quote-board/config": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/rating-queue": {
+  "body": null,
+  "query": [
+   "code_id",
+   "limit"
+  ]
+ },
+ "GET /api/projects/{project_id}/reverse-scored-columns": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/scratchpad": {
+  "body": null,
+  "query": [
+   "resolved",
+   "search"
+  ]
+ },
+ "GET /api/projects/{project_id}/search": {
+  "body": null,
+  "query": [
+   "full_type",
+   "limit",
+   "q",
+   "quoted",
+   "types"
+  ]
+ },
+ "GET /api/projects/{project_id}/speakers": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/statistical-tests/": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/statistical-tests/{test_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/storage": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/summary": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/text-analysis/code-density": {
+  "body": null,
+  "query": [
+   "coder_ids",
+   "column_ids",
+   "group_by_column_id",
+   "layer_scope"
+  ]
+ },
+ "GET /api/projects/{project_id}/text-analysis/export": {
+  "body": null,
+  "query": [
+   "coder_ids",
+   "column_ids",
+   "filters_json",
+   "layer_scope"
+  ]
+ },
+ "GET /api/projects/{project_id}/text-analysis/response-length-by-code": {
+  "body": null,
+  "query": [
+   "coder_ids",
+   "column_ids",
+   "layer_scope"
+  ]
+ },
+ "GET /api/projects/{project_id}/text-coding/coding-progress": {
+  "body": null,
+  "query": [
+   "coder_id",
+   "column_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/text-coding/config": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/text-coding/export": {
+  "body": null,
+  "query": [
+   "coded_only",
+   "coder_ids",
+   "column_ids"
+  ]
+ },
+ "GET /api/projects/{project_id}/text-coding/notes": {
+  "body": null,
+  "query": [
+   "column_ids",
+   "dataset_value_id"
+  ]
+ },
+ "GET /api/projects/{project_id}/text-coding/record-context/{dataset_row_id}": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/text-coding/records": {
+  "body": null,
+  "query": [
+   "column_ids",
+   "dataset_ids",
+   "hide_empty"
+  ]
+ },
+ "GET /api/projects/{project_id}/text-coding/text-columns": {
+  "body": null,
+  "query": []
+ },
+ "GET /api/projects/{project_id}/text-coding/texts": {
+  "body": null,
+  "query": [
+   "column_ids",
+   "dataset_ids",
+   "hide_empty",
+   "limit",
+   "offset",
+   "quoted_only",
+   "random_seed",
+   "record_id",
+   "search",
+   "sort_by"
+  ]
+ },
+ "PATCH /api/auth/coders/{coder_id}": {
+  "body": [
+   "display_color",
+   "machine_provenance",
+   "username"
+  ],
+  "query": []
+ },
+ "PATCH /api/auth/me": {
+  "body": [
+   "display_color",
+   "username"
+  ],
+  "query": []
+ },
+ "PATCH /api/conversations/{conversation_id}/segments/{segment_id}": {
+  "body": [
+   "excerpt_offsets",
+   "remove_excerpt_ids",
+   "speaker_id",
+   "text"
+  ],
+  "query": []
+ },
+ "PATCH /api/conversations/{conversation_id}/segments/{segment_id}/speaker": {
+  "body": [
+   "is_facilitator"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}": {
+  "body": [
+   "category_level_names",
+   "description",
+   "name",
+   "status"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/analysis-domains/{domain_id}": {
+  "body": [
+   "color",
+   "description",
+   "name"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/canvases/{canvas_id}": {
+  "body": [
+   "display_order",
+   "introduction",
+   "is_archived",
+   "name"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/canvases/{canvas_id}/theme-relationships/{rel_id}": {
+  "body": [
+   "is_bidirectional",
+   "label",
+   "line_color",
+   "line_style",
+   "relationship_type",
+   "weight"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/canvases/{canvas_id}/themes/reorder": {
+  "body": [
+   "theme_ids"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/canvases/{canvas_id}/themes/{theme_id}": {
+  "body": [
+   "color",
+   "content",
+   "description",
+   "name",
+   "parent_theme_id",
+   "section_type",
+   "viz_x",
+   "viz_y"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/categories/{category_id}": {
+  "body": [
+   "color",
+   "display_order",
+   "name",
+   "parent_id"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/code-equivalence-groups/{group_id}": {
+  "body": [
+   "canonical_code_id",
+   "description",
+   "label"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/code-sets/{set_id}": {
+  "body": [
+   "description",
+   "exhaustive",
+   "label"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/codes/{code_id}": {
+  "body": [
+   "category_id",
+   "color",
+   "description",
+   "is_active",
+   "name"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/conversations/{conversation_id}": {
+  "body": [
+   "conversation_date",
+   "media_offset_seconds",
+   "name",
+   "status",
+   "subject_id"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/conversations/{conversation_id}/media/offset": {
+  "body": [
+   "offset_seconds"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/datasets/{dataset_id}": {
+  "body": [
+   "color",
+   "description",
+   "name"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/datasets/{dataset_id}/columns/bulk-type": {
+  "body": [
+   "column_ids",
+   "column_type"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/computed": {
+  "body": [
+   "column_type",
+   "expression"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/header": {
+  "body": [
+   "column_name",
+   "column_text",
+   "show_in_participant_profile"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/manual": {
+  "body": [
+   "column_code",
+   "column_text",
+   "column_type",
+   "demographic_subtype",
+   "group_code",
+   "group_label",
+   "numeric_format",
+   "numeric_max",
+   "numeric_min",
+   "scale_labels",
+   "scale_values"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/recodes/{definition_id}": {
+  "body": [
+   "exclude_values",
+   "is_primary",
+   "mapping",
+   "name",
+   "output_type",
+   "ranges",
+   "recode_type",
+   "source_definition_id"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/subtype": {
+  "body": [
+   "demographic_subtype"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/datasets/{dataset_id}/rows/{row_id}/link-participant": {
+  "body": [
+   "participant_id"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/datasets/{dataset_id}/values/{value_id}": {
+  "body": [
+   "value_text"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/documents/{document_id}": {
+  "body": [
+   "description",
+   "name",
+   "participant_id"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/documents/{document_id}/images/{image_index}": {
+  "body": [
+   "after_sequence_order"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/documents/{document_id}/segments/{segment_id}": {
+  "body": [
+   "excerpt_offsets",
+   "remove_excerpt_ids",
+   "text"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/equivalence-groups/{group_id}": {
+  "body": [
+   "description",
+   "label"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/material-collections/{collection_id}": {
+  "body": [
+   "name"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/material-collections/{collection_id}/materials/{material_id}": {
+  "body": [
+   "config",
+   "custom_name"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/memos/{memo_id}": {
+  "body": [
+   "content",
+   "is_archived",
+   "title"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/metrics/{metric_id}": {
+  "body": [
+   "config",
+   "description",
+   "exclude_values",
+   "grouping_column_id",
+   "grouping_column_id_2",
+   "grouping_mode",
+   "input_source_id",
+   "input_source_type",
+   "metric_type",
+   "name",
+   "sequence_order"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/notes/{note_id}": {
+  "body": [
+   "content",
+   "is_archived",
+   "segment_id"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/observations/{observation_id}": {
+  "body": [
+   "description",
+   "name"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/observations/{observation_id}/segments/{segment_id}": {
+  "body": [
+   "end_time",
+   "start_time",
+   "text"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/participants/{participant_id}": {
+  "body": [
+   "confirm_withdrawn",
+   "demographics",
+   "display_name",
+   "identifier",
+   "role"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/quote-board/config": {
+  "body": [
+   "custom_orders"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/scratchpad/{entry_id}": {
+  "body": [
+   "content",
+   "resolved"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/speakers/{speaker_id}": {
+  "body": [
+   "color"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/statistical-tests/{test_id}": {
+  "body": [
+   "config"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/text-coding/code/magnitude": {
+  "body": [
+   "code_id",
+   "dataset_value_id",
+   "magnitude"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/text-coding/config": {
+  "body": [
+   "context_visibility",
+   "dataset_filter_ids",
+   "focal_column_ids",
+   "hide_empty",
+   "random_seed",
+   "starred_value_ids",
+   "treat_as_empty",
+   "view_mode"
+  ],
+  "query": []
+ },
+ "PATCH /api/projects/{project_id}/text-coding/notes/{note_id}": {
+  "body": [
+   "content"
+  ],
+  "query": []
+ },
+ "PATCH /api/segments/{segment_id}/codes/{code_id}/magnitude": {
+  "body": [
+   "magnitude"
+  ],
+  "query": []
+ },
+ "POST /api/auth/change-password": {
+  "body": [
+   "current_password",
+   "new_password"
+  ],
+  "query": []
+ },
+ "POST /api/auth/coders": {
+  "body": [
+   "coder_type",
+   "display_color",
+   "machine_provenance",
+   "username"
+  ],
+  "query": []
+ },
+ "POST /api/auth/coders/{coder_id}/archive": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/auth/coders/{coder_id}/unarchive": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/auth/login": {
+  "body": [
+   "password",
+   "username"
+  ],
+  "query": []
+ },
+ "POST /api/auth/logout": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/auth/setup": {
+  "body": [
+   "password",
+   "username"
+  ],
+  "query": []
+ },
+ "POST /api/auth/switch-coder": {
+  "body": [
+   "coder_id"
+  ],
+  "query": []
+ },
+ "POST /api/auth/users": {
+  "body": [
+   "password",
+   "username"
+  ],
+  "query": []
+ },
+ "POST /api/backup/archives/{filename}/restore": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/backup/archives/{filename}/validate": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/backup/create": {
+  "body": null,
+  "query": [
+   "include_video"
+  ]
+ },
+ "POST /api/backup/now": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/backup/restore": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/backup/validate": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/conversations/{conversation_id}/notes": {
+  "body": [
+   "content",
+   "excerpt_id",
+   "segment_id"
+  ],
+  "query": []
+ },
+ "POST /api/conversations/{conversation_id}/segments/group": {
+  "body": [
+   "segment_ids"
+  ],
+  "query": []
+ },
+ "POST /api/conversations/{conversation_id}/segments/merge": {
+  "body": [
+   "segment_ids"
+  ],
+  "query": []
+ },
+ "POST /api/conversations/{conversation_id}/segments/split": {
+  "body": [
+   "ranges"
+  ],
+  "query": []
+ },
+ "POST /api/conversations/{conversation_id}/segments/{segment_id}/edit-preview": {
+  "body": [
+   "text"
+  ],
+  "query": []
+ },
+ "POST /api/conversations/{conversation_id}/segments/{segment_id}/unmerge": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/conversations/{conversation_id}/segments/{segment_id}/unsplit": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects": {
+  "body": [
+   "description",
+   "name"
+  ],
+  "query": []
+ },
+ "POST /api/projects/import-project": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/validate-import": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/analysis-domains": {
+  "body": [
+   "color",
+   "description",
+   "equivalence_groups",
+   "members",
+   "name"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/analysis-domains/bulk": {
+  "body": [
+   "domains"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/analysis-domains/reorder": {
+  "body": [
+   "domain_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/analysis-domains/{domain_id}/create-score-metric": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/analysis-domains/{domain_id}/members": {
+  "body": [
+   "members"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/analysis-domains/{domain_id}/members/remove": {
+  "body": [
+   "members"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/analysis-domains/{domain_id}/members/reorder": {
+  "body": [
+   "member_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/canvas-images": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/canvases": {
+  "body": [
+   "introduction",
+   "name"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/canvases/{canvas_id}/duplicate": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/canvases/{canvas_id}/export-docx": {
+  "body": [
+   "chart_images",
+   "chart_tables"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/canvases/{canvas_id}/pending-items": {
+  "body": [
+   "item_type",
+   "source_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/canvases/{canvas_id}/snapshots": {
+  "body": [
+   "name"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/canvases/{canvas_id}/snapshots/{snapshot_id}/restore": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/canvases/{canvas_id}/theme-relationships": {
+  "body": [
+   "is_bidirectional",
+   "label",
+   "line_color",
+   "line_style",
+   "relationship_type",
+   "source_theme_id",
+   "target_theme_id",
+   "weight"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/canvases/{canvas_id}/themes": {
+  "body": [
+   "after_theme_id",
+   "color",
+   "description",
+   "name",
+   "parent_theme_id",
+   "section_type",
+   "viz_x",
+   "viz_y"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/canvases/{canvas_id}/themes/{theme_id}/refresh-content": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/categories": {
+  "body": [
+   "color",
+   "name",
+   "parent_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/categories/bulk-move": {
+  "body": [
+   "category_ids",
+   "target_parent_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/categories/group": {
+  "body": [
+   "category_ids",
+   "code_ids",
+   "color",
+   "name"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/categories/merge": {
+  "body": [
+   "source_ids",
+   "target_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/categories/reorder": {
+  "body": [
+   "ordered_ids"
+  ],
+  "query": [
+   "parent_id"
+  ]
+ },
+ "POST /api/projects/{project_id}/code-analysis/demographic-comparison": {
+  "body": [
+   "code_ids",
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "exclude_facilitator",
+   "group_by_subtype",
+   "layer_scope",
+   "observation_ids",
+   "participant_ids",
+   "text_column_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/code-analysis/recompute-consensus": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/code-analysis/reveal": {
+  "body": [
+   "surface"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/code-analysis/source-frequencies": {
+  "body": [
+   "aggregation",
+   "code_ids",
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "exclude_facilitator",
+   "group_by_subtype",
+   "layer_scope",
+   "observation_ids",
+   "participant_ids",
+   "text_column_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/code-applications/import": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/code-applications/import/preview": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/code-equivalence-groups": {
+  "body": [
+   "canonical_code_id",
+   "code_ids",
+   "description",
+   "label"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/code-equivalence-groups/{group_id}/codes": {
+  "body": [
+   "code_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/code-equivalence-groups/{group_id}/codes/remove": {
+  "body": [
+   "code_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/code-equivalence-groups/{group_id}/merge/{other_group_id}": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/code-sets": {
+  "body": [
+   "code_ids",
+   "description",
+   "exhaustive",
+   "label"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/code-sets/{set_id}/codes": {
+  "body": [
+   "code_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/code-sets/{set_id}/codes/remove": {
+  "body": [
+   "code_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/codebook/freeze": {
+  "body": [
+   "frozen"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/codes": {
+  "body": [
+   "category_id",
+   "color",
+   "description",
+   "name"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/codes/bulk-move": {
+  "body": [
+   "code_ids",
+   "target_category_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/codes/reorder-in-category": {
+  "body": [
+   "category_id",
+   "ordered_code_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/codes/{source_code_id}/merge/{target_code_id}": {
+  "body": null,
+  "query": [
+   "delete_source"
+  ]
+ },
+ "POST /api/projects/{project_id}/conversations/import": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/conversations/preview": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/conversations/{conversation_id}/media": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/conversations/{conversation_id}/media/from-observation/{observation_id}": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/crosswalk/move-members": {
+  "body": [
+   "column_ids",
+   "source_domain_id",
+   "target_domain_id",
+   "target_eg_id",
+   "target_eg_label",
+   "target_mode"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/data-quality/mcar-test": {
+  "body": [
+   "column_ids",
+   "include_empty_as_missing",
+   "include_na_as_missing"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/data-quality/patterns": {
+  "body": [
+   "column_ids",
+   "include_empty_as_missing",
+   "include_na_as_missing",
+   "max_patterns"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/data-quality/summary": {
+  "body": [
+   "column_ids",
+   "include_empty_as_missing",
+   "include_na_as_missing"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets": {
+  "body": [
+   "description",
+   "name"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/import": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/participants": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/participants/refresh": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/preview": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/preview-columns": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/append-import": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/append-preview": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/bulk-missing-values": {
+  "body": [
+   "column_ids",
+   "rules"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/computed": {
+  "body": [
+   "column_code",
+   "column_text",
+   "column_type",
+   "expression"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/computed/preview": {
+  "body": [
+   "column_code",
+   "column_text",
+   "column_type",
+   "expression"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/manual": {
+  "body": [
+   "column_code",
+   "column_text",
+   "column_type",
+   "demographic_subtype",
+   "group_code",
+   "group_label",
+   "numeric_format",
+   "numeric_max",
+   "numeric_min",
+   "scale_labels",
+   "scale_values"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/reorder": {
+  "body": [
+   "ordered_column_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/re-key": {
+  "body": [
+   "definition_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/recodes": {
+  "body": [
+   "exclude_values",
+   "mapping",
+   "name",
+   "output_type",
+   "ranges",
+   "recode_type",
+   "source_definition_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/recodes/{definition_id}/copy-to": {
+  "body": [
+   "target_column_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/recodes/{definition_id}/derive-column": {
+  "body": [
+   "carry_labels",
+   "column_text"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/recodes/{definition_id}/re-derive": {
+  "body": [
+   "definition_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/recodes/{definition_id}/set-primary": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/recompute": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/value-labels": {
+  "body": [
+   "column_type",
+   "labels"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/link-by-column": {
+  "body": [
+   "column_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/link-by-column/preview": {
+  "body": [
+   "column_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/rows": {
+  "body": null,
+  "query": [
+   "limit"
+  ]
+ },
+ "POST /api/projects/{project_id}/datasets/{dataset_id}/rows/bulk-link-participants": {
+  "body": [
+   "links"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/documents/import": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/documents/upload-preview": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/documents/{document_id}/notes": {
+  "body": [
+   "content",
+   "segment_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/documents/{document_id}/segments/merge": {
+  "body": [
+   "segment_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/documents/{document_id}/segments/split": {
+  "body": [
+   "ranges"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/documents/{document_id}/segments/{segment_id}/edit-preview": {
+  "body": [
+   "text"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/documents/{document_id}/segments/{segment_id}/unmerge": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/documents/{document_id}/segments/{segment_id}/unsplit": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/duplicate": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/equivalence-groups": {
+  "body": [
+   "column_ids",
+   "description",
+   "label"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/equivalence-groups/bulk": {
+  "body": [
+   "groups"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/equivalence-groups/find-matches": {
+  "body": [
+   "column_ids",
+   "min_similarity"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/equivalence-groups/reorder": {
+  "body": [
+   "group_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/equivalence-groups/swap": {
+  "body": [
+   "swaps"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/equivalence-groups/{group_id}/columns": {
+  "body": [
+   "column_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/equivalence-groups/{group_id}/columns/remove": {
+  "body": [
+   "column_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/equivalence-groups/{group_id}/merge/{other_group_id}": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/excerpts": {
+  "body": [
+   "dataset_value_id",
+   "end_offset",
+   "end_time",
+   "segment_id",
+   "start_offset",
+   "start_time"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/excerpts/bulk": {
+  "body": [
+   "items"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/import-codebook": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/material-collections": {
+  "body": [
+   "name"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/material-collections/{collection_id}/materials": {
+  "body": [
+   "auto_name",
+   "config",
+   "custom_name",
+   "material_type",
+   "source_tab"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/material-collections/{collection_id}/materials/reorder": {
+  "body": [
+   "material_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/memos": {
+  "body": [
+   "content",
+   "entity_id",
+   "entity_type",
+   "title"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/metrics": {
+  "body": [
+   "config",
+   "description",
+   "exclude_values",
+   "grouping_column_id",
+   "grouping_column_id_2",
+   "grouping_mode",
+   "input_source_id",
+   "input_source_type",
+   "metric_type",
+   "name",
+   "sequence_order"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/metrics/bulk": {
+  "body": [
+   "metrics"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/metrics/compute-all": {
+  "body": [
+   "stale_only"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/metrics/correlation-matrix": {
+  "body": [
+   "bonferroni",
+   "column_ids",
+   "correlation_type",
+   "domain_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/metrics/cross-tabulation": {
+  "body": [
+   "col_column_id",
+   "include_chi_square",
+   "row_column_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/metrics/group-comparison": {
+  "body": [
+   "column_ids",
+   "domain_ids",
+   "exclude_groups",
+   "grouping_column_id",
+   "grouping_column_id_2",
+   "include_effect_size_ci",
+   "include_qq",
+   "nonparametric",
+   "test_type"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/metrics/quick-compute": {
+  "body": [
+   "config",
+   "decompose",
+   "exclude_values",
+   "grouping_column_id",
+   "grouping_column_id_2",
+   "grouping_mode",
+   "metric_type",
+   "sources"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/metrics/reorder": {
+  "body": [
+   "metric_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/metrics/scatter-data": {
+  "body": [
+   "group_column_id",
+   "id_type",
+   "x_id",
+   "y_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/metrics/scatter-matrix": {
+  "body": [
+   "column_ids",
+   "domain_ids",
+   "group_column_id",
+   "id_type",
+   "max_variables"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/metrics/validate-config": {
+  "body": [
+   "config",
+   "input_source_id",
+   "input_source_type",
+   "metric_type"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/metrics/{metric_id}/compute": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations": {
+  "body": [
+   "description",
+   "name"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations/{observation_id}/media": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations/{observation_id}/media/from-conversation/{conversation_id}": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations/{observation_id}/notes": {
+  "body": [
+   "content",
+   "segment_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations/{observation_id}/segmentation/cut": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations/{observation_id}/segmentation/freeze": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations/{observation_id}/segmentation/preview": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations/{observation_id}/segmentation/unfreeze": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations/{observation_id}/segments": {
+  "body": [
+   "end_time",
+   "start_time",
+   "text"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations/{observation_id}/segments/merge": {
+  "body": [
+   "segment_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations/{observation_id}/segments/unsplit": {
+  "body": [
+   "segment_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations/{observation_id}/segments/{segment_id}/split": {
+  "body": [
+   "time"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/observations/{observation_id}/segments/{segment_id}/unmerge": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/participants": {
+  "body": [
+   "confirm_withdrawn",
+   "demographics",
+   "display_name",
+   "identifier",
+   "role"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/participants/{participant_id}/link-dataset-row": {
+  "body": [
+   "dataset_id",
+   "row_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/participants/{participant_id}/unlink-dataset-row": {
+  "body": [
+   "row_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/participants/{participant_id}/withdraw": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/scratchpad": {
+  "body": [
+   "content",
+   "context_hint"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/scratchpad/{entry_id}/convert": {
+  "body": [
+   "entity_id",
+   "entity_type",
+   "target_type"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/statistical-tests": {
+  "body": [
+   "config",
+   "target_id",
+   "target_type",
+   "test_type"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/statistical-tests/compute-all": {
+  "body": [
+   "stale_only"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/statistical-tests/{test_id}/compute": {
+  "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/text-analysis/cross-tabulation": {
+  "body": [
+   "code_ids",
+   "coder_ids",
+   "cross_column_id",
+   "layer_scope",
+   "text_column_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/text-analysis/filtered-frequencies": {
+  "body": [
+   "coder_ids",
+   "column_ids",
+   "filters",
+   "include_overall",
+   "layer_scope"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/text-coding/bulk-code": {
+  "body": [
+   "attribution",
+   "code_id",
+   "dataset_value_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/text-coding/bulk-remove-code": {
+  "body": [
+   "code_id",
+   "dataset_value_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/text-coding/code": {
+  "body": [
+   "attribution",
+   "code_id",
+   "dataset_value_id",
+   "magnitude"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/text-coding/code-sets/{set_id}/selection": {
+  "body": [
+   "code_id",
+   "dataset_value_id"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/text-coding/notes": {
+  "body": [
+   "content",
+   "dataset_value_id"
+  ],
+  "query": []
+ },
+ "POST /api/segments/bulk-code": {
+  "body": [
+   "action",
+   "attribution",
+   "code_id",
+   "segment_ids"
+  ],
+  "query": []
+ },
+ "POST /api/segments/{segment_id}/code-sets/{set_id}/selection": {
+  "body": [
+   "code_id"
+  ],
+  "query": []
+ },
+ "POST /api/segments/{segment_id}/codes/{code_id}": {
+  "body": [
+   "attribution",
+   "magnitude"
+  ],
+  "query": []
+ },
+ "PUT /api/projects/{project_id}/codes/{code_id}/magnitude-scale": {
+  "body": [
+   "scale"
+  ],
+  "query": []
+ },
+ "PUT /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/missing-values": {
+  "body": [
+   "rules"
+  ],
+  "query": []
+ }
+}

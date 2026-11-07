@@ -196,7 +196,7 @@ class TestProjectCounts:
         u = _user(db)
         obs = _run(create_observation(pid, ObservationCreate(name="Day 2"), user=u, db=db))
 
-        summary = _run(get_project_summary(pid, user=u, db=db))
+        summary = get_project_summary(pid, user=u, db=db)  # `def` since #1463
         assert summary.observations == 1
         assert [o.id for o in summary.recent_observations] == [obs.id]
         assert summary.recent_observations[0].name == "Day 2"
@@ -228,7 +228,7 @@ class TestProjectCounts:
                 ))
         db.flush()
 
-        summary = _run(get_project_summary(pid, user=u, db=db))
+        summary = get_project_summary(pid, user=u, db=db)
         assert summary.observations == 5
         assert summary.observation_clips == 10
         assert len(summary.recent_observations) == 4  # the window that can't answer this
@@ -253,5 +253,5 @@ class TestProjectCounts:
         gone.merged_into_id = live.id
         db.flush()
 
-        summary = _run(get_project_summary(pid, user=u, db=db))
+        summary = get_project_summary(pid, user=u, db=db)
         assert summary.observation_clips == 1

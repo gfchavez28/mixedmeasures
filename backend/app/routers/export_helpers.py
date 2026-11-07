@@ -10,7 +10,9 @@ from ..models.segment import Segment
 from ..models.code_application import CodeApplication
 from ..models.code_category import CodeCategory
 from ..services.code_analysis import build_code_cooccurrence_matrix as _build_cooccurrence
-from ..services.coding_layers import non_consensus_filter, project_scoped_segments
+from ..services.coding_layers import (
+    narrow_to_coders, non_consensus_filter, project_scoped_segments,
+)
 from ..services.xml_text import xml_safe_text
 from .helpers import visible_segment_filter
 
@@ -56,6 +58,44 @@ def csv_safe(value):
     if isinstance(value, str) and value and value[0] in _CSV_FORMULA_PREFIXES:
         return "'" + value
     return value
+
+
+def file_scope_line(
+    db: Session,
+    *,
+    coder_ids: list[int] | None = None,
+    layer_scope: str | None = None,
+    participant_ids: list[int] | None = None,
+    participant_filter_label: str | None = None,
+) -> str | None:
+    """The ONE scope line of an analysis-page file, or ``None`` when nothing narrows it (#1545).
+
+    ``Scope: consensus layer; coders: Alice; participant filter: Group: Y (12 participants).`` —
+    then, while a participant filter applies, the panel's rule (`PARTICIPANT_FILTER_RULE`): which
+    passages a filter keeps, and that clips are left out (#1536). The coder and layer parts are
+    the co-occurrence file's words since #499/#512, moved here unchanged so every file that names
+    a scope names it the same way; the participant part is
+    `services/participant_filter.py::participant_filter_scope_bit`.
+
+    ⚠️ Never on a file something reads back by its first line — the Coded Segments CSV (the coding
+    import, `exports-wire.md` §6) says its selection in its NAME instead (#1535 D115).
+    """
+    from ..models.user import User
+    from ..services.participant_filter import PARTICIPANT_FILTER_RULE, participant_filter_scope_bit
+
+    bits: list[str] = []
+    if layer_scope == "consensus":
+        bits.append("consensus layer")
+    if coder_ids:
+        names = dict(db.query(User.id, User.username).filter(User.id.in_(coder_ids)).all())
+        bits.append("coders: " + ", ".join(names.get(cid, str(cid)) for cid in coder_ids))
+    participant_bit = participant_filter_scope_bit(participant_ids, participant_filter_label)
+    if participant_bit:
+        bits.append(participant_bit)
+    if not bits:
+        return None
+    line = f"Scope: {'; '.join(bits)}."
+    return f"{line} {PARTICIPANT_FILTER_RULE}" if participant_bit else line
 
 
 def excel_set_safe(cell, value):
@@ -161,8 +201,13 @@ def segment_source_pair(segment) -> tuple[str, str]:
     return "", ""
 
 
-def build_code_source_matrix(db: Session, project_id: int):
+def build_code_source_matrix(db: Session, project_id: int,
+                             coder_ids: list[int] | None = None):
     """Returns dict: ((source_type, source_id), code_id) -> count.
+
+    ``coder_ids`` narrows the count to those coders' applications (#1530 D95:
+    the workbook a blind coder exports counts her coding, as her charts do);
+    absent = every coder, as before.
 
     Distinct coded segments per (source, code) across ALL THREE segment parents
     — conversation, document, observation clip (#629). It inner-joined
@@ -179,7 +224,7 @@ def build_code_source_matrix(db: Session, project_id: int):
     application rows (two coders on one segment are two rows), excluding the
     consensus layer (J2-B).
     """
-    results = project_scoped_segments(
+    results = narrow_to_coders(project_scoped_segments(
         db.query(
             Segment.conversation_id,
             Segment.document_id,
@@ -195,7 +240,7 @@ def build_code_source_matrix(db: Session, project_id: int):
     ).filter(
         *visible_segment_filter(),
         non_consensus_filter(),
-    ).group_by(
+    ), coder_ids).group_by(
         Segment.conversation_id,
         Segment.document_id,
         Segment.observation_id,
@@ -218,13 +263,15 @@ def build_code_source_matrix(db: Session, project_id: int):
     return matrix
 
 
-def build_code_cooccurrence_matrix(db: Session, project_id: int):
+def build_code_cooccurrence_matrix(db: Session, project_id: int,
+                                   coder_ids: list[int] | None = None):
     """Delegate to service layer. Facilitator segments are EXCLUDED (#493):
     the co-occurrence CSV endpoint and the screen heatmap both default to
     participant-only, and the Excel sheet must carry the same numbers — the
     old hard-coded ``exclude_facilitator=False`` made the same matrix differ
-    across the two export artifacts."""
+    across the two export artifacts. ``coder_ids`` is the screen's coder scope
+    (#1530 D95), passed to the same builder the heatmap reads."""
     cooccur, _total, _conv, _comment, _doc = _build_cooccurrence(
-        db, project_id, exclude_facilitator=True,
+        db, project_id, exclude_facilitator=True, coder_ids=coder_ids,
     )
     return cooccur

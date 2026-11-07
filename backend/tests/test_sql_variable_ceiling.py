@@ -72,6 +72,13 @@ def corpus(db_session):
     Dataset A holds two open-text columns (the focal texts); dataset B holds a
     categorical column in ANOTHER dataset, so `cross_tabulation` takes its
     participant-linked arm — the two `.in_()` sites the same-dataset arm skips.
+
+    Dataset A also holds `Location` (North/South), the subgroup filters' column
+    (not "Site": the participant-table test below adds a column of that name). Until
+    #1534 D107 (1.5.9) the filter tests filtered on dataset B's Region, and the
+    route counted every record of the UNFILTERED focal dataset A — that is how A's
+    whole row set reached `get_non_empty_comment_values(row_ids=…)`. An unfiltered
+    dataset is no longer compared, so the filter sits on A and selects both locations.
     """
     db = db_session
     db.add(User(id=2, username="coder-b", password_hash="x"))
@@ -88,7 +95,9 @@ def corpus(db_session):
                            column_type=ColumnType.OPEN_TEXT, sequence_order=2)
     group = DatasetColumn(dataset_id=ds_b.id, column_name="Region", column_text="Region",
                           column_type=ColumnType.NOMINAL, sequence_order=1)
-    db.add_all([text_1, text_2, group])
+    site = DatasetColumn(dataset_id=ds_a.id, column_name="Location", column_text="Location",
+                         column_type=ColumnType.NOMINAL, sequence_order=3)
+    db.add_all([text_1, text_2, group, site])
     db.flush()
 
     code = Code(project_id=PID, name="Theme", numeric_id=1)
@@ -104,6 +113,8 @@ def corpus(db_session):
         db.add_all([row_a, row_b])
         db.flush()
         db.add(DatasetValue(row_id=row_b.id, column_id=group.id,
+                            value_text="North" if i % 2 else "South"))
+        db.add(DatasetValue(row_id=row_a.id, column_id=site.id,
                             value_text="North" if i % 2 else "South"))
         for column in (text_1, text_2):
             value = DatasetValue(row_id=row_a.id, column_id=column.id,
@@ -125,7 +136,7 @@ def corpus(db_session):
 
     return {
         "db": db, "user": db.get(User, 1), "code": code.id,
-        "text_cols": [text_1.id, text_2.id], "group": group.id,
+        "text_cols": [text_1.id, text_2.id], "group": group.id, "site": site.id,
         "csv": f"{text_1.id},{text_2.id}",
     }
 
@@ -212,7 +223,9 @@ def test_list_records(corpus):
     resp = list_records(project_id=PID, column_ids=corpus["csv"], dataset_ids=None,
                         hide_empty=True, user=user, db=db)
     assert resp.total == ROWS
-    assert all(r.coded_text_count == 2 and r.participant_name for r in resp.records)
+    # Its two remaining id-set reads (linked conversations, participant names) cross the
+    # limit; the third, the coded-values read, went with `coded_text_count` (#1526 D81).
+    assert all(r.text_count == 2 and r.participant_name for r in resp.records)
 
 
 def test_export_coded_texts(corpus):
@@ -258,15 +271,15 @@ def test_cross_tabulation_through_participant_links(corpus):
 
 
 def test_filtered_frequencies_with_a_filter(corpus):
-    """A filter on dataset B leaves dataset A unfiltered, so its WHOLE row set
-    reaches `get_non_empty_comment_values(row_ids=…)`."""
+    """A filter on dataset A selecting BOTH sites matches every record, so A's
+    WHOLE row set reaches `get_non_empty_comment_values(row_ids=…)` (fixture note)."""
     db, user = corpus["db"], corpus["user"]
     _lower_limit(db)
     resp = filtered_frequencies(
         project_id=PID,
         body=FilteredFrequenciesRequest(
             column_ids=corpus["text_cols"],
-            filters=[SubgroupFilter(column_id=corpus["group"], operator="equals", values=["North"])],
+            filters=[SubgroupFilter(column_id=corpus["site"], operator="in", values=["North", "South"])],
         ),
         db=db, user=user,
     )
@@ -277,7 +290,7 @@ def test_filtered_frequencies_with_a_filter(corpus):
 def test_export_cross_analysis_with_a_filter(corpus):
     db, user = corpus["db"], corpus["user"]
     _lower_limit(db)
-    filters = json.dumps([{"column_id": corpus["group"], "operator": "equals", "values": ["South"]}])
+    filters = json.dumps([{"column_id": corpus["site"], "operator": "in", "values": ["North", "South"]}])
     resp = export_cross_analysis(project_id=PID, column_ids=corpus["csv"], filters_json=filters,
                                  coder_ids=None, layer_scope=None, db=db, user=user)
     body = _body(resp)

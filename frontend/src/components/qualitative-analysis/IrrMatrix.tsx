@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { CircleCheck, CircleAlert, CircleX } from 'lucide-react'
+import { CircleCheck, CircleAlert, CircleDashed, CircleX } from 'lucide-react'
 import {
   codeAnalysisApi, EXPORT_TIMEOUT_MS, isRequestTimeout, isServerRefusal, retryUnanswered,
   serverDetailMessage, type Code, type IrrCodeResult, type IrrMagnitudeResult,
@@ -13,7 +13,9 @@ import { describeUndefined, formatPercent, undefinedTooltip } from '@/lib/stat-f
 import { ciCaveat, ciQualifier, ciUnavailableNote } from '@/lib/ci-label'
 import { formatMagnitude } from '@/lib/magnitude'
 import {
-  alphaMetricLabel, describeAlphaMetric, describeReliabilityFacet, reliabilityFacetQualifier,
+  alphaMetricLabel, describeAlphaMetric, describeFacilitatorExclusion, describeReliabilityFacet,
+  describeUnitBasis, facilitatorRowNote, isOneUnitRow, ONE_UNIT_NOTE, overallVerdictWithheldNote,
+  reliabilityFacetQualifier, verdictShortfall, verdictWithheldNote, verdictWithheldWord,
 } from '@/lib/reliability-basis'
 import { describeSetBasis, setValueLabel } from '@/lib/code-set-basis'
 import { bandWord } from '@/lib/reliability-band'
@@ -74,10 +76,12 @@ function metricPhrase(
   label: string, value: number | null, band: string | null,
   reason?: string | null, ci?: ReliabilityInterval | null,
   thresholds?: Record<string, number>,
+  /** #1505 (D43) — the row's `verdict_withheld_reason`: the words stand where the band would. */
+  withheld?: string | null,
 ): string {
   // A browse-mode reader never hovers, so the reason must ride the name.
   if (value == null) return `${label} ${describeUndefined(reason) ?? 'not computable'}`
-  const w = bandWord(band)
+  const w = bandWord(band) || verdictWithheldWord(withheld) || ''
   // #43 — the interval belongs in the row summary too. A reader who only hears
   // "α=0.72 tentative" has the one number an interval exists to qualify.
   const interval = intervalAccessibleText(ci, ciQualifier(ci?.method))
@@ -89,12 +93,24 @@ function metricPhrase(
   return `${label}=${value.toFixed(2)}${w ? ` ${w}` : ''}${suffix}${unsettled}`
 }
 
-function rowAriaLabel(c: IrrCodeResult, showKappa: boolean, thresholds?: IrrThresholds): string {
+/** `"; 7 of the 18 units a verdict needs"` — once per row, after everything else,
+ *  since κ and α rest on the same units (#1505, D43). Empty when nothing was withheld. */
+function shortfallTail(withheld: string | null | undefined, nUnits: number, floor?: number | null): string {
+  const s = verdictShortfall(withheld, nUnits, floor)
+  return s ? `; ${s}` : ''
+}
+
+function rowAriaLabel(
+  c: IrrCodeResult, showKappa: boolean, thresholds?: IrrThresholds, floor?: number | null,
+): string {
   const parts = [`${c.code_name}:`]
-  if (showKappa) parts.push(`${metricPhrase('κ', c.cohens_kappa, c.kappa_interpretation, c.undefined_reason, c.kappa_ci, thresholds?.kappa)};`)
-  parts.push(`${metricPhrase('α', c.krippendorff_alpha, c.alpha_interpretation, c.undefined_reason, c.alpha_ci, thresholds?.alpha)};`)
+  if (showKappa) parts.push(`${metricPhrase('κ', c.cohens_kappa, c.kappa_interpretation, c.undefined_reason, c.kappa_ci, thresholds?.kappa, c.verdict_withheld_reason)};`)
+  parts.push(`${metricPhrase('α', c.krippendorff_alpha, c.alpha_interpretation, c.undefined_reason, c.alpha_ci, thresholds?.alpha, c.verdict_withheld_reason)};`)
   parts.push(`${formatPercent(c.percent_agreement)} agreement;`)
-  parts.push(`prevalence ${fmt(c.prevalence)}`)
+  // #1333 — this code's share of what the facilitator exclusion left out; the
+  // sentence above the table names only the codes with the most.
+  const fac = facilitatorRowNote(c.facilitator_turns_coded)
+  parts.push(`prevalence ${fmt(c.prevalence)}${fac ? `; ${fac}` : ''}${shortfallTail(c.verdict_withheld_reason, c.n_units, floor)}`)
   return parts.join(' ')
 }
 
@@ -112,15 +128,18 @@ function anchorsText(r: IrrMagnitudeResult): string {
  * #35 — the rating row's summary. Same shape as `rowAriaLabel`: the whole fact
  * in one string, because a browse-mode reader hears the row, not the cells.
  */
-function ratingRowAriaLabel(r: IrrMagnitudeResult, alphaThresholds?: Record<string, number>): string {
+function ratingRowAriaLabel(
+  r: IrrMagnitudeResult, alphaThresholds?: Record<string, number>, floor?: number | null,
+): string {
   const parts = [`${r.code_name}:`]
   parts.push(`scale ${scaleRangeText(r)};`)
-  parts.push(`${metricPhrase('α', r.krippendorff_alpha, r.alpha_interpretation, r.undefined_reason, r.alpha_ci, alphaThresholds)};`)
+  parts.push(`${metricPhrase('α', r.krippendorff_alpha, r.alpha_interpretation, r.undefined_reason, r.alpha_ci, alphaThresholds, r.verdict_withheld_reason)};`)
   parts.push(`${r.n_rated} of ${r.n_applications} applications rated;`)
   parts.push(
-    r.mean_abs_difference == null
+    (r.mean_abs_difference == null
       ? 'no unit rated by two coders'
-      : `coders differ by ${r.mean_abs_difference.toFixed(2)} on average`,
+      : `coders differ by ${r.mean_abs_difference.toFixed(2)} on average`)
+    + shortfallTail(r.verdict_withheld_reason, r.n_units, floor),
   )
   return parts.join(' ')
 }
@@ -132,15 +151,18 @@ function ratingRowAriaLabel(r: IrrMagnitudeResult, alphaThresholds?: Record<stri
  * ⚠️ It states the number of VALUES and the dropped contradictions, because both
  * change what the coefficient is about and neither is visible from the α alone.
  */
-function setRowAriaLabel(s: IrrSetResult, alphaThresholds?: Record<string, number>): string {
+function setRowAriaLabel(
+  s: IrrSetResult, alphaThresholds?: Record<string, number>, floor?: number | null,
+): string {
   const parts = [`${s.label}:`]
   parts.push(`${s.n_values} values;`)
-  parts.push(`${metricPhrase('α', s.krippendorff_alpha, s.alpha_interpretation, s.undefined_reason, s.alpha_ci, alphaThresholds)};`)
+  parts.push(`${metricPhrase('α', s.krippendorff_alpha, s.alpha_interpretation, s.undefined_reason, s.alpha_ci, alphaThresholds, s.verdict_withheld_reason)};`)
   parts.push(`${formatPercent(s.percent_agreement)} agreement over ${s.n_units} passages`)
   if (s.n_multiple_selection > 0) {
     parts.push(`; ${s.n_multiple_selection} left out for holding two values at once`)
   }
-  return parts.join(' ')
+  const tail = shortfallTail(s.verdict_withheld_reason, s.n_units, floor)
+  return parts.join(' ') + tail
 }
 
 /** A value + its band word, band-colored (dual-encoded).
@@ -152,7 +174,7 @@ function setRowAriaLabel(s: IrrSetResult, alphaThresholds?: Record<string, numbe
  * every other undefined statistic uses, so the vocabulary stays single-sourced
  * (an unknown reason renders the neutral fallback rather than an invention).
  */
-function BandValue({ value, band, reason, ci, thresholds }: {
+function BandValue({ value, band, reason, ci, thresholds, withheld, shortfall }: {
   value: number | null
   band: string | null
   reason?: string | null
@@ -160,6 +182,13 @@ function BandValue({ value, band, reason, ci, thresholds }: {
   ci?: ReliabilityInterval | null
   /** The cutoffs the band was read from; with `ci`, decides whether the band is settled. */
   thresholds?: Record<string, number>
+  /**
+   * #1505 (D43) — the row's `verdict_withheld_reason`. The number stays; the
+   * words "too few to judge" stand in the band word's place, uncoloured, and the
+   * row's count against the floor (`shortfall`) is the cell's hover text.
+   */
+  withheld?: string | null
+  shortfall?: string | null
 }) {
   if (value == null) {
     return (
@@ -179,16 +208,22 @@ function BandValue({ value, band, reason, ci, thresholds }: {
   // it. The word stays and the withdrawal is ALSO said in text (never colour
   // alone, in either direction — #409), so the two encodings agree.
   const unsettled = unsettledBand(ci, thresholds)
+  // No band arrives beside a withheld verdict (`irr._verdict` returns one or the
+  // other), so the two words never meet in this cell.
+  const withheldWord = verdictWithheldWord(withheld)
   return (
     <span className="inline-flex flex-col items-end">
       <span
         className={cn('font-medium', band ? (unsettled ? 'text-mm-text-muted' : BAND_CLASS[band]) : undefined)}
-        title={unsettled ? 'The interval spans an interpretation cutoff, so these data do not settle this band.' : undefined}
+        title={withheldWord
+          ? (shortfall ?? undefined)
+          : unsettled ? 'The interval spans an interpretation cutoff, so these data do not settle this band.' : undefined}
       >
         {value.toFixed(2)}
         {/* sr-only space so the cell's accessible text reads "0.00 unreliable", not
             "0.00unreliable" — ml-1 is visual-only margin and adds no spoken separator (#445). */}
         {band && <><span className="sr-only"> </span><span className="ml-1 text-xs font-normal text-mm-text-muted">{bandWord(band)}</span></>}
+        {withheldWord && <><span className="sr-only"> </span><span className="ml-1 text-xs font-normal text-mm-text-muted">{withheldWord}</span></>}
         {unsettled && <span className="sr-only"> (the interval spans a cutoff)</span>}
       </span>
       {visual ? (
@@ -334,6 +369,17 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
   // predates the field, which renders exactly as it used to.
   const facetQualifier = reliabilityFacetQualifier(data.reliability_facet)
   const facetSentence = describeReliabilityFacet(data.reliability_facet)
+  // #1333 / #1334 — what one unit IS, read off the payload; `null` for a payload
+  // from before the field, which renders as it used to.
+  const unitSentence = describeUnitBasis(data.unit_basis)
+  // #1333 / D18 — what the exclusion LEFT OUT, and whose turns they were, said
+  // rather than dropped: a code a coder applied to a facilitator turn is coding
+  // the figure does not include.
+  const exclusionSentence = describeFacilitatorExclusion({
+    excluded: data.facilitator_turns_excluded,
+    speakers: data.facilitator_speakers,
+    perCode: data.per_code,
+  })
   // #35 — one row per code that declares a rating scale. Absent on older
   // payloads and on projects with no scaled code; the section renders only
   // when there is something to say.
@@ -351,7 +397,15 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
   const coderName = (id: number) =>
     data.coders.find(c => c.id === id)?.name ?? `Coder ${id}`
   const overallBand = data.overall_alpha_interpretation
-  const SummaryIcon = overallBand === 'reliable' ? CircleCheck : overallBand === 'tentative' ? CircleAlert : CircleX
+  // #1505 (D43) — the server's floor, never restated here; and the headline's
+  // own withheld verdict, which a dashed circle marks rather than the X a failed
+  // band gets (the icon is decorative: the words carry the meaning).
+  const floor = data.verdict_min_units
+  const overallWithheld = verdictWithheldWord(data.overall_verdict_withheld_reason)
+  const overallWithheldNote = overallVerdictWithheldNote(data.overall_verdict_withheld_reason, floor)
+  const SummaryIcon = overallBand === 'reliable' ? CircleCheck
+    : overallBand === 'tentative' ? CircleAlert
+      : overallWithheld ? CircleDashed : CircleX
   // #473: α interpretation cutoffs — from the payload (single source of truth with
   // the backend), falling back to the documented Krippendorff constants if absent.
   const aTentative = data.interpretation_thresholds?.alpha?.tentative ?? ALPHA_FALLBACK.tentative
@@ -365,14 +419,31 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
   // first-appearance order. Explained ONCE below the table: the same paragraph
   // repeated on ten rows is a paragraph nobody reads, and the reasons are
   // properties of the METHOD, not of the individual row.
+  // The set table's intervals too: a set with perfect agreement is refused one
+  // (#1505, D44), and its "no interval" marker needs the sentence like any other.
   const refusalNotes = [...new Set(
     data.per_code
       .flatMap(c => [c.kappa_ci, c.alpha_ci])
       .concat(ratings.map(r => r.alpha_ci))
+      .concat(sets.flatMap(s => [s.kappa_ci, s.alpha_ci]))
       .concat(data.overall_alpha_ci ? [data.overall_alpha_ci] : [])
       .map(ci => ciUnavailableNote(ci?.unavailable_reason))
       .filter((note): note is string => note != null),
   )]
+  // #1505 (D43) — why a row shows a number with no verdict, said once below the
+  // tables for every reason any row in any of the three carries.
+  const verdictNotes = [...new Set(
+    [
+      ...data.per_code.map(c => c.verdict_withheld_reason),
+      ...ratings.map(r => r.verdict_withheld_reason),
+      ...sets.map(s => s.verdict_withheld_reason),
+    ]
+      .map(reason => verdictWithheldNote(reason, floor))
+      .filter((note): note is string => note != null),
+  )]
+  // #1505 (D42) — a row over ONE unit has no coefficient, and its cell's
+  // app-wide sentence ("…after missing data was excluded") is not the reason.
+  const oneUnit = [...data.per_code, ...ratings, ...sets].some(isOneUnitRow)
   const overallStraddle = straddleNote(
     data.overall_alpha_ci,
     data.interpretation_thresholds?.alpha,
@@ -436,6 +507,7 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
           <span>
             Overall α {fmt(data.overall_alpha, 2)}
             {overallBand && <span className="text-mm-text-muted font-normal"> · {bandWord(overallBand)}</span>}
+            {overallWithheld && <span className="text-mm-text-muted font-normal"> · {overallWithheld}</span>}
             {overallVisual && (
               <span className="text-mm-text-muted font-normal">
                 {' '}
@@ -455,6 +527,15 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
         </span>
       </div>
 
+      {/* #1333 / #1334 — the stated unit basis, said beside the number it moves:
+          the same coding gives a different α under another reading of "a unit".
+          ONE joined string, never sibling fragments (#1067 c). */}
+      {unitSentence && (
+        <p className="text-xs text-mm-text-muted max-w-prose" data-testid="irr-unit-basis">
+          {exclusionSentence ? `${unitSentence} ${exclusionSentence}` : unitSentence}
+        </p>
+      )}
+
       {/* 🔴 #43's payload. The band word treats a cutoff as settled; when the
           interval spans one, the honest reading is that these data cannot tell
           those bands apart — which is the whole reason to report an interval on
@@ -463,6 +544,14 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
       {overallStraddle && (
         <p className="text-xs text-amber-700 dark:text-amber-400 max-w-prose">
           {overallStraddle}
+        </p>
+      )}
+
+      {/* #1505 (D43) — the headline carries no verdict; said beside it, as
+          visible content, because it qualifies the largest number on the tab. */}
+      {overallWithheldNote && (
+        <p className="text-xs text-mm-text-muted max-w-prose" data-testid="irr-overall-verdict-withheld">
+          {overallWithheldNote}
         </p>
       )}
 
@@ -485,7 +574,7 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
           <thead>
             <tr className="border-b text-left text-mm-text-muted">
               <th scope="col" className="px-3 py-2 font-medium">Code</th>
-              <th scope="col" className="px-3 py-2 font-medium text-right" title="Units with ≥2 coders present">Units</th>
+              <th scope="col" className="px-3 py-2 font-medium text-right" title={unitSentence ? `Units with ≥2 coders present. ${unitSentence}` : 'Units with ≥2 coders present'}>Units</th>
               <th scope="col" className="px-3 py-2 font-medium text-right">% agreement</th>
               <th scope="col" className="px-3 py-2 font-medium text-right" title="Base rate: fraction of judged cells coded with this code. Extreme prevalence (near 0 or 1) deflates κ.">Prevalence</th>
               {showKappa && <th scope="col" className="px-3 py-2 font-medium text-right">Cohen's κ</th>}
@@ -496,20 +585,20 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
             {data.per_code.map(c => {
               const color = colorMap.get(c.code_id)
               return (
-                <tr key={c.code_id} className="border-b last:border-b-0" aria-label={rowAriaLabel(c, showKappa, data.interpretation_thresholds)}>
+                <tr key={c.code_id} className="border-b last:border-b-0" aria-label={rowAriaLabel(c, showKappa, data.interpretation_thresholds, floor)}>
                   <th scope="row" className="px-3 py-2 font-normal text-left text-mm-text">
                     <span className="inline-flex items-center gap-1.5">
                       {color && <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} aria-hidden="true" />}
                       {c.code_name}
                     </span>
                   </th>
-                  <td className="px-3 py-2 text-right tabular-nums text-mm-text-muted">{c.n_units}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-mm-text-muted" title={facilitatorRowNote(c.facilitator_turns_coded) ?? undefined}>{c.n_units}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{formatPercent(c.percent_agreement)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-mm-text-muted">{fmt(c.prevalence)}</td>
                   {showKappa && (
-                    <td className="px-3 py-2 text-right tabular-nums"><BandValue value={c.cohens_kappa} band={c.kappa_interpretation} reason={c.undefined_reason} ci={c.kappa_ci} thresholds={data.interpretation_thresholds?.kappa} /></td>
+                    <td className="px-3 py-2 text-right tabular-nums"><BandValue value={c.cohens_kappa} band={c.kappa_interpretation} reason={c.undefined_reason} ci={c.kappa_ci} thresholds={data.interpretation_thresholds?.kappa} withheld={c.verdict_withheld_reason} shortfall={verdictShortfall(c.verdict_withheld_reason, c.n_units, floor)} /></td>
                   )}
-                  <td className="px-3 py-2 text-right tabular-nums"><BandValue value={c.krippendorff_alpha} band={c.alpha_interpretation} reason={c.undefined_reason} ci={c.alpha_ci} thresholds={data.interpretation_thresholds?.alpha} /></td>
+                  <td className="px-3 py-2 text-right tabular-nums"><BandValue value={c.krippendorff_alpha} band={c.alpha_interpretation} reason={c.undefined_reason} ci={c.alpha_ci} thresholds={data.interpretation_thresholds?.alpha} withheld={c.verdict_withheld_reason} shortfall={verdictShortfall(c.verdict_withheld_reason, c.n_units, floor)} /></td>
                 </tr>
               )
             })}
@@ -564,7 +653,7 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
                   const color = colorMap.get(r.code_id)
                   const anchors = anchorsText(r)
                   return (
-                    <tr key={r.code_id} className="border-b last:border-b-0" aria-label={ratingRowAriaLabel(r, data.interpretation_thresholds?.alpha)}>
+                    <tr key={r.code_id} className="border-b last:border-b-0" aria-label={ratingRowAriaLabel(r, data.interpretation_thresholds?.alpha, floor)}>
                       <th scope="row" className="px-3 py-2 font-normal text-left text-mm-text">
                         <span className="inline-flex items-center gap-1.5">
                           {color && <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} aria-hidden="true" />}
@@ -582,7 +671,7 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
                         <span className="sr-only">{r.n_rated} of {r.n_applications}</span>
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums">{fmt(r.mean_abs_difference)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums"><BandValue value={r.krippendorff_alpha} band={r.alpha_interpretation} reason={r.undefined_reason} ci={r.alpha_ci} thresholds={data.interpretation_thresholds?.alpha} /></td>
+                      <td className="px-3 py-2 text-right tabular-nums"><BandValue value={r.krippendorff_alpha} band={r.alpha_interpretation} reason={r.undefined_reason} ci={r.alpha_ci} thresholds={data.interpretation_thresholds?.alpha} withheld={r.verdict_withheld_reason} shortfall={verdictShortfall(r.verdict_withheld_reason, r.n_units, floor)} /></td>
                     </tr>
                   )
                 })}
@@ -622,18 +711,18 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
               </thead>
               <tbody>
                 {sets.map(s => (
-                  <tr key={s.set_id} className="border-b last:border-b-0" aria-label={setRowAriaLabel(s, data.interpretation_thresholds?.alpha)}>
+                  <tr key={s.set_id} className="border-b last:border-b-0" aria-label={setRowAriaLabel(s, data.interpretation_thresholds?.alpha, floor)}>
                     <th scope="row" className="px-3 py-2 font-normal text-left text-mm-text">{s.label}</th>
                     <td className="px-3 py-2 text-right tabular-nums text-mm-text-muted">{s.n_values}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-mm-text-muted">{s.n_units}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{formatPercent(s.percent_agreement)}</td>
                     {showKappa && (
                       <td className="px-3 py-2 text-right tabular-nums">
-                        <BandValue value={s.cohens_kappa} band={s.kappa_interpretation} reason={s.undefined_reason} ci={s.kappa_ci} thresholds={data.interpretation_thresholds?.kappa} />
+                        <BandValue value={s.cohens_kappa} band={s.kappa_interpretation} reason={s.undefined_reason} ci={s.kappa_ci} thresholds={data.interpretation_thresholds?.kappa} withheld={s.verdict_withheld_reason} shortfall={verdictShortfall(s.verdict_withheld_reason, s.n_units, floor)} />
                       </td>
                     )}
                     <td className="px-3 py-2 text-right tabular-nums">
-                      <BandValue value={s.krippendorff_alpha} band={s.alpha_interpretation} reason={s.undefined_reason} ci={s.alpha_ci} thresholds={data.interpretation_thresholds?.alpha} />
+                      <BandValue value={s.krippendorff_alpha} band={s.alpha_interpretation} reason={s.undefined_reason} ci={s.alpha_ci} thresholds={data.interpretation_thresholds?.alpha} withheld={s.verdict_withheld_reason} shortfall={verdictShortfall(s.verdict_withheld_reason, s.n_units, floor)} />
                     </td>
                   </tr>
                 ))}
@@ -747,6 +836,8 @@ export default function IrrMatrix({ projectId, codes }: IrrMatrixProps) {
         </p>
         {showKappa && <p>κ: {ciCaveat('kappa_analytic_se')}</p>}
         {refusalNotes.map(note => <p key={note}>{note}</p>)}
+        {oneUnit && <p data-testid="irr-one-unit-note">{ONE_UNIT_NOTE}</p>}
+        {verdictNotes.map(note => <p key={note} data-testid="irr-verdict-withheld-note">{note}</p>)}
       </div>
     </div>
   )

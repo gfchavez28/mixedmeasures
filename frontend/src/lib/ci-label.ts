@@ -10,6 +10,10 @@
  * - `wilson`      — a Wilson score interval for a proportion. Also over respondents.
  * - `item_level_t` — a t-interval over **ITEMS**, and this one is different in kind.
  *
+ * (A variable group's POOLED mean, proportion and frequency state their own three —
+ * `record_cluster_t`, `wilson_effective_n`, `wilson_per_category_effective_n`,
+ * #1330 — because each record contributes several answers to the pool.)
+ *
  * A domain aggregate ("scale score") averages *k* column-level scalars and treats
  * those *k* numbers as its sample. So its interval is driven by how much the ITEMS
  * in the scale disagree with each other — it widens and narrows with the number of
@@ -50,9 +54,9 @@ export function isItemLevelCi(method?: string | null): boolean {
 
 /**
  * Every `ci_method` the backend can send. Mirrors the `CI_METHOD_*` constants in
- * `services/metrics.py`, `services/reliability_intervals.py` and
- * `services/magnitude_rollup.py` — three modules, one wire field, pinned by
- * `test_ci_method_contract.py`.
+ * `services/metrics.py`, `services/reliability_intervals.py`,
+ * `services/magnitude_rollup.py` and `services/comparison_basis.py` — four modules,
+ * one wire field, pinned by `test_ci_method_contract.py`.
  *
  * ⚠️ **This union is the point.** The previous shape was a ternary on
  * `isItemLevelCi`, so any method it did not know fell silently through to a bare
@@ -70,6 +74,10 @@ export type CiMethod =
   | 'kappa_analytic_se'
   | 'alpha_bootstrap_units'
   | 'passage_level_t'
+  | 'newcombe_hybrid_score'
+  | 'record_cluster_t'
+  | 'wilson_effective_n'
+  | 'wilson_per_category_effective_n'
 
 interface CiDescriptor {
   /** Qualifier appended after the level, e.g. "across items". Empty for the
@@ -107,6 +115,31 @@ const CI_DESCRIPTORS = {
     caveat:
       'Computed across the rated passages of ONE participant, not across people — it says how consistently this person was rated across what they said, and it narrows with the number of their rated passages rather than with the sample size. It is not the interval for the average score across participants; that one comes from the scores themselves.',
   },
+  // #1323, D3 — the code-by-group comparison's Δ. The p-values beside it are adjusted
+  // across the codes; this interval is NOT, and the label must say so.
+  newcombe_hybrid_score: {
+    qualifier: '(unadjusted)',
+    caveat:
+      'Newcombe’s interval for the difference between the two groups’ shares of participants who used the code. It is not adjusted for the number of codes compared, so across many codes some intervals will leave out zero by chance alone.',
+  },
+  // #1330 (1.5.9, D53/D54) — a variable GROUP's pooled answers come several to a
+  // record. These intervals count each record once; the ones they replaced treated
+  // every answer as a different person and were too narrow by about √items.
+  record_cluster_t: {
+    qualifier: 'over records',
+    caveat:
+      'The mean pools every answer to this group’s variables, but the interval counts each record once: one person’s several answers are not independent, so they do not narrow it as separate people would.',
+  },
+  wilson_effective_n: {
+    qualifier: 'over records',
+    caveat:
+      'The proportion pools every answer to this group’s variables, but the interval counts each record once — a Wilson interval on an effective sample size, reduced to allow for one person’s answers being alike.',
+  },
+  wilson_per_category_effective_n: {
+    qualifier: 'per category, over records',
+    caveat:
+      'Each interval covers ONE response category against all the others, and they are not a simultaneous set. The answers are pooled across this group’s variables, and each interval counts each record once — a Wilson interval on an effective sample size — so one person’s several answers do not narrow it.',
+  },
 } satisfies Record<CiMethod, CiDescriptor>
 
 /**
@@ -128,6 +161,7 @@ export type CiUnavailableReason =
   | 'insufficient_units'
   | 'no_variance_in_resamples'
   | 'insufficient_passages'
+  | 'no_spread'
 
 const CI_UNAVAILABLE_NOTES = {
   single_continuum:
@@ -140,6 +174,10 @@ const CI_UNAVAILABLE_NOTES = {
     'No confidence interval: this code is rare enough here that most resamples contain no instance of it, leaving nothing to agree or disagree about. Coding more of the same material will not fix it — the interval needs more instances of this code, not more units.',
   insufficient_passages:
     'No confidence interval: this person has fewer than three rated passages, so the range cannot be estimated. Rating more of their passages is what would produce one.',
+  // #1505 (D44) — perfect agreement, one repeated pattern, or a coder who never
+  // varies: the method has no spread to show, which is not certainty.
+  no_spread:
+    'No confidence interval: on these passages it comes out with no width (every resample gives the same value, or the estimated variance is zero), and a range of zero would claim a certainty these data cannot give. More passages coded by two or more people, with some variety among them, is what would produce one.',
 } satisfies Record<CiUnavailableReason, string>
 
 /**
@@ -160,9 +198,10 @@ export function ciUnavailableNote(reason?: string | null): string | undefined {
  * every payload saying `0.95` the whole time. Reading it here costs nothing now
  * and is one of the two ends that must move together when the level becomes
  * configurable — the R export being the other. Absent or malformed falls back to
- * 95, which is what every stored row actually holds.
+ * 95, which is what every stored row actually holds. Exported for the comparison's
+ * spoken interval (`lib/comparison-basis.ts`), so the level is read in one place.
  */
-function levelPercent(level?: number | null): string {
+export function ciLevelPercent(level?: number | null): string {
   if (typeof level !== 'number' || !Number.isFinite(level) || level <= 0 || level >= 1) {
     return '95'
   }
@@ -183,7 +222,7 @@ function descriptorFor(method?: string | null): CiDescriptor | undefined {
  * respondent-level one would be a new false statement.
  */
 export function ciLabel(method?: string | null, level?: number | null): string {
-  const base = `${levelPercent(level)}% CI`
+  const base = `${ciLevelPercent(level)}% CI`
   const qualifier = descriptorFor(method)?.qualifier
   return qualifier ? `${base} ${qualifier}` : base
 }

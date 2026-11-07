@@ -2,7 +2,10 @@
 
 The role ``staleness.py`` plays for metrics, this plays for the derived consensus
 layer. EVERY code-application mutation — single apply/remove included — calls
-``mark_consensus_stale`` to record markers, and the background lifespan task
+``mark_consensus_stale`` to record markers (and, since #1334 unit 3, so does every
+change to a segment GROUP's membership — `routers/segments.py`'s group and
+ungroup — because a group's consensus is one decision over its members), and the
+background lifespan task
 drains them off the request path through ``drain_stale_consensus``. Consensus is
 NEVER recomputed on a read (the SQLite write-on-read lock hazard ADJ-3 rejected).
 
@@ -21,7 +24,7 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from sqlalchemy import exists, func, insert, literal, select, union
+from sqlalchemy import exists, func, insert, literal, or_, select, union
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, aliased
 
@@ -149,6 +152,13 @@ def mark_consensus_stale_for_coder(
     every row of it. The "someone else" test counts any other row, a consensus
     row included, because that row is exactly what may now be wrong.
 
+    🔴 **…on the passage OR on another turn of its segment GROUP (#1334 unit 3,
+    D34).** A group is decided once over its members, so this coder's coding on
+    one turn and a colleague's on another are two votes on one unit — and with
+    only the same-turn test, archiving that coder left the group's consensus
+    standing on a decision they no longer vote in. Marking the coder's own turn
+    is enough: its recompute recomputes the whole group.
+
     ⚠️ **Not gated on `consensus_enabled`, deliberately.** That gate is right
     where one voter makes consensus meaningless; an archive can CREATE that
     state, and the recompute is what deletes the rows it makes wrong.
@@ -164,11 +174,21 @@ def mark_consensus_stale_for_coder(
     """
     markers = ConsensusStaleTarget.__table__
     other = aliased(CodeApplication)
+    other_turn = aliased(Segment)
     inserted = 0
     for target_col, other_col, marker_col in (
         (CodeApplication.segment_id, other.segment_id, markers.c.segment_id),
         (CodeApplication.dataset_value_id, other.dataset_value_id, markers.c.dataset_value_id),
     ):
+        someone_else = exists().where(other_col == target_col, other.user_id != coder_id)
+        if target_col is CodeApplication.segment_id:
+            # #1334 unit 3 (D34) — or on ANOTHER turn of this turn's group.
+            someone_else = or_(someone_else, exists().where(
+                other.segment_id == other_turn.id,
+                other_turn.group_id == Segment.group_id,
+                Segment.group_id.isnot(None),
+                other.user_id != coder_id,
+            ))
         rows = (
             select(func.min(Code.project_id), target_col)
             .join(Code, CodeApplication.code_id == Code.id)
@@ -179,7 +199,7 @@ def mark_consensus_stale_for_coder(
                 non_consensus_filter(),
                 Code.is_universal == False,  # noqa: E712
                 reliability_coder_clause(),
-                exists().where(other_col == target_col, other.user_id != coder_id),
+                someone_else,
                 ~exists().where(marker_col == target_col),
             )
         )
@@ -218,14 +238,24 @@ def sweep_stale_consensus(
     marker_ids: Iterable[int] | None = None,
     skip_ids: Iterable[int] | None = None,
 ) -> int:
-    """Drain consensus staleness markers, recomputing each target. Returns the
-    number of targets recomputed.
+    """Drain consensus staleness markers, bringing each target current. Returns
+    the number of markers drained.
 
     Optionally scope to one project and/or cap the batch (the background sweep
     caps per tick), or name the markers (``marker_ids``) or leave some out
     (``skip_ids``) — the two `drain_stale_consensus` needs to isolate a failure.
     Each marker is recomputed then deleted; a marker whose target was
     hard-deleted is gone already (FK CASCADE), so it is never seen.
+
+    🔴 **A segment GROUP is recomputed once per batch (#1334 unit 3, D33).**
+    `recompute_consensus_for_target` recomputes a grouped turn's whole group,
+    and an apply on a group marks every member, so the batch would otherwise
+    recompute one group once per member. A member whose group this batch has
+    already done is deleted without a second recompute. ⚠️ Its marker is
+    deleted through the ORM like every other, never by a bulk delete inside the
+    recompute: the batch holds these marker objects, and a row deleted behind
+    the session's back fails the batch's own delete at flush. Across batches the
+    repeat is merely idempotent.
 
     ⚠️ Flush-only and ALL-OR-NOTHING: one target that raises fails the whole
     batch. A caller that commits per batch should go through
@@ -237,13 +267,24 @@ def sweep_stale_consensus(
         query = query.limit(limit)
 
     markers = query.all()
+    seg_ids = [m.segment_id for m in markers if m.segment_id is not None]
+    group_of = dict(
+        db.query(Segment.id, Segment.group_id)
+        .filter(in_id_set(Segment.id, seg_ids), Segment.group_id.isnot(None))
+        .all()
+    ) if seg_ids else {}
+    groups_done: set[int] = set()
     for marker in markers:
-        recompute_consensus_for_target(
-            db,
-            marker.project_id,
-            segment_id=marker.segment_id,
-            dataset_value_id=marker.dataset_value_id,
-        )
+        group_id = group_of.get(marker.segment_id)
+        if group_id is None or group_id not in groups_done:
+            recompute_consensus_for_target(
+                db,
+                marker.project_id,
+                segment_id=marker.segment_id,
+                dataset_value_id=marker.dataset_value_id,
+            )
+            if group_id is not None:
+                groups_done.add(group_id)
         db.delete(marker)
     if markers:
         db.flush()

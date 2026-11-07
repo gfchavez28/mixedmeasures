@@ -21,6 +21,7 @@ every value passes `finite_or_none` and a refusal names its own reason.
 
 from __future__ import annotations
 
+from .testable_groups import MIN_VALUES_PER_GROUP_PARAMETRIC, split_testable
 from .undefined_stats import (
     DEGENERATE,
     EMPTY_GROUP,
@@ -76,24 +77,31 @@ def variance_homogeneity_check(
 ) -> dict:
     """Levene's test across groups, centred on the median (Brown–Forsythe).
 
-    ⚠️ **Two groups can be in the comparison and not in the test, and until
-    #525b neither was reported.** An EMPTY group is dropped outright, and a
-    SINGLETON contributes ``|x − median| = 0`` by construction — a structural
-    zero that reads as perfect homogeneity rather than as an absence of
-    evidence. Measured: ``levene([1.0], [1,2,3,4], center="median")`` returns
-    ``stat=2.4, p=0.219``, a confident-looking number resting on one such point.
+    ⚠️ **Two kinds of group can be in the comparison and not in the test, and
+    both are NAMED** — exactly as `AssumptionNote` names the groups Shapiro-Wilk
+    could not test, because a count that quietly shrinks reads as a complete
+    one. An EMPTY group (`excluded_groups`) has nothing to test. A group with a
+    SINGLE value (`singleton_groups`) is left out too, since #1329 (1.5.9, D51):
+    it contributed ``|x − median| = 0`` by construction — a structural zero that
+    reads as perfect homogeneity rather than as an absence of evidence
+    (measured: ``levene([1.0], [1,2,3,4], center="median")`` returned a
+    confident ``p = 0.219`` resting on that point).
 
-    Neither is a reason to refuse — dropping a group would test a DIFFERENT
-    model from the one the panel ran — so both are NAMED instead, exactly as
-    `AssumptionNote` already names the groups Shapiro-Wilk could not test. A
-    count that quietly shrinks reads as a complete one.
+    🔴 **Why it is left out now, when #525b kept it.** The reason given then was
+    *"dropping a group would test a DIFFERENT model from the one the panel
+    ran"* — and since D51 the panel's model leaves a one-value group out of the
+    F, Tukey and the Welch t alike (`testable_groups.split_testable`, which this
+    function asks too). So the same reason now points the other way: keeping it
+    would test a different model from the one the panel ran.
 
     ``names`` is optional so the function stays usable as pure statistics; the
     production caller passes it, and `test_assumption_checks.py` pins that.
     """
-    labelled = list(zip(names, groups)) if names is not None else [(None, g) for g in groups]
-    excluded = [n for n, g in labelled if n is not None and len(g) == 0]
-    singletons = [n for n, g in labelled if n is not None and len(g) == 1]
+    keys = list(names) if names is not None else [f"#{i}" for i in range(len(groups))]
+    by_key = dict(zip(keys, groups))
+    testable_keys, singleton_keys = split_testable(by_key, keys, MIN_VALUES_PER_GROUP_PARAMETRIC)
+    excluded = [k for k in keys if len(by_key[k]) == 0] if names is not None else []
+    singletons = singleton_keys if names is not None else []
 
     # ONE place the two group lists are attached, so a return added later cannot
     # forget them — the arity lesson (#515 → #676) applied at function scale.
@@ -102,11 +110,11 @@ def variance_homogeneity_check(
         d["singleton_groups"] = singletons
         return d
 
-    non_empty = [g for g in groups if len(g) > 0]
-    if len(non_empty) < 2:
+    tested = [by_key[k] for k in testable_keys]
+    if len(tested) < 2:
         # Measured: scipy RAISES here rather than returning nan.
         return _out(_refused(VARIANCE_TEST_LEVENE, INSUFFICIENT_N, center=LEVENE_CENTER_MEDIAN))
-    if all(len(set(g)) == 1 for g in non_empty):
+    if all(len(set(g)) == 1 for g in tested):
         # Measured: nan. Every group constant means there is no within-group
         # spread to compare.
         return _out(_refused(VARIANCE_TEST_LEVENE, NO_VARIANCE, center=LEVENE_CENTER_MEDIAN))
@@ -114,7 +122,7 @@ def variance_homogeneity_check(
     from scipy.stats import levene
 
     try:
-        res = levene(*non_empty, center=LEVENE_CENTER_MEDIAN)
+        res = levene(*tested, center=LEVENE_CENTER_MEDIAN)
     except Exception:
         return _out(_refused(VARIANCE_TEST_LEVENE, DEGENERATE, center=LEVENE_CENTER_MEDIAN))
     stat = finite_or_none(float(res.statistic), 4)

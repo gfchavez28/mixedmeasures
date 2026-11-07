@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo } from 'react'
+import { useLocation } from 'react-router'
 import { useComposableSearchParams } from './useComposableSearchParams'
 import { parseIntParam } from '@/lib/utils'
 import type {
@@ -21,8 +22,9 @@ import type {
 } from '@/lib/qual-analysis-types'
 import { orientationFromToken } from '@/lib/qual-analysis-types'
 import { DEFAULT_FORMATTING, type ChartFormatting } from '@/lib/chart-data'
-import type { MaterialResponse } from '@/lib/api'
+import type { DemographicFilter, MaterialResponse } from '@/lib/api'
 import { asLayerScope, type LayerScope } from '@/lib/coding-layers'
+import { choiceProducedList, resolveFilterValues, type FilterChoice, type FilterValues } from '@/lib/participant-filter'
 
 function getDefaultForKey(key: string): string {
   switch (key) {
@@ -78,7 +80,15 @@ export interface QualitativeAnalysisState {
 
   // Filters
   excludeFacilitator: boolean
+  /** The APPLIED participant filter — the URL's `pids`, what every request sends. */
   participantIds: number[]
+  /**
+   * #1537/#1538 (D122/D123, 1.6.0) — the *Filters* panel's chosen values, held here so a
+   * collapsed panel keeps them, with the list they produced. Null unless the panel's last act
+   * wrote the applied list: every other writer clears it. Read it through
+   * `lib/participant-filter.ts::participantFilterState`, never directly.
+   */
+  filterChoice: FilterChoice | null
   /** Track J · J1 item 4 — coder (user) IDs to INCLUDE; empty = all coders. */
   coderIds: number[]
   /** Track J · J2-5 — analysis coding layer: 'human' (default) or the derived 'consensus' layer. */
@@ -156,7 +166,16 @@ export interface QualitativeAnalysisActions {
   setSelectedObservationIds: (ids: Set<number>) => void
   setAllSourceIds: (convIds: Set<number>, ccolIds: Set<number>, docIds: Set<number>, obsIds: Set<number>) => void
   setExcludeFacilitator: (exclude: boolean) => void
-  setParticipantIds: (ids: number[]) => void
+  /**
+   * #1537/#1538 (D123) — the panel's write: a researcher chose or removed a value (or the
+   * options those values read changed). Writes the list the values select — none at all when
+   * they match no one (D125: there is no wire form for "no one"). With `clearParticipantFilter`
+   * and `loadMaterial` (which clears the values), the ONLY writers of `pids` — a fourth must
+   * clear `filterChoice` too, or the panel shows values that no longer describe the filter.
+   */
+  chooseFilterValues: (values: FilterValues, options: readonly DemographicFilter[], projectId: number) => void
+  /** The panel's *Clear all* / *Clear filter*: no values, no list. */
+  clearParticipantFilter: () => void
   setCoderIds: (ids: number[]) => void
   setLayerScope: (scope: LayerScope) => void
   setChartType: (type: QualChartType) => void
@@ -222,6 +241,9 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
   // only the last write of a tick land.
   const [searchParams, setSearchParams] = useComposableSearchParams()
   const [formatting, setFormatting] = useState<ChartFormatting>({ ...DEFAULT_FORMATTING })
+  // #1537 (D122) — the panel's chosen values live HERE, not in the panel, which mounts only
+  // while *Filters* is open. Not URL-persisted in 1.6.0 (decided 2026-11-06: later).
+  const [filterChoice, setFilterChoice] = useState<FilterChoice | null>(null)
 
   // Text annotations (per-tab, not URL-persisted — saved via palette only)
   const [descTitle, setDescTitle] = useState('')
@@ -295,6 +317,24 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     if (!pidsRaw) return [] as number[]
     return pidsRaw.split(',').map(Number).filter(n => !isNaN(n))
   }, [pidsRaw])
+
+  // #1542 (D123) — a location this hook did not write can carry another list: a link to this
+  // page while it is open (TopRail's *Analysis › Qualitative*, a code hit in Search — neither
+  // carries `pids`), or Back/Forward after one. The chosen values then no longer describe what
+  // is applied, so they are dropped and the panel says the list it was given, or none. Asked
+  // ONLY when a new location commits (its `key` — every navigation, `replace` included, makes
+  // one), never on an ordinary render: a URL write renders one transition AFTER the choice set
+  // beside it (`url-state.md` §2), so until its location arrives a new choice sits beside the
+  // old list. Every write of this hook's that keeps a choice writes exactly that choice's list
+  // (`chooseFilterValues`; the other setters leave `pids` alone), so only another writer's
+  // location can disagree. Adjusted while rendering, the previous key held in STATE, so no
+  // render commits the stale claim.
+  const location = useLocation()
+  const [choiceCheckedAt, setChoiceCheckedAt] = useState(location.key)
+  if (location.key !== choiceCheckedAt) {
+    setChoiceCheckedAt(location.key)
+    if (filterChoice && !choiceProducedList(filterChoice, participantIds)) setFilterChoice(null)
+  }
   const coderIds = useMemo(() => {
     if (!codersRaw) return [] as number[]
     return codersRaw.split(',').map(Number).filter(n => !isNaN(n))
@@ -441,7 +481,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     }, { replace: true })
   }, [setSearchParams])
 
-  const setParticipantIds = useCallback((ids: number[]) => {
+  const writeParticipantIds = useCallback((ids: readonly number[]) => {
     setSearchParams(prev => {
       const next = new URLSearchParams(prev)
       if (ids.length === 0) next.delete('pids')
@@ -449,6 +489,28 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
       return next
     }, { replace: true })
   }, [setSearchParams])
+
+  // #1537 (D123) — every writer of `pids` but the panel's clears the chosen values, because they
+  // no longer describe what is applied: `loadMaterial` below. (`setParticipantIds`, the panel's
+  // old raw write, is gone — it had no other caller.)
+  const chooseFilterValues = useCallback((
+    values: FilterValues, options: readonly DemographicFilter[], projectId: number,
+  ) => {
+    const resolved = resolveFilterValues(values, options)
+    if (resolved.kind === 'none') {
+      setFilterChoice(null)
+      writeParticipantIds([])
+      return
+    }
+    const ids = resolved.kind === 'ids' ? resolved.ids : []
+    setFilterChoice({ projectId, values, producedIds: ids })
+    writeParticipantIds(ids)
+  }, [writeParticipantIds])
+
+  const clearParticipantFilter = useCallback(() => {
+    setFilterChoice(null)
+    writeParticipantIds([])
+  }, [writeParticipantIds])
 
   const setCoderIds = useCallback((ids: number[]) => {
     setSearchParams(prev => {
@@ -670,6 +732,9 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
   const loadMaterial = useCallback((element: MaterialResponse) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const config = (element.config || {}) as Record<string, any>
+    // #1537 (D123) — the saved analysis's list replaces whatever the panel chose; a saved
+    // analysis stores ids only, so the panel then says the list has no values behind it (D124).
+    setFilterChoice(null)
     setSearchParams(prev => {
       const next = new URLSearchParams(prev)
       next.delete('element')  // remove any legacy alias before writing canonical key
@@ -835,6 +900,7 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     selectedObservationIds,
     excludeFacilitator,
     participantIds,
+    filterChoice,
     coderIds,
     layerScope,
     chartType,
@@ -887,7 +953,8 @@ export function useQualitativeAnalysis(): QualitativeAnalysisState & Qualitative
     setSelectedObservationIds,
     setAllSourceIds,
     setExcludeFacilitator,
-    setParticipantIds,
+    chooseFilterValues,
+    clearParticipantFilter,
     setCoderIds,
     setLayerScope,
     setChartType,

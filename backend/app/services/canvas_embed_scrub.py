@@ -133,6 +133,7 @@ def scrub_excerpt_embeds(
     replacement_text: str,
     words_by_conversation: dict[int, list[str]] | None = None,
     answer_words=None,
+    deleted_wordings: dict[int, list[tuple[str, tuple[str, ...]]]] | None = None,
 ) -> EmbedScrubOutcome:
     """Rewrite every canvas copy of the quotes in `excerpt_ids` (see the module).
 
@@ -141,8 +142,11 @@ def scrub_excerpt_embeds(
     withdrawn person's turns held BEFORE they were blanked — what an orphan embed is
     matched against (D8). `answer_words` are the wordings their ANSWERS held (each
     answer's text, and its edits' old and new values) — what an orphan embed with no
-    conversation is matched against, by equality (#1473). Call it after the quotes
-    are deleted; it flushes and does not commit.
+    conversation is matched against, by equality (#1473). `deleted_wordings` maps a
+    conversation id to what each DELETED merge result or split child their words
+    passed through held, each with its originals' texts (#1473 b,
+    `withdrawal_history.DeletedSegment`). Call it after the quotes are deleted; it
+    flushes and does not commit.
     """
     removed = {i for i in (_as_int(x) for x in excerpt_ids) if i is not None}
     words = {
@@ -152,6 +156,7 @@ def scrub_excerpt_embeds(
     answers = {
         a.strip() for a in (answer_words or ()) if isinstance(a, str) and a.strip()
     }
+    deleted = deleted_wordings or {}
     out = EmbedScrubOutcome()
 
     # ── Read every copy first: the orphan rule needs the live quotes they name ──
@@ -222,7 +227,14 @@ def scrub_excerpt_embeds(
         conversation = _as_int(attrs.get("conversationId"))
         if conversation is not None:
             # D8: a quote of a turn, inside one of their turns in that conversation.
-            theirs = any(shown in t for t in words.get(conversation, ()))
+            theirs = any(shown in t for t in words.get(conversation, ())) or any(
+                # #1473 (b): inside what a deleted merge result or split child held,
+                # and ACROSS a join — a quote wholly inside one of its originals is
+                # that original's to decide (the other speaker's half of a merge is
+                # someone else's words; their own half is D8's, just above).
+                shown in held and not any(shown in p for p in parts)
+                for held, parts in deleted.get(conversation, ())
+            )
         elif _as_int(attrs.get("observationId")) is None:
             # #1473: a quote of an answer is the whole answer — equal, not inside.
             theirs = shown in answers

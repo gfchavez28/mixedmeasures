@@ -160,8 +160,10 @@ export interface ImportValidationResult {
  * the copy was made, and nothing records a plain delete until 1.5.9, so the preview
  * cannot tell which: it NAMES sources, participants and datasets (each list capped —
  * the `*_count` beside it is the total) and COUNTS the rest, for the researcher to
- * recognise. 🔴 A withdrawn person is never named here — `withdrawn_participants` and
- * `withdrawn_items` are counts of what the merge will LEAVE OUT.
+ * recognise. 🔴 A withdrawn person is never named FROM THE FILE — `withdrawn_participants`
+ * and `withdrawn_items` are counts of what the merge will LEAVE OUT. `withdrawn_here`
+ * (#1470) is the merge's REFUSAL predicted: people this project still holds whom the copy
+ * says withdrew, by this project's own ID; non-empty, the merge will be refused.
  */
 export interface MergeAdditions {
   sources: { kind: 'conversation' | 'document' | 'observation'; name: string }[]
@@ -181,6 +183,7 @@ export interface MergeAdditions {
   memos: number
   withdrawn_participants: number
   withdrawn_items: number
+  withdrawn_here: MergeWithdrawnHereItem[]
 }
 
 /**
@@ -264,6 +267,17 @@ export interface MergeDivergenceDetail {
     total_segments?: number
   }[]
   diverged_codes?: string[]
+  /**
+   * `withdrawal` (#1470) only: people THIS project still holds whom the copy records as
+   * withdrawn, named by this project's own ID (never the file's words).
+   */
+  withdrawn_here?: MergeWithdrawnHereItem[]
+}
+
+/** #1470 (D70/D71) — someone this project holds that the merging copy says withdrew. */
+export interface MergeWithdrawnHereItem {
+  participant_id: number
+  identifier: string
 }
 
 /**
@@ -282,6 +296,8 @@ export type MergeDivergenceKind =
   | 'segmentation_freeze'
   | 'codebook'
   | 'segment_text'
+  /** #1470 — the copy withdrew someone this project still holds; withdraw them here first. */
+  | 'withdrawal'
 
 export interface ProjectImportResult {
   project_id: number

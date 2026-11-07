@@ -34,6 +34,68 @@ from ..models.segment import Segment
 from .id_set import in_id_set
 
 
+#: The unit-key tag of a segment GROUP (#1334). Beside the gathers' own ``"seg"``
+#: and ``"val"``: tag-prefixed, so a group id and a segment id — two independent
+#: sequences — can never collide (the rating queue's "two GROUP BY columns, never
+#: one COALESCE'd key" rule, in tuple form).
+UNIT_TAG_GROUP = "grp"
+UNIT_TAG_SEGMENT = "seg"
+
+
+def unit_key(segment_id: int, group_id: int | None) -> tuple[str, int]:
+    """The UNIT a coded segment belongs to — its group if it has one (#1334).
+
+    🔴 **A group of turns counts ONCE wherever a judgement is counted** — the
+    reliability matrices, the Model comparison table and a participant's rating
+    score through this key; the consensus layer too since unit 3, which decides
+    a group once by its `group_id` (`consensus.TARGET_GROUP` ballots, written on
+    every visible member), and the Reconciliation grid's rows since session B
+    (D35). The group is one unit because it is CODED as one: `apply_code`, a
+    rating and a set selection each fan out to every visible member. Counting
+    the members as units multiplied one judgement by the group's size.
+
+    ⚠️ **NOT the coverage grain.** "How much of this transcript is coded" is a
+    fact about MATERIAL, counted in turns (J-A, `coding_counts.py`), and a
+    coded group covers all of its turns. Do not route a gauge through this.
+
+    ⚠️ The grouping is the CURRENT one, read for every coder alike: a group is a
+    shared row with no owner, so whoever grouped the turns, every coder's
+    codings are read through it — as a frozen segmentation is.
+    """
+    if group_id:
+        return (UNIT_TAG_GROUP, group_id)
+    return (UNIT_TAG_SEGMENT, segment_id)
+
+
+#: A coder holding two DIFFERENT ratings of one code on one group (#1334) — a
+#: rating given to a turn before it joined the group, or a merged copy's. Never
+#: a value: `merge_unit_rating` returns it and the caller turns it into "no
+#: rating" (`None`), the way `code_sets.SET_MULTIPLE` is no choice.
+GROUP_RATING_CONFLICT = object()
+
+
+def merge_unit_rating(current, incoming):
+    """Fold one member's rating into what a coder's UNIT rating is so far.
+
+    The rule (#1334), and the contestable choice of the collapse, in ONE place:
+
+    * an unrated member (``None``) adds nothing — an explicit skip is no rating
+      (`magnitude-coding.md` §2);
+    * equal ratings are that rating;
+    * two DIFFERENT ratings are a contradiction — the coder gave one unit two
+      answers — and are not averaged into a number nobody gave (§5's reason for
+      refusing to clamp). The coding import already refuses the same state in a
+      file (#1031); this is the read side of that rule.
+
+    ``current`` is ``None``, a number or `GROUP_RATING_CONFLICT`.
+    """
+    if current is GROUP_RATING_CONFLICT or incoming is None:
+        return current
+    if current is None or current == incoming:
+        return incoming
+    return GROUP_RATING_CONFLICT
+
+
 def _visible_siblings():
     """The sibling scope — ONE definition for the single and the batched form."""
     return (

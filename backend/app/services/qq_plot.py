@@ -124,9 +124,12 @@ def residuals_by_group(grouped: dict[str, list[float]]) -> tuple[list[float], in
     ⚠️ **A group of one contributes a residual of exactly 0**, because its mean
     IS its single value. That is a property of estimating a mean from one point,
     not evidence about normality, and a pile of exact zeros bends the middle of
-    the plot toward the line. We still include them — dropping a group would
-    quietly diagnose a DIFFERENT model from the one the panel actually ran — and
-    report the count instead, so the caption can say it out loud.
+    the plot toward the line. They are still included, and the count is reported
+    so the caption says it out loud. ⚠️ The reason first given — *"dropping a
+    group would diagnose a different model from the one the panel ran"* — no
+    longer holds: since #1329 (1.5.9, D51) the panel's tests leave a one-value
+    group OUT (`testable_groups.split_testable`), as Levene now does. Whether this
+    diagnostic follows was not part of D51 — found 2026-11-02c, not filed.
     """
     residuals: list[float] = []
     singletons = 0

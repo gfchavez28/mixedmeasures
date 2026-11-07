@@ -404,6 +404,17 @@ def _serialize_row(obj, columns: list[str]) -> dict:
     return data
 
 
+#: #1470 (D72) — a non-merge import (Duplicate, "new", a coding copy) of a file whose OWN
+#: withdrawal record names someone it still holds. Counts nothing and names no one: the
+#: file may be a colleague's, and the project it came from is where the act belongs.
+UNAPPLIED_WITHDRAWAL_MESSAGE = (
+    "This project still holds the data of a participant whose withdrawal it records but "
+    "never applied — the withdrawal was made in a copy of the project and reached it "
+    "through a merge. Withdraw them in the project itself, on its Participants page, then "
+    "export or duplicate it again."
+)
+
+
 def _refuse_withdrawn_in_file(data: dict, removed, import_mode: str) -> None:
     """#1190 — a file that holds a withdrawn person, where skipping cannot be enough.
 
@@ -427,18 +438,33 @@ def _refuse_withdrawn_in_file(data: dict, removed, import_mode: str) -> None:
         # only orphans — still carries her turns with their words and her speaker
         # with her name, and then nothing else in the file names her.
         from .withdrawal_redaction import BLANKED_SEGMENT_TEXT
-        held = len(hers) + sum(
-            1 for r in data.get("dataset_rows", [])
-            if removed.has(_tomb.DATASET_ROW, r.get("uuid"))
-        ) + sum(
-            1 for sg in data.get("segments", [])
-            if removed.has(_tomb.SEGMENT_BLANKED, sg.get("uuid"))
-            and sg.get("text") != BLANKED_SEGMENT_TEXT
-        )
+
+        def _still_held(t) -> int:
+            """What of hers, as the record ``t`` names it, the file still carries."""
+            return sum(
+                1 for p in data.get("participants", [])
+                if t.withdrawn_participant(p.get("uuid"), p.get("identifier"))
+            ) + sum(
+                1 for r in data.get("dataset_rows", [])
+                if t.has(_tomb.DATASET_ROW, r.get("uuid"))
+            ) + sum(
+                1 for sg in data.get("segments", [])
+                if t.has(_tomb.SEGMENT_BLANKED, sg.get("uuid"))
+                and sg.get("text") != BLANKED_SEGMENT_TEXT
+            )
+
         # (A speaker the withdrawal DELETED — an orphan combined "Maria & Sam" — needs no
         # arm: it exists only through merges of her turns, so a file holding it holds
         # those turns unblanked, which the arm above counts.)
-        if held:
+        if _still_held(removed):
+            # #1470 (D72) — the FILE's OWN record names what the file still holds: the
+            # project it came from stored a colleague's withdrawal through a merge and
+            # never applied it (possible until 1.5.9). "A copy exported after the
+            # withdrawal" would be that project again; withdrawing them there is the
+            # remedy (measured). An older copy carries no record naming her, so it keeps
+            # the sentence below.
+            if _still_held(_tomb.from_file(data.get("tombstones"))):
+                raise ValueError(UNAPPLIED_WITHDRAWAL_MESSAGE)
             raise ValueError(
                 "This file holds data of a participant who withdrew from this project, "
                 "so it cannot be imported here. Import a copy exported after the "
@@ -3905,6 +3931,22 @@ def import_project(
         skipped_file_ids: dict[str, set] = {
             k: set() for k in (*withdrawn_skipped, "dataset_values")
         }
+        # #1470 (D69) — a withdrawal made in the COLLEAGUE'S copy names someone THIS
+        # project still holds. Storing the record and merging on left her data here and
+        # every later Duplicate refused; the remedy that works is to withdraw her here
+        # first (measured both orders), so the merge says that and changes nothing —
+        # before the staging and the safety copy below.
+        if import_mode == "merge" and target_project_id is not None:
+            held = _tomb.withdrawn_but_held(db, target_project_id, removed)
+            if held:
+                raise MergeDivergenceError(
+                    _tomb.withdrawn_but_held_message(held),
+                    {
+                        "error": "merge_divergence",
+                        "kind": _tomb.WITHDRAWAL_DIVERGENCE_KIND,
+                        "withdrawn_here": held,
+                    },
+                )
         _refuse_withdrawn_in_file(data, removed, import_mode)
         # Only a merge SKIPS: its target already holds the redacted project, and a
         # matched row keeps the target's fields. Every other mode inserts the file's

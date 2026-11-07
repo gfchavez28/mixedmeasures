@@ -26,6 +26,12 @@ export const ChartEmbed = Node.create({
       figureHash:       { default: null },
       figureHeadline:   { default: null },
       figureStampedAt:  { default: null },
+      // #1323 D12 — the fingerprint GENERATION the embed was placed under
+      // (`figure-baseline.ts::CURRENT_FIGURE_EPOCH`, written by
+      // `ThemeEditor.insertChart`, the one door). Absent = placed before it existed
+      // (read as 0), so an embed of a kind that gained its fingerprint later can
+      // say its figures changed instead of silently adopting them.
+      figureEpoch:      { default: null },
     }
   },
 
@@ -43,6 +49,7 @@ export const ChartEmbed = Node.create({
           figureHash:       dom.getAttribute('data-figure-hash') || null,
           figureHeadline:   dom.getAttribute('data-figure-headline') || null,
           figureStampedAt:  dom.getAttribute('data-figure-stamped-at') || null,
+          figureEpoch:      dom.getAttribute('data-figure-epoch') ? Number(dom.getAttribute('data-figure-epoch')) : null,
         }
       },
     }]
@@ -59,6 +66,7 @@ export const ChartEmbed = Node.create({
       'data-figure-hash': HTMLAttributes.figureHash,
       'data-figure-headline': HTMLAttributes.figureHeadline,
       'data-figure-stamped-at': HTMLAttributes.figureStampedAt,
+      'data-figure-epoch': HTMLAttributes.figureEpoch,
     }, ['span', HTMLAttributes.title || 'Chart']]
   },
 

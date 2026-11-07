@@ -75,6 +75,13 @@ EXEMPT: dict[str, str] = {
     # with their schemas. ⚠️ Deleting a route is only half of it: `test_exemptions_are_not_stale`
     # fails on an exemption whose field no response schema declares any more, so the schema
     # and the entry have to go in the same commit as the route.
+    #
+    # #1505's three verdict-floor fields (`verdict_withheld_reason`,
+    # `overall_verdict_withheld_reason`, `verdict_min_units`) were exempt here between
+    # 1.5.9's session A (2026-11-01e, the server half) and session B (2026-11-01f, the
+    # client half that reads them) — "not read YET", the only entries of that kind. The
+    # stale check below removed them with the commit that wired the Reliability tab and
+    # the Model comparison.
 }
 
 # Population floors. Well below the 2026-09-04 measurement (270 classes, 745 fields, 461

@@ -7,7 +7,7 @@ export { extractApiError, serverDetailMessage, isServerRefusal, isRequestTimeout
 // Downloads — the canonical blob→anchor helpers. Exported here because they
 // were not reachable from the barrel, and six components hand-rolled their own
 // copy rather than go looking (#743).
-export { downloadBlob, extractFilename, namedBlob, EXPORT_TIMEOUT_MS } from './download'
+export { downloadBlob, extractFilename, namedBlob, EXPORT_TIMEOUT_MS, reportExportFailure } from './download'
 export type { NamedBlob } from './download'
 
 // Auth
@@ -306,6 +306,7 @@ export type {
   GroupTotal,
   GroupCodeStats,
   StatTestResult,
+  ComparisonInterval,
   CodeComparisonEntry,
   DemographicComparisonResponse,
   SaturationPoint,

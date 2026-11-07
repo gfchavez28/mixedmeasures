@@ -44,10 +44,20 @@ SEGMENT_BLANKED = "segment_blanked"
 #: "new" import (Duplicate, an independent project), which re-mints every
 #: participant's uuid, follows it through the re-mint with `rekey` (#1471).
 PARTICIPANT_REINSTATED = "participant_reinstated"
+#: #1472 (D73, 1.5.9) — a NAME the withdrawn person was known by in the project (her
+#: display name, her speakers' names and labels, her turns' original labels — every
+#: spelling `apply_withdrawal`'s `her_names` collects except the ID, which is the
+#: `participant` kind's hash). Read ONLY by the conversation import's speaker-label door
+#: (`withdrawn_speaker_label`): never by linking, a typed create or a merge, where a
+#: common first name would skip or refuse a DIFFERENT person's data. A KIND of its own
+#: with a hash prefix of its own, so no reader of an ID can take a name for one.
+#: Travels in the file's `tombstones` key with no format bump: an older build's
+#: `from_file` ignores an unknown kind whole, which is that build's status quo.
+PARTICIPANT_NAME = "participant_name"
 
 ENTITY_TYPES = frozenset({
     PARTICIPANT, SPEAKER, DATASET_ROW, EXCERPT, NOTE, SEGMENT_BLANKED,
-    PARTICIPANT_REINSTATED,
+    PARTICIPANT_REINSTATED, PARTICIPANT_NAME,
 })
 
 #: D12 — the 409's sentence when a researcher types a withdrawn identifier. It never
@@ -58,21 +68,61 @@ WITHDRAWN_IDENTIFIER_MESSAGE = (
     "again only if it now names someone who has agreed to take part."
 )
 
+
+def withdrawn_speaker_warning(count: int) -> str:
+    """#1391 / #1472 (D74, D75) — the conversation import's warning when the speaker
+    door left speakers unlinked because the withdrawal record names their label.
+
+    A COUNT, never the name (D12's never-repeat rule; the researcher has the
+    transcript). It says what happened, the way to link someone else who shares a
+    remembered name (there is no hand link for a speaker: the import's match is the
+    only writer, so the remedy is a different name under Map Speakers), and that a
+    transcript holding the withdrawn person's words brought those words back."""
+    one = count == 1
+    return (
+        f"{count} speaker{'' if one else 's'} {'was' if one else 'were'} not linked to "
+        f"{'a participant' if one else 'participants'}, because this project's record of "
+        f"a withdrawal remembers {'that name or ID' if one else 'those names or IDs'}. "
+        f"If {'the' if one else 'a'} speaker is someone else, delete this conversation and "
+        "import it again with a different name for them under Map Speakers. If this "
+        f"transcript holds {'the' if one else 'a'} withdrawn participant's words, importing "
+        "it brought those words back; deleting the conversation removes them."
+    )
+
+
 _HASH_PREFIX = "mm-withdrawn-identifier:v1:"
+#: #1472 (D73) — the NAME kind's prefix. Different from the identifier's on purpose:
+#: the same text hashes to a different value under each, so a stored name can never
+#: answer an identifier question, in memory or in the table (`is_withdrawn_identifier`
+#: compares hashes and nothing else).
+_NAME_HASH_PREFIX = "mm-withdrawn-name:v1:"
+
+
+def _hash(prefix: str, text: str | None) -> str | None:
+    key = normalize_key(text)
+    if not key:
+        return None
+    return hashlib.sha256((prefix + key).encode("utf-8")).hexdigest()
 
 
 def identifier_hash(identifier: str | None) -> str | None:
     """The one hash, over the one normalisation linking matches on."""
-    key = normalize_key(identifier)
-    if not key:
-        return None
-    return hashlib.sha256((_HASH_PREFIX + key).encode("utf-8")).hexdigest()
+    return _hash(_HASH_PREFIX, identifier)
+
+
+def name_hash(name: str | None) -> str | None:
+    """#1472 (D73) — a remembered NAME's hash: the identifier's normalisation (the
+    speaker door matches trim-then-exact, as linking does) under its own prefix."""
+    return _hash(_NAME_HASH_PREFIX, name)
 
 
 @dataclass
 class Tombstones:
     uuids: dict[str, set[str]] = field(default_factory=dict)
     identifier_hashes: set[str] = field(default_factory=set)
+    #: #1472 (D73) — the `participant_name` kind's hashes. Never in
+    #: `identifier_hashes`, which every reader of an ID asks.
+    name_hashes: set[str] = field(default_factory=set)
 
     def has(self, entity_type: str, entity_uuid: str | None) -> bool:
         return bool(entity_uuid) and entity_uuid in self.uuids.get(entity_type, ())
@@ -80,6 +130,25 @@ class Tombstones:
     def withdrawn_identifier(self, identifier: str | None) -> bool:
         h = identifier_hash(identifier)
         return h is not None and h in self.identifier_hashes
+
+    def withdrawn_name(self, name: str | None) -> bool:
+        """#1472 (D73) — was this one of the names a withdrawn person was known by?
+        Asked only through `withdrawn_speaker_label`."""
+        h = name_hash(name)
+        return h is not None and h in self.name_hashes
+
+    def withdrawn_speaker_label(self, label: str | None) -> bool:
+        """#1472 / #1391 (D73, D74) — the speaker-label door's ONE question: does this
+        label name a withdrawn person, by her ID (the one predicate, with no uuid —
+        the door is about to create someone, so nobody can have been reinstated
+        under it) or by a name the project knew her by?
+
+        🔴 The ONLY reader of the name kind. Linking by column, the typed create and
+        the merge ask `withdrawn_participant` / `withdrawn_identifier`, never this:
+        a common first name there would skip or refuse a DIFFERENT person's data —
+        silently, in a merge. At the speaker door the cost is said (the import's
+        warning) and the remedy is a rename (D75)."""
+        return self.withdrawn_participant(None, label) or self.withdrawn_name(label)
 
     def withdrawn_participant(self, entity_uuid: str | None, identifier: str | None) -> bool:
         """Is this participant (a file's row) a withdrawn person? By the uuid the
@@ -91,13 +160,18 @@ class Tombstones:
             PARTICIPANT_REINSTATED, entity_uuid)
 
     def __bool__(self) -> bool:
-        return bool(self.identifier_hashes) or any(self.uuids.values())
+        return (bool(self.identifier_hashes) or bool(self.name_hashes)
+                or any(self.uuids.values()))
 
     def add(self, entity_type: str, entity_uuid: str | None, ident_hash: str | None = None):
         if entity_uuid:
             self.uuids.setdefault(entity_type, set()).add(entity_uuid)
         if ident_hash:
-            self.identifier_hashes.add(ident_hash)
+            # #1472 (D73) — a hash is routed by its KIND: a name poured into
+            # `identifier_hashes` would be written back as an ID row by `write`,
+            # losing the kind for every later reader.
+            (self.name_hashes if entity_type == PARTICIPANT_NAME
+             else self.identifier_hashes).add(ident_hash)
 
 
 def load(db: Session, project_uuid: str | None) -> Tombstones:
@@ -128,6 +202,7 @@ def union(a: Tombstones, b: Tombstones) -> Tombstones:
             for u in us:
                 out.add(etype, u)
         out.identifier_hashes |= t.identifier_hashes
+        out.name_hashes |= t.name_hashes
     return out
 
 
@@ -161,9 +236,59 @@ def write(db: Session, project_uuid: str, tombstones: Tombstones,
         db.add(RemovalTombstone(project_uuid=project_uuid, entity_type=PARTICIPANT,
                                 identifier_hash=h, reason=reason))
         n += 1
+    for h in sorted(tombstones.name_hashes - have.name_hashes):
+        db.add(RemovalTombstone(project_uuid=project_uuid, entity_type=PARTICIPANT_NAME,
+                                identifier_hash=h, reason=reason))
+        n += 1
     if n:
         db.flush()
     return n
+
+
+#: #1470 (D69) — the merge's refusal kind, as `MergeDivergenceError.payload["kind"]`.
+WITHDRAWAL_DIVERGENCE_KIND = "withdrawal"
+
+
+def withdrawn_but_held(db: Session, project_id: int, removed: Tombstones) -> list[dict]:
+    """#1470 (D69–D71) — the participants ``project_id`` still holds that ``removed``
+    names as withdrawn, as ``[{"participant_id", "identifier"}]`` ordered by ID.
+
+    ``removed`` is a merge's union — this install's record for the file's identity and
+    the file's own — so a withdrawal made in a COLLEAGUE'S copy reaches here: the copy
+    no longer holds the person, the target does, and a merge that stored the record and
+    went on left her data in place and every later Duplicate refused (#1470). The merge
+    refuses on a non-empty answer, and the merge preview shows the same answer, so the
+    two cannot disagree (`removal-tombstones.md` §6).
+
+    🔴 **The one predicate, `Tombstones.withdrawn_participant`** — by uuid, or by ID
+    unless that participant was reinstated (D12), so someone re-instated under a
+    withdrawn ID is not reported here.
+
+    D71 — each is named by THIS project's own ID for them: the target's record, which
+    the Participants page already shows. Nothing the file says is returned.
+    """
+    if not removed.identifier_hashes and not removed.uuids.get(PARTICIPANT):
+        return []
+    from ..models.participant import Participant
+    return [
+        {"participant_id": pid, "identifier": ident}
+        for pid, puuid, ident in db.query(
+            Participant.id, Participant.uuid, Participant.identifier,
+        ).filter(Participant.project_id == project_id)
+        .order_by(Participant.identifier, Participant.id)
+        if removed.withdrawn_participant(puuid, ident)
+    ]
+
+
+def withdrawn_but_held_message(held: list[dict]) -> str:
+    """#1470 (D69) — the merge refusal's sentence (a direct caller's; the Merge page
+    renders its own words from the payload's ``kind`` and ``withdrawn_here``)."""
+    names = ", ".join(h["identifier"] for h in held[:5]) + ("…" if len(held) > 5 else "")
+    return (
+        f"The copy you are merging records that {len(held)} participant(s) withdrew, and "
+        f"this project still holds their data: {names}. Withdraw them in this project "
+        "first, then merge the copy again. Nothing was changed."
+    )
 
 
 def is_withdrawn_identifier(db: Session, project_uuid: str | None, identifier: str | None) -> bool:

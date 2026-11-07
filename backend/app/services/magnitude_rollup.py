@@ -106,6 +106,8 @@ from statistics import fmean, stdev
 from sqlalchemy.orm import Session
 
 from ..models.code import Code
+from ..models.segment import Segment
+from .coding_layers import project_scoped_segments
 from .consensus import (
     GATHER_STREAM_BATCH,
     SEGMENT_SCOPE_PROJECT,
@@ -119,6 +121,11 @@ from .consensus import (
 )
 from .metrics import _ci_mean
 from .participant_resolution import ParticipantRoute, resolve_participants
+from .segment_groups import (
+    GROUP_RATING_CONFLICT,
+    UNIT_TAG_GROUP,
+    merge_unit_rating,
+)
 
 # ── The stated basis ─────────────────────────────────────────────────────────
 #
@@ -302,6 +309,10 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
         # 🔴 ONE, never the writer's MIN_CONSENSUS_VOTERS: Decision 3's sole-voter
         # arm scores exactly the targets the writer skips (#958).
         min_voters=1,
+        # 🔴 FALSE, never the writer's True (#1334 unit 3, D32): each member turn
+        # is routed to ITS participant below (a group spanning two people is one
+        # passage of EACH, D21), and the group is folded here, per participant.
+        group_units=False,
     )
 
     code_names = dict(
@@ -314,9 +325,67 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
     # Participants any usable application reached, whether or not it was rated.
     reached: set[int] = set()
 
-    def _consume(ballot: TargetBallot, route: ParticipantRoute | None) -> None:
-        per_coder, ratings = ballot.per_coder, ballot.ratings
+    # 🔴 #1334 — A GROUP OF TURNS IS ONE PASSAGE. Its members are coded as one
+    # (the apply and the rating fan out), so scoring each member made one
+    # judgement count once per turn — a 4-turn group rated 5 beside three single
+    # turns rated 2 read 3.714 over 7 passages instead of 2.75 over 4. A grouped
+    # turn's ballot is folded into its group's (per PARTICIPANT: a group that
+    # spans two people is one passage of each), and the group is decided ONCE
+    # after the stream. Groups are few and conversation-scoped, so holding their
+    # ballots costs nothing beside the stream's batch.
+    group_of = dict(
+        project_scoped_segments(db.query(Segment.id, Segment.group_id), project_id)
+        .filter(Segment.group_id.isnot(None))
+        .all()
+    )
+    group_ballots: dict[tuple[int, int], tuple[dict, dict]] = {}
+    # An excluded group discloses each coder's judgement once, not once per turn.
+    excluded_in_groups: set[tuple[str, int, int, int]] = set()
 
+    def _rated_by(ratings, per_coder, eff: int) -> list[int]:
+        return [uid for uid in per_coder
+                if ratings.get(uid, {}).get(eff) is not None]
+
+    def _exclude_target(ballot: TargetBallot, reason: str) -> None:
+        per_coder, ratings = ballot.per_coder, ballot.ratings
+        gid = group_of.get(ballot.target_id) if ballot.kind == TARGET_SEGMENT else None
+        for eff in {eff for codes in per_coder.values() for eff in codes}:
+            if gid is None:
+                _exclude(excluded, reason, len(_rated_by(ratings, per_coder, eff)))
+            else:
+                excluded_in_groups.update(
+                    (reason, gid, uid, eff) for uid in _rated_by(ratings, per_coder, eff)
+                )
+
+    def _consume(ballot: TargetBallot, route: ParticipantRoute | None) -> None:
+        if route is None:
+            # Not resolvable at all — a target outside the project cannot be in
+            # this project's gather, so this is unreachable rather than a state.
+            return
+        if route.participant_id is None:
+            _exclude_target(ballot, route.unresolved_reason)
+            return
+        if route.via_facilitator:
+            _exclude_target(ballot, EXCLUDED_FACILITATOR_TURN)
+            return
+        gid = group_of.get(ballot.target_id) if ballot.kind == TARGET_SEGMENT else None
+        if gid is not None:
+            per_coder, ratings = group_ballots.setdefault(
+                (gid, route.participant_id), ({}, {}),
+            )
+            for uid, codes in ballot.per_coder.items():
+                per_coder.setdefault(uid, set()).update(codes)
+            for uid, by_code in ballot.ratings.items():
+                mine = ratings.setdefault(uid, {})
+                for code_id, value in by_code.items():
+                    mine[code_id] = (
+                        merge_unit_rating(mine[code_id], value) if code_id in mine else value
+                    )
+            return
+        _decide(ballot.per_coder, ballot.ratings, route.participant_id,
+                (ballot.kind, ballot.target_id))
+
+    def _decide(per_coder, ratings, participant_id: int, key: tuple[str, int]) -> None:
         # How many coder judgements does this target carry at all? Counted up
         # front so an excluded target discloses its ratings rather than its
         # applications — the grain the docstring promises.
@@ -325,20 +394,7 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
 
         all_effs = {eff for codes in per_coder.values() for eff in codes}
 
-        if route is None:
-            # Not resolvable at all — a target outside the project cannot be in
-            # this project's gather, so this is unreachable rather than a state.
-            return
-        if route.participant_id is None:
-            for eff in all_effs:
-                _exclude(excluded, route.unresolved_reason, _n_ratings_for(eff))
-            return
-        if route.via_facilitator:
-            for eff in all_effs:
-                _exclude(excluded, EXCLUDED_FACILITATOR_TURN, _n_ratings_for(eff))
-            return
-
-        reached.add(route.participant_id)
+        reached.add(participant_id)
 
         if len(per_coder) >= 2:
             # `decide_target`, never `_decide_consensus` alone: a code-set member
@@ -359,13 +415,17 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
                 _exclude(excluded, EXCLUDED_NO_DECLARED_SCALE, _n_ratings_for(eff))
                 continue
             # Step 1 — the target rating. ONE implementation, shared with the
-            # stored consensus layer, so a score can never disagree with the
-            # median the reconciliation grid shows for the same passage.
+            # stored consensus layer, so a score cannot disagree with the median
+            # the reconciliation grid shows for the same passage. ⚠️ A segment
+            # GROUP is the stated exception (#1334 unit 3, D31): here it is folded
+            # per participant without its facilitator turns, while the grid and
+            # the stored layer fold every visible turn — so the two differ only
+            # where a coder's codings differ between those turns.
             decision = _decide_magnitude(_rating_values(ratings, per_coder, eff), scale)
             if decision is None:
                 continue  # applied but nobody rated it — contributes nothing
-            collected.setdefault((route.participant_id, eff), []).append(
-                {"key": (ballot.kind, ballot.target_id), "decision": decision}
+            collected.setdefault((participant_id, eff), []).append(
+                {"key": key, "decision": decision}
             )
 
     # Resolve each BATCH of targets as it streams past (#958). Resolving the
@@ -380,6 +440,18 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
         )
         for ballot in batch:
             _consume(ballot, resolution.for_target(**ballot.target()))
+
+    # #1334 — each group decided ONCE, on its members' folded ballot. A coder
+    # who gave the group two different ratings gave no rating
+    # (`segment_groups.merge_unit_rating`), never a number between them.
+    for (gid, participant_id), (per_coder, ratings) in sorted(group_ballots.items()):
+        for by_code in ratings.values():
+            for code_id, value in by_code.items():
+                if value is GROUP_RATING_CONFLICT:
+                    by_code[code_id] = None
+        _decide(per_coder, ratings, participant_id, (UNIT_TAG_GROUP, gid))
+    for reason, *_rest in excluded_in_groups:
+        _exclude(excluded, reason)
 
     scores: list[ParticipantCodeScore] = []
     for (participant_id, eff), entries in sorted(collected.items()):

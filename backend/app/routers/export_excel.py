@@ -36,16 +36,30 @@ from ..services.missing_values import (
     describe_missing_rules,
     is_missing,
 )
-from ..services.metrics import resolve_input_source_labels
+from ..services.metrics import (
+    CI_METHOD_WILSON_PER_CATEGORY_EFFECTIVE_N,
+    resolve_input_source_labels,
+)
 from ..services.coding_layers import (
     CONSENSUS_ORIGIN,
     code_usage_count_expr,
+    in_coder_scope,
+    narrow_to_coders,
     non_consensus_filter,
     project_scoped_segments,
     visible_target_filter,
 )
 from ..auth import get_current_user
-from .helpers import _get_project_or_404, sanitize_content_disposition, visible_segment_filter
+from ..services.audit import BLIND_MODE_REVEAL_ACTION
+from ..services.code_analysis import COOCCURRENCE_RULE
+from .helpers import (
+    _get_project_or_404,
+    coder_scope_filename_suffix,
+    coder_scope_names,
+    parse_int_list,
+    sanitize_content_disposition,
+    visible_segment_filter,
+)
 from ..services.timestamp import format_timecode
 from ..services.xml_text import xml_safe_text
 from .excerpts import _base_excerpt_query, _excerpt_to_response
@@ -61,6 +75,17 @@ from .export_helpers import (
 
 router = APIRouter(tags=["export"])
 
+#: The Audit Trail sheet lists the newest this-many entries (#1532 D100 keeps every
+#: blind-mode reveal beyond it, and says how many it left out).
+AUDIT_TRAIL_SHEET_LIMIT = 1000
+
+#: #1530 D97 — the sheets that hold the CODER-SCOPED coding when a scope is asked,
+#: and what the others hold. The *Scope* sheet reads this, so the statement and the
+#: narrowing are one list. A new sheet that carries coding joins the first set.
+SCOPED_CODING_SHEETS = ("Coded Data", "Ratings", "Code-Source Matrix", "Code Co-occurrence")
+EVERY_CODER_SHEETS = ("Codebook",)
+NOT_CODING_SHEETS = ("Memos", "Notes", "Quotes", "Sources")
+
 
 @router.get("/excel")
 def export_study_excel(
@@ -75,11 +100,14 @@ def export_study_excel(
     include_sources: bool = True,
     include_audit: bool = True,
     include_ratings: bool = True,
+    # #1530 D98 (1.5.9) — appended, bare default; absent = every coder.
+    coder_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Export project data as Excel with up to 9 sheets: Coded Data, Code-Source Matrix,
-    Code Co-occurrence, Codebook, Memos, Notes, Quotes, Sources, Audit Trail.
+    """Export project data as Excel with up to 11 sheets: Coded Data, Ratings (when a
+    code declares a scale), Code-Source Matrix, Code Co-occurrence, Codebook, Memos,
+    Notes, Quotes, Sources, Audit Trail, and Scope (only under a coder scope, #1530).
 
     #620: the Coded Data and Notes sheets span all THREE segment parents /
     FOUR note parents; before this they inner-joined Conversation and silently
@@ -90,8 +118,17 @@ def export_study_excel(
     now "Code-Source Matrix" — every segment parent on the axis, each column
     naming its source TYPE, and the sheet no longer disappears on a project
     without conversations.
+
+    #1530 D95/D97 (1.5.9) — ``coder_ids`` (the Export dialog sends it while blind
+    mode withholds): the coding sheets (`SCOPED_CODING_SHEETS`) and the Audit Trail
+    hold those coders' work only, the Codebook keeps every coder's usage counts (the
+    Codebook page's, #454), and a *Scope* sheet APPENDED last says which is which —
+    no sheet moves, so a reader of sheet 0 reads what it always did. The file's NAME
+    ends ``_coder-<name>``. Absent, the workbook is as before except D100's appended
+    Audit Trail *Coder* column.
     """
     project = _get_project_or_404(db, project_id, user.id)
+    scope = parse_int_list(coder_ids)
 
     wb = Workbook()
     worksheets = []
@@ -196,9 +233,10 @@ def export_study_excel(
         for segment in all_segments:
             # J2-B: human layer only (#490 latent site — an "X" can't flip
             # today since consensus ⊆ agreed codes, but keep the layer rule).
+            # #1530: under a coder scope, that scope's coding only.
             applied_code_ids = set(
                 ca.code_id for ca in segment.code_applications
-                if ca.origin != CONSENSUS_ORIGIN
+                if ca.origin != CONSENSUS_ORIGIN and in_coder_scope(ca.user_id, scope)
             )
 
             source_kind, source_name = segment_source_pair(segment)
@@ -267,7 +305,7 @@ def export_study_excel(
             cell.fill = header_fill
             cell.font = header_font
 
-        rated_apps = project_scoped_segments(
+        rated_apps = narrow_to_coders(project_scoped_segments(
             db.query(CodeApplication)
             .join(Segment, CodeApplication.segment_id == Segment.id)
             .options(
@@ -277,7 +315,7 @@ def export_study_excel(
                 joinedload(CodeApplication.segment).joinedload(Segment.observation),
             ),
             project_id,
-        ).filter(
+        ), scope).filter(
             # Visible, human, rated — each clause its chokepoint (#869 h): the
             # J-A visibility tuple and the J2-B consensus exclusion, never a
             # hand-rolled `origin !=` that is byte-identical today and will not
@@ -301,11 +339,14 @@ def export_study_excel(
         # a dataset cell is never merged or split away — so the NULL-safe arm of
         # `visible_target_filter` would pass every row and is not repeated here.
         rated_cell_apps = (
-            db.query(CodeApplication, DatasetRow.row_identifier)
-            .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
-            .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-            .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
-            .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+            narrow_to_coders(
+                db.query(CodeApplication, DatasetRow.row_identifier)
+                .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
+                .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+                .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
+                .join(Dataset, DatasetColumn.dataset_id == Dataset.id),
+                scope,
+            )
             .filter(
                 Dataset.project_id == project_id,
                 CodeApplication.code_id.in_(list(scaled_codes)),
@@ -380,7 +421,7 @@ def export_study_excel(
         ws_matrix = wb.create_sheet("Code-Source Matrix")
         worksheets.append(ws_matrix)
 
-        matrix_data = build_code_source_matrix(db, project_id)
+        matrix_data = build_code_source_matrix(db, project_id, coder_ids=scope)
 
         # Header row: "Code" + one column per source + Total. The source's TYPE
         # rides its header because two sources of different types may share a
@@ -422,12 +463,13 @@ def export_study_excel(
         ws_cooccur = wb.create_sheet("Code Co-occurrence")
         worksheets.append(ws_cooccur)
 
-        cooccur_data = build_code_cooccurrence_matrix(db, project_id)
+        cooccur_data = build_code_cooccurrence_matrix(db, project_id, coder_ids=scope)
 
         # Header row: scope label in the corner + code names. The corner cell
-        # states the facilitator scope so the sheet's numbers carry their claim
-        # (#493) without shifting the matrix layout.
-        cooccur_headers = ["Participant segments only"] + [
+        # states the facilitator scope (#493) and the rule a pair is counted by
+        # (#1335, D47), so the sheet's numbers carry their claim without shifting
+        # the matrix layout.
+        cooccur_headers = [f"Participant segments only. {COOCCURRENCE_RULE}"] + [
             f"{c.numeric_id} - {c.name}" for c in codes
         ]
         for col, header in enumerate(cooccur_headers, 1):
@@ -740,19 +782,50 @@ def export_study_excel(
             row_num += 1
 
     # ==================== Sheet 8: Audit Trail ====================
+    #
+    # #1532 D100 (1.5.9) — the record DEC-G promises (a reveal is LOGGED) has to
+    # say who, and has to survive the row cap:
+    # * a `Coder` column, APPENDED so no column moves — blank for an entry no coder
+    #   made. Before it no column said who did anything, so a reveal said blindness
+    #   was broken and never by whom;
+    # * every blind-mode reveal is listed whatever the cap (the newest
+    #   `AUDIT_TRAIL_SHEET_LIMIT` entries, plus each older reveal, newest first) —
+    #   the cap used to drop them with everything else, silently;
+    # * when entries were left out, the last row says how many.
+    # Under a coder scope (#1530 D95) the sheet is that coder's entries: a
+    # colleague's `code_applied` names a passage and a code.
+    # ⚠️ `id` breaks timestamp ties: the column has second precision, so the
+    # cap's cut and the merged order were the planner's choice before.
     if include_audit:
         ws_audit = wb.create_sheet("Audit Trail")
         worksheets.append(ws_audit)
 
-        audit_headers = ["Timestamp", "Action", "Entity Type", "Entity ID", "Details"]
+        audit_headers = ["Timestamp", "Action", "Entity Type", "Entity ID", "Details", "Coder"]
         for col, header in enumerate(audit_headers, 1):
             cell = ws_audit.cell(row=1, column=col, value=header)
             cell.fill = header_fill
             cell.font = header_font
 
-        audit_entries = db.query(AuditEntry).filter(
-            AuditEntry.project_id == project_id
-        ).order_by(AuditEntry.timestamp.desc()).limit(1000).all()
+        audit_in_scope = db.query(AuditEntry).filter(AuditEntry.project_id == project_id)
+        if scope:
+            audit_in_scope = audit_in_scope.filter(AuditEntry.user_id.in_(scope))
+        newest_entries = audit_in_scope.order_by(
+            AuditEntry.timestamp.desc(), AuditEntry.id.desc(),
+        ).limit(AUDIT_TRAIL_SHEET_LIMIT).all()
+        listed_ids = {e.id for e in newest_entries}
+        older_reveals = [
+            e for e in audit_in_scope.filter(AuditEntry.action == BLIND_MODE_REVEAL_ACTION).all()
+            if e.id not in listed_ids
+        ]
+        audit_entries = sorted(
+            newest_entries + older_reveals, key=lambda e: (e.timestamp, e.id), reverse=True,
+        )
+        audit_total = audit_in_scope.with_entities(func.count(AuditEntry.id)).scalar() or 0
+
+        audit_user_ids = {e.user_id for e in audit_entries if e.user_id is not None}
+        audit_coder_names = dict(
+            db.query(User.id, User.username).filter(User.id.in_(audit_user_ids)).all()
+        ) if audit_user_ids else {}
 
         for row_num, entry in enumerate(audit_entries, 2):
             # #513: localized; keeps second precision for the audit trail
@@ -761,6 +834,52 @@ def export_study_excel(
             excel_set_safe(ws_audit.cell(row=row_num, column=3), entry.entity_type)
             ws_audit.cell(row=row_num, column=4, value=entry.entity_id)
             excel_set_safe(ws_audit.cell(row=row_num, column=5), entry.details or "")
+            excel_set_safe(ws_audit.cell(row=row_num, column=6), audit_coder_names.get(entry.user_id, ""))
+
+        left_out = audit_total - len(audit_entries)
+        if left_out > 0:
+            ws_audit.cell(
+                row=len(audit_entries) + 2, column=1,
+                value=(
+                    f"{left_out:,} older {'entry is' if left_out == 1 else 'entries are'} not "
+                    f"listed: this sheet keeps the newest {AUDIT_TRAIL_SHEET_LIMIT:,} entries "
+                    "and every blind-mode reveal."
+                ),
+            )
+
+    # ==================== Last sheet: Scope (#1530 D97) ====================
+    # Only when a coder scope was asked. APPENDED after every other sheet, so no
+    # sheet moves (`pd.read_excel` reads sheet 0 by default). It says, sheet by
+    # sheet, whose coding each holds, from the same lists the narrowing uses.
+    if scope:
+        ws_scope = wb.create_sheet("Scope")
+        worksheets.append(ws_scope)
+        scope_names = ", ".join(coder_scope_names(db, scope))
+        excel_set_safe(
+            ws_scope.cell(row=1, column=1),
+            f"Exported while blind mode was on. The coding sheets hold only the coding of "
+            f"{scope_names}; colleagues' coding is left out. Reveal colleagues' work (the "
+            "reveal is logged) and export again to include it.",
+        )
+        for col, header in enumerate(["Sheet", "Holds"], 1):
+            cell = ws_scope.cell(row=3, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+        scope_row = 4
+        for title in wb.sheetnames:
+            if title in SCOPED_CODING_SHEETS:
+                holds = f"Coding by {scope_names} only"
+            elif title == "Audit Trail":
+                holds = f"Entries by {scope_names} only"
+            elif title in EVERY_CODER_SHEETS:
+                holds = "Every coder: usage counts as the Codebook page shows them"
+            elif title in NOT_CODING_SHEETS:
+                holds = "Not coding: the whole project"
+            else:
+                continue  # this sheet itself
+            excel_set_safe(ws_scope.cell(row=scope_row, column=1), title)
+            excel_set_safe(ws_scope.cell(row=scope_row, column=2), holds)
+            scope_row += 1
 
     # Adjust column widths for all worksheets
     for ws in worksheets:
@@ -783,7 +902,10 @@ def export_study_excel(
     wb.save(output)
     output.seek(0)
 
-    filename = f"{sanitize_content_disposition(project.name)}_export_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    filename = (
+        f"{sanitize_content_disposition(project.name)}_export_{datetime.now().strftime('%Y%m%d')}"
+        f"{coder_scope_filename_suffix(db, scope)}.xlsx"
+    )
 
     return StreamingResponse(
         output,
@@ -1230,11 +1352,33 @@ def export_datasets_excel(
                 # is a row of its own. Without it a reader would reasonably take
                 # seven categories' intervals as jointly covering at 95%, which
                 # is the one thing per-category binomial intervals do not do.
-                ws_detail.cell(
-                    row=detail_row, column=1,
-                    value="95% Wilson score interval, computed separately for each response "
-                          "option (binomial, not simultaneous across options).",
+                interval_note = (
+                    "95% Wilson score interval, computed separately for each response "
+                    "option (binomial, not simultaneous across options)."
                 )
+                # #1330 (D54): a variable group's pooled frequency counts each
+                # RECORD once in its intervals — said from the method each stored
+                # result states, so a result computed before 1.5.9 is not
+                # described as the new kind.
+                def _stated_ci_method(metric) -> str | None:
+                    try:
+                        raw = metric.results[0].result_data
+                        rd = json.loads(raw) if isinstance(raw, str) else raw
+                    except (json.JSONDecodeError, TypeError, IndexError):
+                        return None
+                    return rd.get("ci_method") if isinstance(rd, dict) else None
+
+                if any(
+                    _stated_ci_method(m) == CI_METHOD_WILSON_PER_CATEGORY_EFFECTIVE_N
+                    for m in ungrouped_freq
+                ):
+                    interval_note += (
+                        " For a variable group, whose answers are pooled across its "
+                        "variables, each interval counts each record once (a Wilson "
+                        "interval on an effective sample size), so one person's several "
+                        "answers do not narrow it."
+                    )
+                ws_detail.cell(row=detail_row, column=1, value=interval_note)
                 ws_detail.cell(row=detail_row, column=1).font = Font(italic=True, size=9)
                 ws_detail.merge_cells(start_row=detail_row, start_column=1, end_row=detail_row, end_column=7)
                 detail_row += 1

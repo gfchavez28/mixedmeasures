@@ -3,10 +3,12 @@ code density, and response length analysis for coded open-ended text responses."
 
 import io
 import csv
+import json
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -30,9 +32,10 @@ from ..services.text_analysis import (
 from ..services.coding_layers import LAYER_CONSENSUS, layer_scope_filter
 from ..services.id_set import in_id_set
 from ..auth import get_current_user
-from .helpers import _get_project_or_404, parse_int_list, sanitize_content_disposition, TEXT_TYPES
+from .helpers import _get_project_or_404, coder_scope_names, parse_int_list, sanitize_content_disposition, TEXT_TYPES
 from .export_helpers import csv_safe
 from ..schemas.text_analysis import (
+    SubgroupFilter,
     FilteredFrequenciesRequest, CrossTabulationRequest,
     FilteredFrequenciesResponse, FrequencySet, CodeFrequencyBrief,
     CrossTabulationResponse, CrossTabRow,
@@ -73,15 +76,122 @@ def _validate_text_columns(db: Session, project_id: int, column_ids: list[int]) 
 
 
 
+#: #1534 (1.5.9) — the operators a subgroup filter may use, by what they need.
+_LIST_OPERATORS = ("equals", "in")
+_VALUE_OPERATORS = ("gte", "lte")
+_MEAN_OPERATORS = ("above_mean", "below_mean")
+
+
+def _refuse_unreadable_filters(filters) -> None:
+    """#1534 D104 (1.5.9) — a filter that names no selection is REFUSED, never read as none.
+
+    Before, the CSV export caught a filter list it could not read and wrote
+    ``Filters,None`` above every code's overall count, while the screen's route
+    answered 422; an ``in`` filter with nothing selected silently matched no record.
+    The panel sends only finished filters (`lib/subgroup-filters.ts::readyFilters`),
+    so this is the backstop both routes share: a 400 that says what is missing.
+    """
+    for f in filters:
+        if f.operator not in _LIST_OPERATORS + _VALUE_OPERATORS + _MEAN_OPERATORS:
+            raise HTTPException(status_code=400, detail=f"Unknown operator: {f.operator}")
+        if f.operator in _LIST_OPERATORS and not f.values:
+            raise HTTPException(
+                status_code=400,
+                detail=f"The filter on column {f.column_id} has no value selected.",
+            )
+        if f.operator in _VALUE_OPERATORS and f.value is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"The filter on column {f.column_id} has no number to compare with.",
+            )
+
+
+def parse_filters_json(filters_json: str) -> list:
+    """#1534 D104 (1.5.9) — the export's `filters_json`, read strictly: unreadable is a 400.
+
+    The old reader caught JSON and schema errors and went on with NO filters, so the
+    file said ``Filters,None`` about filters it had been asked for.
+    """
+    try:
+        raw = json.loads(filters_json)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="filters_json is not valid JSON.")
+    if not isinstance(raw, list) or not all(isinstance(f, dict) for f in raw):
+        raise HTTPException(status_code=400, detail="filters_json must be a list of filters.")
+    try:
+        return [SubgroupFilter.model_validate(f) for f in raw]
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        raise HTTPException(status_code=400, detail=f"A filter could not be read: {first['msg']}.")
+
+
+def _fmt_filter_number(x: float) -> str:
+    """40.0 → "40", 2.5 → "2.5" — a filter's number as the researcher typed it."""
+    return f"{x:g}"
+
+
+def describe_filter(filt, col: DatasetColumn, mean: float | None = None) -> str:
+    """#1534 D105 (1.5.9) — what ONE filter selects, in the panel's words and in ASCII.
+
+    The description is the file's ``Filters`` line and the screen figure's accessible
+    name. It used to be ``"region: in"`` — no values — so two different subgroups wrote
+    the same line, and a mean filter never said which mean. ASCII because the export
+    writes no byte-order mark and Excel misreads anything else in it.
+    """
+    name = col.column_name or col.column_text or f"Column {col.id}"
+    op = filt.operator
+    if op == "in":
+        return f"{name} is one of {', '.join(filt.values or [])}"
+    if op == "equals":
+        return f"{name} equals {' or '.join(filt.values or [])}"
+    if op == "gte":
+        return f"{name} at least {_fmt_filter_number(filt.value)}"
+    if op == "lte":
+        return f"{name} at most {_fmt_filter_number(filt.value)}"
+    side = "above" if op == "above_mean" else "below"
+    if mean is None:
+        return f"{name} {side} its mean (no numeric answers)"
+    return f"{name} {side} its mean ({mean:.2f})"
+
+
+#: #1534 D108 — the export's Response Length heading while filters apply: that section
+#: has never been filtered (nor has the panel's), and the file printed it under the
+#: ``Filters`` line without saying so. Screen twin: `CrossAnalysisPanel`'s
+#: `FILTERS_REACH_NOTE`.
+RESPONSE_LENGTH_UNFILTERED_HEADING = "Response Length by Code (all texts; the filters do not apply)"
+
+
+def not_compared_note(names: list[str]) -> str:
+    """#1534 D107 — the datasets left out of a comparison, said once (screen twin:
+    `CrossAnalysisPanel`'s sentence over `filter_scope.unfiltered_datasets`)."""
+    whose = "its" if len(names) == 1 else "their"
+    return f"{'; '.join(names)} (no filter applies to {whose} records)"
+
+
 def _apply_filters(db: Session, project_id: int, filters, focal_column_ids: list[int]):
-    """Apply subgroup filters and return matching DatasetRow IDs per dataset.
+    """Apply subgroup filters and return the matching DatasetRow IDs.
+
+    🔴 #1534 D107 (1.5.9): **a focal dataset no filter can judge is NOT compared.**
+    It used to contribute EVERY record to the filtered side — with questions from
+    two datasets and a filter on one, the panel said "7 records match" when 3 did,
+    and the filtered percentages blended in the other dataset's answers. Its texts
+    are now left out of BOTH sides (the caller reads `compared_column_ids` for the
+    overall too), so the comparison sets a subgroup beside the population it was
+    drawn from, and `filter_scope.unfiltered_datasets` names what was left out.
 
     Returns:
-        tuple: (filtered_row_ids: set[int], filter_description: str,
-                filter_scope: dict with filtered_datasets and unfiltered_datasets)
+        tuple: (filtered_row_ids: set[int] | None, filter_description: str,
+                filter_scope: dict with filtered_datasets and unfiltered_datasets,
+                compared_column_ids: list[int] — the focal columns the filters judge;
+                every focal column when there are no filters)
     """
     if not filters:
-        return None, "No filters applied", {"filtered_datasets": [], "unfiltered_datasets": []}
+        return (
+            None, "No filters applied",
+            {"filtered_datasets": [], "unfiltered_datasets": []},
+            list(focal_column_ids),
+        )
+    _refuse_unreadable_filters(filters)
 
     # Gather info about which datasets contain focal columns
     focal_cols = (
@@ -137,9 +247,9 @@ def _apply_filters(db: Session, project_id: int, filters, focal_column_ids: list
 
         row_sets = []
         for filt, col in ds_filters:
-            matching_rows = _resolve_filter_rows(db, filt, col)
+            matching_rows, mean = _resolve_filter_rows(db, filt, col)
             row_sets.append(matching_rows)
-            filter_parts.append(f"{col.column_name or col.column_text}: {filt.operator}")
+            filter_parts.append(describe_filter(filt, col, mean))
 
         # Intersect all filter results within this dataset
         if row_sets:
@@ -148,15 +258,14 @@ def _apply_filters(db: Session, project_id: int, filters, focal_column_ids: list
                 combined = combined & rs
             per_dataset_rows[ds_id] = combined
 
-    # For datasets that contain focal columns but have no filters, include ALL their rows
-    for ds_id in focal_dataset_ids:
-        if ds_id not in per_dataset_rows:
-            if ds_id in ds_name_map:
-                unfiltered_dataset_names.append(ds_name_map[ds_id])
-            all_rows = db.query(DatasetRow.id).filter(DatasetRow.dataset_id == ds_id).all()
-            per_dataset_rows[ds_id] = {r.id for r in all_rows}
+    # #1534 D107 — a focal dataset with no filter on it is NOT compared (docstring).
+    for ds_id in sorted(focal_dataset_ids - set(per_dataset_rows)):
+        if ds_id in ds_name_map:
+            unfiltered_dataset_names.append(ds_name_map[ds_id])
+    dataset_of = {fc.id: fc.dataset_id for fc in focal_cols}
+    compared_column_ids = [cid for cid in focal_column_ids if dataset_of.get(cid) in per_dataset_rows]
 
-    # Combine all row IDs
+    # Combine the judged datasets' matching row IDs
     all_row_ids: set[int] = set()
     for rows in per_dataset_rows.values():
         all_row_ids |= rows
@@ -170,64 +279,48 @@ def _apply_filters(db: Session, project_id: int, filters, focal_column_ids: list
             "filtered_datasets": filtered_dataset_names,
             "unfiltered_datasets": unfiltered_dataset_names,
         },
+        compared_column_ids,
     )
 
 
-def _resolve_filter_rows(db: Session, filt, col: DatasetColumn) -> set[int]:
-    """Resolve a single filter to a set of DatasetRow IDs."""
+def _resolve_filter_rows(db: Session, filt, col: DatasetColumn) -> tuple[set[int], float | None]:
+    """Resolve a single filter to a set of DatasetRow IDs, and the mean a mean filter used.
+
+    #1534 D104: an unfinished filter never reaches here (`_refuse_unreadable_filters`).
+    """
     base_q = (
         db.query(DatasetValue.row_id)
         .filter(DatasetValue.column_id == col.id)
     )
 
-    if filt.operator in ("equals", "in"):
-        if not filt.values:
-            return set()
+    if filt.operator in _LIST_OPERATORS:
         rows = base_q.filter(DatasetValue.value_text.in_(filt.values)).all()
-        return {r.row_id for r in rows}
+        return {r.row_id for r in rows}, None
 
-    elif filt.operator == "gte":
-        if filt.value is None:
-            return set()
+    if filt.operator == "gte":
         rows = base_q.filter(DatasetValue.value_numeric >= filt.value).all()
-        return {r.row_id for r in rows}
+        return {r.row_id for r in rows}, None
 
-    elif filt.operator == "lte":
-        if filt.value is None:
-            return set()
+    if filt.operator == "lte":
         rows = base_q.filter(DatasetValue.value_numeric <= filt.value).all()
-        return {r.row_id for r in rows}
+        return {r.row_id for r in rows}, None
 
-    elif filt.operator == "above_mean":
-        mean_result = (
-            db.query(func.avg(DatasetValue.value_numeric))
-            .filter(
-                DatasetValue.column_id == col.id,
-                DatasetValue.value_numeric.isnot(None),
-            )
-            .scalar()
+    # above_mean / below_mean — the operator set was checked by the caller.
+    mean_result = (
+        db.query(func.avg(DatasetValue.value_numeric))
+        .filter(
+            DatasetValue.column_id == col.id,
+            DatasetValue.value_numeric.isnot(None),
         )
-        if mean_result is None:
-            return set()
+        .scalar()
+    )
+    if mean_result is None:
+        return set(), None
+    if filt.operator == "above_mean":
         rows = base_q.filter(DatasetValue.value_numeric > mean_result).all()
-        return {r.row_id for r in rows}
-
-    elif filt.operator == "below_mean":
-        mean_result = (
-            db.query(func.avg(DatasetValue.value_numeric))
-            .filter(
-                DatasetValue.column_id == col.id,
-                DatasetValue.value_numeric.isnot(None),
-            )
-            .scalar()
-        )
-        if mean_result is None:
-            return set()
-        rows = base_q.filter(DatasetValue.value_numeric < mean_result).all()
-        return {r.row_id for r in rows}
-
     else:
-        raise HTTPException(status_code=400, detail=f"Unknown operator: {filt.operator}")
+        rows = base_q.filter(DatasetValue.value_numeric < mean_result).all()
+    return {r.row_id for r in rows}, float(mean_result)
 
 
 def _word_totals_by_code(
@@ -278,22 +371,22 @@ def filtered_frequencies(
     columns = _validate_text_columns(db, project_id, body.column_ids)
     column_ids = [c.id for c in columns]
 
-    # Apply filters
-    filtered_row_ids, filter_desc, filter_scope = _apply_filters(
+    # Apply filters. #1534 D107: both sides read only the columns the filters judge.
+    filtered_row_ids, filter_desc, filter_scope, compared_ids = _apply_filters(
         db, project_id, body.filters, column_ids,
     )
 
     filtered_set = _to_frequency_set(compute_comment_frequencies(
-        db, project_id, column_ids,
+        db, project_id, compared_ids,
         row_ids=list(filtered_row_ids) if filtered_row_ids is not None else None,
         coder_ids=body.coder_ids, layer_scope=body.layer_scope,
     ))
 
-    # Overall (unfiltered)
+    # Overall: the same datasets, unfiltered
     overall_set = None
     if body.include_overall and body.filters:
         overall_set = _to_frequency_set(compute_comment_frequencies(
-            db, project_id, column_ids,
+            db, project_id, compared_ids,
             coder_ids=body.coder_ids, layer_scope=body.layer_scope,
         ))
 
@@ -709,9 +802,18 @@ def export_cross_analysis(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Export cross-analysis as CSV."""
-    import json as json_mod
+    """Export cross-analysis as CSV.
 
+    🔴 #1534 (1.5.9): **the client sent its filters as `filters=` from the day this
+    was written (2026-02-19) while this route reads `filters_json`**, and FastAPI drops
+    an undeclared query parameter without a word — so no release ever filtered this
+    file: it said ``Filters,None`` above every code's overall count while the screen
+    showed the comparison. The client sends `filters_json` now (D103), and
+    `lib/api/request-contract.test.ts` (D110) holds every client request's names to
+    the routes' declared ones. With them the file says what it selects (D105), its
+    bases (D106), which focal datasets it could not compare (D107) and which section
+    the filters do not reach (D108); a list it cannot read is a 400 (D104).
+    """
     _get_project_or_404(db, project_id, user.id)
     col_id_list = parse_int_list(column_ids) or []
     if not col_id_list:
@@ -720,13 +822,8 @@ def export_cross_analysis(
 
     columns = _validate_text_columns(db, project_id, col_id_list)
 
-    # Parse filters
-    try:
-        filters_raw = json_mod.loads(filters_json)
-        from ..schemas.text_analysis import SubgroupFilter
-        filters = [SubgroupFilter(**f) for f in filters_raw] if filters_raw else []
-    except (json_mod.JSONDecodeError, ValueError, TypeError):
-        filters = []
+    # #1534 D104 — read strictly: a list it cannot read is a 400, never "no filters".
+    filters = parse_filters_json(filters_json)
 
     # Load codes
     codes = (
@@ -736,6 +833,25 @@ def export_cross_analysis(
         .all()
     )
 
+    # The counts first: the header block states their bases (D106).
+    if filters:
+        filtered_row_ids, filter_desc, filter_scope, compared_ids = _apply_filters(
+            db, project_id, filters, col_id_list,
+        )
+        # D107: both sides read only the columns the filters judge.
+        overall = compute_comment_frequencies(
+            db, project_id, compared_ids, coder_ids=parsed_coder_ids, layer_scope=layer_scope,
+        )
+        filtered = compute_comment_frequencies(
+            db, project_id, compared_ids,
+            row_ids=list(filtered_row_ids) if filtered_row_ids is not None else None,
+            coder_ids=parsed_coder_ids, layer_scope=layer_scope,
+        )
+    else:
+        freq = compute_comment_frequencies(
+            db, project_id, col_id_list, coder_ids=parsed_coder_ids, layer_scope=layer_scope,
+        )
+
     output = io.StringIO()
     writer = csv.writer(output)
 
@@ -744,13 +860,31 @@ def export_cross_analysis(
     writer.writerow(["Columns", csv_safe(", ".join(c.column_name or c.column_text for c in columns))])
 
     if filters:
-        filtered_row_ids, filter_desc, filter_scope = _apply_filters(
-            db, project_id, filters, col_id_list,
-        )
         writer.writerow(["Filters", csv_safe(filter_desc)])
     else:
-        filtered_row_ids = None
         writer.writerow(["Filters", "None"])
+
+    # #1531 D97 (1.5.9) — the coder scope is said beside the filters, because the
+    # file holds only these coders' coding: while blind the panel asks for the
+    # viewer's own, and a file that did not say so reads as every coder's. Under
+    # the consensus layer `coder_ids` is moot (one synthetic coder — the reads
+    # below skip it there too), so nothing is said; no scope, no line (the
+    # unscoped file is byte-identical to before).
+    if parsed_coder_ids and layer_scope != LAYER_CONSENSUS:
+        writer.writerow(["Coders", csv_safe(", ".join(coder_scope_names(db, parsed_coder_ids)))])
+
+    # #1534 D107 — the focal datasets no filter judges are named, never silently pooled.
+    if filters and filter_scope["unfiltered_datasets"]:
+        writer.writerow(["Not compared", csv_safe(not_compared_note(filter_scope["unfiltered_datasets"]))])
+
+    # #1534 D106 — the bases each side's percentages are of (the screen says the
+    # filtered one as "N texts from M records").
+    writer.writerow(["Base", "Texts", "Records"])
+    if filters:
+        writer.writerow(["Filtered", filtered["text_count"], filtered["row_count"]])
+        writer.writerow(["Overall", overall["text_count"], overall["row_count"]])
+    else:
+        writer.writerow(["All", freq["text_count"], freq["row_count"]])
 
     writer.writerow([])
 
@@ -758,14 +892,6 @@ def export_cross_analysis(
     writer.writerow(["Code Frequencies"])
     if filters:
         writer.writerow(["Code", "Filtered Count", "Filtered %", "Overall Count", "Overall %", "Difference (pp)"])
-        overall = compute_comment_frequencies(
-            db, project_id, col_id_list, coder_ids=parsed_coder_ids, layer_scope=layer_scope,
-        )
-        filtered = compute_comment_frequencies(
-            db, project_id, col_id_list,
-            row_ids=list(filtered_row_ids) if filtered_row_ids is not None else None,
-            coder_ids=parsed_coder_ids, layer_scope=layer_scope,
-        )
         overall_map = {f["code_id"]: f for f in overall["frequencies"]}
         for f in filtered["frequencies"]:
             o = overall_map.get(f["code_id"])
@@ -777,16 +903,14 @@ def export_cross_analysis(
             ])
     else:
         writer.writerow(["Code", "Count", "%"])
-        freq = compute_comment_frequencies(
-            db, project_id, col_id_list, coder_ids=parsed_coder_ids, layer_scope=layer_scope,
-        )
         for f in freq["frequencies"]:
             writer.writerow([csv_safe(f["code_name"]), f["count"], f"{f['percentage']}%"])
 
     writer.writerow([])
 
-    # Section 3: Response length
-    writer.writerow(["Response Length by Code"])
+    # Section 3: Response length — every focal text, filtered or not: the panel's
+    # Response Length never took the filters, and #1534 D108 has the file say so.
+    writer.writerow([RESPONSE_LENGTH_UNFILTERED_HEADING if filters else "Response Length by Code"])
     writer.writerow(["Code", "Avg Words", "Text Count"])
     comment_values = get_non_empty_comment_values(
         db, col_id_list, treat_as_empty_for_project(db, project_id))

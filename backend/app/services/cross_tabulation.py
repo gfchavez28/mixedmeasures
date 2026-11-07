@@ -17,6 +17,7 @@ from ..models.recode import RecodeDefinition
 # shape from the shared grouping loader — a paired two-column join — so filter inline).
 from .missing_values import column_missing_rules, is_missing
 from .grouping import order_value_labels
+from .value_labels import answer_label_resolver
 from .undefined_stats import DEGENERATE, finite_or_none
 
 logger = logging.getLogger(__name__)
@@ -171,11 +172,17 @@ def compute_cross_tabulation(
     # rules (REPLACE semantics), defaults when undeclared.
     row_rules = column_missing_rules(row_col)
     col_rules = column_missing_rules(col_col)
+    # #1332 (1.5.9, D56): a cell is counted under the declared label its answer
+    # matches without case or surrounding space — the rule the import numbered
+    # it by — so "Strongly Agree" is not a row of its own beside "Strongly agree".
+    # Missing is judged on the stored text first.
+    row_as_label = answer_label_resolver(row_col)
+    col_as_label = answer_label_resolver(col_col)
     joint_counts: Counter[tuple[str, str]] = Counter()
     for row_val, col_val in pairs:
         if is_missing(row_val, row_rules) or is_missing(col_val, col_rules):
             continue
-        joint_counts[(row_val, col_val)] += 1
+        joint_counts[(row_as_label(row_val), col_as_label(col_val))] += 1
 
     # Axis values: the DECLARED scale first (including levels nobody chose —
     # #591), then any observed value the declaration never named. #406:
@@ -227,7 +234,18 @@ def compute_cross_tabulation(
                 [joint_counts.get((all_row_vals[i], all_col_vals[j]), 0) for j in chi_cols]
                 for i in chi_rows
             ])
-            chi2, p, df, expected = chi2_contingency(observed)
+            # #1328 (1.5.9, D49): PEARSON's χ², uncorrected, for every table.
+            # scipy applies Yates's continuity correction by default exactly
+            # when df = 1 — every 2×2 submatrix — and V below came from that
+            # corrected statistic, which no package or source does (R vcd /
+            # DescTools / rcompanion / effectsize, jamovi, JASP, Stata, SAS,
+            # scipy's own `association()`). Yates approximates Fisher's exact p,
+            # which this table already prints beside it on a 2×2 (filed table:
+            # Yates .0858, Fisher .0844, Pearson .0393), so the corrected row
+            # added nothing. One rule for every table is a definition, not a
+            # stated basis (D47's precedent): the R script's `correct = FALSE`
+            # and `statistics.md` §3 name it.
+            chi2, p, df, expected = chi2_contingency(observed, correction=False)
             # #709: the expected table was computed and thrown away. Chi-square
             # is a large-sample approximation and it degrades when expected
             # counts are small — the conventional rule is >20% of cells below 5,

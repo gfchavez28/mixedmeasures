@@ -48,6 +48,7 @@ import CoderFilterPopover from '@/components/CoderFilterPopover'
 import BlindModeToggle from '@/components/BlindModeToggle'
 import CoderCountBadge from '@/components/CoderCountBadge'
 import { useBlindMode } from '@/hooks/useBlindMode'
+import { MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
 import TextCodePanel from '@/components/TextCodePanel'
 import TextNotesPanel from '@/components/TextNotesPanel'
 import CollapsiblePanel, { PANEL_EXPANDED, PANEL_RAIL_SCROLL } from '@/components/CollapsiblePanel'
@@ -1613,13 +1614,22 @@ export default function TextCodingView() {
           <div className="flex-1" />
 
           {/* Export */}
+          {/* #1530 D97/D98 (1.5.9): while blind mode withholds, each answer's codes are the
+            * viewer's own and the server names the file `_coder-<name>`. It waits for the blind
+            * state to settle (#964) — `aria-disabled` + the guard, never `disabled` — or a
+            * single coder's file would be narrowed to her own rows on an unanswered roster. */}
           <Button
             variant="ghost"
             size="sm"
-            className="text-xs gap-1"
-            onClick={() => textCodingApi.exportCoded(projectId, {
-              column_ids: columnIdsStr || undefined,
-            })}
+            className={`text-xs gap-1 ${blindSettled ? '' : MODE_DISABLED_CLASS}`}
+            aria-disabled={!blindSettled || undefined}
+            onClick={() => {
+              if (!blindSettled) return
+              void textCodingApi.exportCoded(projectId, {
+                column_ids: columnIdsStr || undefined,
+                coder_ids: withholding && self != null ? String(self) : undefined,
+              })
+            }}
             title="Download the selected columns' responses and codes as CSV"
           >
             <Download className="w-3.5 h-3.5" />

@@ -56,6 +56,14 @@ def _participant_predicate():
     return (Speaker.is_facilitator == 0) | (Segment.speaker_id == None)  # noqa: E711
 
 
+def participant_turn_query(query: Query) -> Query:
+    """J-A's participant dimension applied to a query already joined to
+    `Segment` — the ONE spelling a reader outside this module takes (#1333:
+    the reliability gathers). Documents and clips have no speaker, so it is a
+    no-op for them by construction."""
+    return _apply_participant_join(query, participant_only=True)
+
+
 def _apply_participant_join(query: Query, *, participant_only: bool) -> Query:
     if participant_only:
         query = query.outerjoin(Speaker, Speaker.id == Segment.speaker_id).filter(
@@ -135,6 +143,13 @@ def coded_segment_count_for_project(
     Joins through the parent table (so it does not materialize a parent-id list)
     — used by the overview totals. Documents and observations skip the
     participant dimension (no speakers).
+
+    ⚠️ The document and observation arms are planned FROM THE PARENT (#1463, D62 —
+    ``visible_segment_filter(from_parent=True)``): with the default form SQLite
+    started from every visible segment on the install, 1.45 s per arm on 1.2M turns
+    (encrypted) for a project with no documents or observations at all; now about
+    1 ms. The conversation arm is unchanged — J-A's definition visits every coding
+    of the project there, whatever the plan.
     """
     query = (
         db.query(func.count(func.distinct(CodeApplication.segment_id)))
@@ -155,14 +170,14 @@ def coded_segment_count_for_project(
     elif source == "document":
         query = query.join(Document, Segment.document_id == Document.id).filter(
             Document.project_id == project_id,
-            *visible_segment_filter(),
+            *visible_segment_filter(from_parent=True),
             Code.is_universal == False,  # noqa: E712
             layer_scope_filter(layer_scope),
         )
     elif source == "observation":
         query = query.join(Observation, Segment.observation_id == Observation.id).filter(
             Observation.project_id == project_id,
-            *visible_segment_filter(),
+            *visible_segment_filter(from_parent=True),
             Code.is_universal == False,  # noqa: E712
             layer_scope_filter(layer_scope),
         )
@@ -171,6 +186,32 @@ def coded_segment_count_for_project(
             f"source must be 'conversation', 'document', or 'observation', got {source!r}"
         )
     return query.scalar() or 0
+
+
+_PARENT_OF_SOURCE = {
+    "document": (Document, Segment.document_id),
+    "observation": (Observation, Segment.observation_id),
+}
+
+
+def visible_segment_count_for_project(db: Session, project_id: int, *, source: str) -> int:
+    """A project's VISIBLE document segments or observation clips (the Overview's totals).
+
+    Moved here from ``routers/projects.py::get_project_summary`` (#1463, D62) so it can
+    be guarded beside its coded twin above. Planned from the parent
+    (``visible_segment_filter(from_parent=True)``): with the default form SQLite started
+    from every visible segment on the install, 1.45 s per count on 1.2M turns
+    (encrypted) for a project with none.
+    """
+    if source not in _PARENT_OF_SOURCE:
+        raise ValueError(f"source must be 'document' or 'observation', got {source!r}")
+    parent, parent_fk = _PARENT_OF_SOURCE[source]
+    return db.query(func.count(Segment.id)).join(
+        parent, parent_fk == parent.id
+    ).filter(
+        parent.project_id == project_id,
+        *visible_segment_filter(from_parent=True),
+    ).scalar() or 0
 
 
 # --------------------------------------------------------------------------- #

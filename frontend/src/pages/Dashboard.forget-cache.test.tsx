@@ -138,7 +138,11 @@ describe('#1206 — the overwrite import', () => {
     // The stub is mounted with nothing to paint: the old name never appears.
     expect(await screen.findByText('Loading the overview')).toBeInTheDocument()
     expect(screen.queryByText(/Old copy/)).not.toBeInTheDocument()
-    expect(api.get).toHaveBeenCalledWith(9)
+    // Waited for, never read at once: the loading text renders before the query's fetch is
+    // sent, and on a loaded runner the assertion can land between them (CI run 42408619787
+    // on b72a43c4: "Number of calls: 0" here, 7/7 alone). The property is that the page
+    // asks the SERVER, which this still requires.
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith(9))
     expectForgotten(qc)
 
     await act(async () => { fetched.resolve({ name: 'Ferncrest from the file' }) })

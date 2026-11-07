@@ -207,7 +207,7 @@ cd frontend && npm ci && npm run build
 # 2. Freeze the backend (the bundle contains the SPA + database migrations):
 cd ../backend && source venv/bin/activate && pyinstaller mixedmeasures.spec
 # 3. Run the shell:
-cd ../electron && npm install && npm start
+cd ../electron && npm ci && npm start
 ```
 
 `MM_BACKEND_EXE=/path/to/mm-backend` overrides the resolved backend path for local
@@ -217,13 +217,13 @@ the database encryption key to an arbitrary substitute binary.
 ## Testing
 
 ```bash
-cd electron && npm install && npm test   # node --test, headless
+cd electron && npm ci && npm test   # node --test, headless
 ```
 
 The helper suite covers port selection, the health gate (including crash-bail and
 timeout), per-platform executable resolution, spawn-environment injection,
-teardown (POSIX `SIGTERM`-then-`SIGKILL`, or `SIGKILL` at once during a database
-update; Windows `taskkill`), the startup deadline an update gets (#1362), the update-manifest
+teardown (POSIX `SIGTERM`, or `SIGKILL` at once during a database update; Windows
+`taskkill`), the startup deadline an update gets (#1362), the update-manifest
 patch/merge tool (round-trip fidelity, hash recomputation, arch-merge dedup,
 version-mismatch refusal), and the updater state machine (offline is swallowed,
 a periodic check never interrupts an in-flight download, install refuses unless an

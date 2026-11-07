@@ -64,9 +64,10 @@ class AssumptionCheck(BaseModel):
     center: str | None = None
     undefined_reason: str | None = None
     #: #525b — Levene only. Groups that are in the COMPARISON but not in the
-    #: test: empty ones are dropped outright, and a singleton contributes a
-    #: structural zero deviation that reads as perfect homogeneity. Named rather
-    #: than refused, the way normality already names what it could not test.
+    #: test, named rather than absorbed: empty ones, and (#1329, D51) ones with
+    #: a single value — which since 1.5.9 are left OUT of the test like every
+    #: other test of the row (they contributed a structural-zero deviation that
+    #: read as perfect homogeneity).
     excluded_groups: list[str] = []
     singleton_groups: list[str] = []
 
@@ -146,6 +147,11 @@ class TestResult(BaseModel):
     post_hoc: dict | None = None
     effect_size_ci_lower: float | None = None
     effect_size_ci_upper: float | None = None
+    #: #1326 STAT-12 (D58) — how THIS p was computed, when the method is chosen
+    #: by the data: Mann–Whitney's `exact` or `normal_approximation`
+    #: (`comparisons.P_METHOD_*` ↔ `lib/p-method.ts`). `None` for a test whose
+    #: p has one method. The fifteenth stated-basis member.
+    p_method: str | None = None
 
 
 class ComparisonRow(BaseModel):
@@ -159,6 +165,11 @@ class ComparisonRow(BaseModel):
     #: cells that a researcher could not tell from a broken tool; this names the
     #: refusal. `None` when a test IS present.
     test_omitted_reason: str | None = None
+    #: #1329 (D51) — groups this row SHOWS that every test of it leaves out:
+    #: they hold values, but fewer than the test needs (one value, for a
+    #: variance-based test). Decided by `testable_groups.split_testable`, the
+    #: function the tests themselves ask. Always present; `[]` when none.
+    untested_groups: list[str] = []
     #: #525 — Levene across the row's groups; a property of the comparison.
     variance_homogeneity: AssumptionCheck | None = None
     #: #525b — the QQ diagnostic, per ROW because normality is a property of the

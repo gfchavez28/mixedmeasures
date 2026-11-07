@@ -8,6 +8,12 @@ from ..models.audit import AuditEntry
 #: carries no `project_id` (the project is gone) and names the id in `entity_id`.
 PROJECT_DELETED_ACTION = "deleted"
 
+#: The record `routers/code_analysis.py::reveal_blind_mode` writes when a coder breaks
+#: blind mode (DEC-G: hide while blind, one LOGGED reveal). The Excel Audit Trail keeps
+#: every one of them past its row cap (#1532 D100), so the writer and that reader share
+#: this one spelling.
+BLIND_MODE_REVEAL_ACTION = "reveal_codes"
+
 
 def forget_project_audit(db: Session, project_id: int) -> int:
     """#1230 — remove a DELETED project's entries, in the delete's own transaction.

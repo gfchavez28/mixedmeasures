@@ -12,10 +12,11 @@ from ..models.user import User
 from ..auth import get_current_user
 from .auth import limiter
 from .helpers import (
-    parse_int_list, _get_observation_or_404, _get_project_or_404, sanitize_csv_filename,
-    _fmt_stat,
+    parse_int_list, parse_source_ids, _get_observation_or_404, _get_project_or_404,
+    sanitize_csv_filename, _fmt_stat,
 )
-from .export_helpers import csv_safe
+from .export_helpers import csv_safe, file_scope_line
+from ..services import comparison_basis as cmp_basis
 from ..services.coding_layers import LAYER_SCOPE_PATTERN
 from ..services.code_analysis import (
     get_code_frequencies,
@@ -24,12 +25,9 @@ from ..services.code_analysis import (
     get_code_cooccurrence,
     get_coded_comments_with_context,
     get_source_frequencies,
-    get_source_level_cooccurrence,
     get_demographic_comparison,
     get_saturation_data,
     get_text_columns_with_coding,
-    _get_ordered_codes,
-    _build_cooccurrence_response,
 )
 from ..services.irr import compute_irr, parse_source_token
 from ..services.machine_agreement import compute_machine_agreement
@@ -42,7 +40,7 @@ from ..services.coding_coverage import source_coder_coverage, project_coder_cove
 from ..services.reconciliation import RECONCILIATION_SOURCE_TYPES, build_reconciliation
 from ..services.consensus import consensus_enabled, consensus_exists_for_project
 from ..services.consensus_staleness import drain_stale_consensus
-from ..services.audit import log_action
+from ..services.audit import BLIND_MODE_REVEAL_ACTION, log_action
 from ..models.consensus_stale_target import ConsensusStaleTarget
 from ..schemas.code_analysis import (
     CoderCoverageItem,
@@ -136,7 +134,7 @@ async def coder_coverage(
 
 
 @router.get("/frequencies")
-async def code_frequencies(
+def code_frequencies(  # def, not async: #1463 D67 — test_endpoint_event_loop.py::MUST_BE_SYNC
     project_id: int,
     code_ids: str | None = Query(None, description="Comma-separated code IDs"),
     exclude_facilitator: bool = Query(True),
@@ -192,6 +190,9 @@ async def code_segments_with_context(
     offset: int = Query(0, ge=0),
     # Appended LAST (bare-default convention) — 4c: observation scoping.
     observation_ids: str | None = None,
+    # #1531 D102 (1.5.9) — the client sends it only while blind: each passage's
+    # code chips then follow `coder_ids` too (`code_analysis._chip_filter`).
+    chips_follow_coder_ids: bool = False,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -212,6 +213,7 @@ async def code_segments_with_context(
         coder_ids=parse_int_list(coder_ids),
         layer_scope=layer_scope,
         observation_ids=parse_int_list(observation_ids),
+        chips_follow_coder_ids=chips_follow_coder_ids,
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Code not found")
@@ -229,6 +231,8 @@ async def code_comments_with_context(
     layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default — people's coding, optionally narrowed by coder_ids; excludes consensus AND machine), 'consensus' (the derived layer) or 'machine' (imported model output)"),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    # #1531 D102 (1.5.9) — as on `/segments`: sent only while blind.
+    chips_follow_coder_ids: bool = False,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -245,6 +249,7 @@ async def code_comments_with_context(
         offset=offset,
         coder_ids=parse_int_list(coder_ids),
         layer_scope=layer_scope,
+        chips_follow_coder_ids=chips_follow_coder_ids,
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Code not found")
@@ -253,7 +258,7 @@ async def code_comments_with_context(
 
 
 @router.get("/cooccurrence")
-async def code_cooccurrence(
+def code_cooccurrence(  # def, not async: #1527 D89 — test_endpoint_event_loop.py::MUST_BE_SYNC
     project_id: int,
     code_ids: str | None = Query(None, description="Comma-separated code IDs"),
     exclude_facilitator: bool = Query(True),
@@ -282,52 +287,30 @@ async def code_cooccurrence(
     if level not in ("segment", "source"):
         raise HTTPException(status_code=400, detail="level must be 'segment' or 'source'")
 
-    parsed_code_ids = parse_int_list(code_ids)
-    parsed_conv_ids = parse_int_list(conversation_ids)
-    parsed_part_ids = parse_int_list(participant_ids)
-    parsed_col_ids = parse_int_list(text_column_ids)
-    parsed_doc_ids = parse_int_list(document_ids)
-    parsed_coder_ids = parse_int_list(coder_ids)
-    parsed_obs_ids = parse_int_list(observation_ids)
-
-    if level == "source":
-        cooccur, total_units = get_source_level_cooccurrence(
-            db, project_id,
-            code_ids=parsed_code_ids,
-            exclude_facilitator=exclude_facilitator,
-            conversation_ids=parsed_conv_ids,
-            text_column_ids=parsed_col_ids,
-            participant_ids=parsed_part_ids,
-            source=source,
-            document_ids=parsed_doc_ids,
-            coder_ids=parsed_coder_ids,
-            layer_scope=layer_scope,
-            observation_ids=parsed_obs_ids,
-        )
-        all_codes = _get_ordered_codes(db, project_id, parsed_code_ids)
-        return _build_cooccurrence_response(
-            cooccur, all_codes, total_units, 0, source,
-        )
-    else:
-        result = get_code_cooccurrence(
-            db, project_id,
-            code_ids=parsed_code_ids,
-            exclude_facilitator=exclude_facilitator,
-            conversation_ids=parsed_conv_ids,
-            participant_ids=parsed_part_ids,
-            source=source,
-            document_ids=parsed_doc_ids,
-            coder_ids=parsed_coder_ids,
-            layer_scope=layer_scope,
-            observation_ids=parsed_obs_ids,
-        )
-        return result
+    # #1527: ONE dispatch for both levels, shared with the CSV (D86), and a source
+    # list keeps "absent" (every source of the kind) apart from "sent empty" (none
+    # of it), as the comparison's does (D84, #1297). The question selection now
+    # reaches the unit level too (it was parsed and dropped there until 1.5.9).
+    return get_code_cooccurrence(
+        db, project_id,
+        code_ids=parse_int_list(code_ids),
+        exclude_facilitator=exclude_facilitator,
+        conversation_ids=parse_source_ids(conversation_ids),
+        participant_ids=parse_int_list(participant_ids),
+        source=source,
+        document_ids=parse_source_ids(document_ids),
+        coder_ids=parse_int_list(coder_ids),
+        layer_scope=layer_scope,
+        observation_ids=parse_source_ids(observation_ids),
+        text_column_ids=parse_source_ids(text_column_ids),
+        level=level,
+    )
 
 
 # ── New Endpoints ─────────────────────────────────────────────────────────
 
 @router.post("/source-frequencies", response_model=SourceFrequenciesResponse)
-async def source_frequencies(
+def source_frequencies(  # def, not async: #1526 D82 — test_endpoint_event_loop.py::MUST_BE_SYNC
     project_id: int,
     body: SourceFrequenciesRequest,
     user: User = Depends(get_current_user),
@@ -354,7 +337,7 @@ async def source_frequencies(
 
 
 @router.post("/demographic-comparison", response_model=DemographicComparisonResponse)
-async def demographic_comparison(
+def demographic_comparison(  # def, not async: #1323 D11 — test_endpoint_event_loop.py::MUST_BE_SYNC
     project_id: int,
     body: DemographicComparisonRequest,
     user: User = Depends(get_current_user),
@@ -373,6 +356,8 @@ async def demographic_comparison(
         participant_ids=body.participant_ids,
         coder_ids=body.coder_ids,
         layer_scope=body.layer_scope,
+        document_ids=body.document_ids,
+        observation_ids=body.observation_ids,
     )
     return result
 
@@ -408,7 +393,7 @@ async def saturation(
 
 
 @router.get("/text-columns", response_model=list[TextColumnInfo])
-async def comment_columns(
+def comment_columns(  # def, not async: #1463 D67 — test_endpoint_event_loop.py::MUST_BE_SYNC
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -487,6 +472,8 @@ def machine_agreement(
     return MachineAgreementResponse(
         available=result.available,
         unavailable_reason=result.unavailable_reason,
+        unit_basis=result.unit_basis,
+        verdict_min_units=result.verdict_min_units,
         pairs=[
             MachinePairAgreementResponse(
                 human_id=p.human_id,
@@ -508,6 +495,7 @@ def machine_agreement(
                         kappa_interpretation=c.kappa_interpretation,
                         prevalence=c.prevalence,
                         undefined_reason=c.undefined_reason,
+                        verdict_withheld_reason=c.verdict_withheld_reason,
                     )
                     for c in p.per_code
                 ],
@@ -712,7 +700,7 @@ async def reveal_blind_mode(
     _get_project_or_404(db, project_id, user.id)
     log_action(
         db,
-        action="reveal_codes",
+        action=BLIND_MODE_REVEAL_ACTION,
         entity_type="blind_mode",
         entity_id=None,
         user_id=user.id,
@@ -726,7 +714,7 @@ async def reveal_blind_mode(
 # ── CSV Exports ───────────────────────────────────────────────────────────
 
 @router.get("/source-frequencies/csv")
-async def source_frequencies_csv(
+def source_frequencies_csv(  # def, not async: #1528 D89 — test_endpoint_event_loop.py::MUST_BE_SYNC
     project_id: int,
     code_ids: str | None = Query(None),
     conversation_ids: str | None = Query(None),
@@ -739,26 +727,32 @@ async def source_frequencies_csv(
     layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default), 'consensus' or 'machine'"),
     # Appended LAST (bare-default convention) — 4c: observation scoping.
     observation_ids: str | None = None,
+    # #1545 (1.6.0): the panel's description of the chosen filter values (D124: the server
+    # cannot derive it from the ids). Bare default, appended last.
+    participant_filter_label: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Export source frequencies as CSV."""
+    """Export source frequencies as CSV (the analysis page's *Exports › Source Data CSV*)."""
     _get_project_or_404(db, project_id, user.id)
 
     # Forward coder_ids + layer_scope so the export matches the on-screen filter
     # (J2-5 L; also closes a pre-existing J1 coder_ids gap in the CSV path).
+    # #1528 D88: a SOURCE list keeps "absent" (every source of that kind) apart from "present
+    # and empty" (none of that kind) — `helpers.parse_source_ids`, #1297's rule. `parse_int_list`
+    # folded `''` into None, so one selected interview listed every document, clip and question.
     result = get_source_frequencies(
         db, project_id,
         code_ids=parse_int_list(code_ids),
-        conversation_ids=parse_int_list(conversation_ids),
-        text_column_ids=parse_int_list(text_column_ids),
+        conversation_ids=parse_source_ids(conversation_ids),
+        text_column_ids=parse_source_ids(text_column_ids),
         exclude_facilitator=exclude_facilitator,
         participant_ids=parse_int_list(participant_ids),
         group_by_subtype=group_by_subtype,
-        document_ids=parse_int_list(document_ids),
+        document_ids=parse_source_ids(document_ids),
         coder_ids=parse_int_list(coder_ids),
         layer_scope=layer_scope,
-        observation_ids=parse_int_list(observation_ids),
+        observation_ids=parse_source_ids(observation_ids),
     )
 
     output = io.StringIO()
@@ -766,6 +760,18 @@ async def source_frequencies_csv(
 
     codes = result["codes"]
     code_names = [c["name"] for c in codes]
+
+    # #1545 (1.6.0): a file narrowed by a coder, layer or participant filter says so on its first
+    # line, as the Frequencies and Co-occurrence CSVs do — this one said nothing, so a filtered
+    # and an unfiltered file had the same first line and the same name. An unscoped file is
+    # unchanged (its header first).
+    scope = file_scope_line(
+        db, coder_ids=parse_int_list(coder_ids), layer_scope=layer_scope,
+        participant_ids=parse_int_list(participant_ids),
+        participant_filter_label=participant_filter_label,
+    )
+    if scope:
+        writer.writerow([csv_safe(scope)])
 
     # Header — header cells starting with formula prefixes (e.g. user code
     # name "=evil") would inject when the field STARTS with the user value.
@@ -820,7 +826,7 @@ async def source_frequencies_csv(
 
 
 @router.get("/demographic-comparison/csv")
-async def demographic_comparison_csv(
+def demographic_comparison_csv(  # def, not async: #1323 D11 — test_endpoint_event_loop.py::MUST_BE_SYNC
     project_id: int,
     group_by_subtype: str = Query(...),
     code_ids: str | None = Query(None),
@@ -830,6 +836,12 @@ async def demographic_comparison_csv(
     participant_ids: str | None = Query(None),
     coder_ids: str | None = Query(None, description="Comma-separated coder (user) IDs; omit/empty = all coders"),
     layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default), 'consensus' or 'machine'"),
+    # #1298 — bare defaults (a direct-call test that omits them must get None, not
+    # a `Query` sentinel — backend/tests/the internal design notes).
+    document_ids: str | None = None,
+    observation_ids: str | None = None,
+    # #1545 (1.6.0): the panel's description of the chosen filter values. Bare default, last.
+    participant_filter_label: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -837,31 +849,56 @@ async def demographic_comparison_csv(
     _get_project_or_404(db, project_id, user.id)
 
     # Forward coder_ids + layer_scope so the export matches the on-screen filter (J2-5 L).
+    # ⚠️ A SOURCE list keeps "absent" (every source of that kind) apart from "present
+    # and empty" (none of that kind) — `helpers.parse_source_ids` (#1297; shared with
+    # the co-occurrence since #1527).
     result = get_demographic_comparison(
         db, project_id,
         group_by_subtype=group_by_subtype,
         code_ids=parse_int_list(code_ids),
-        conversation_ids=parse_int_list(conversation_ids),
-        text_column_ids=parse_int_list(text_column_ids),
+        conversation_ids=parse_source_ids(conversation_ids),
+        text_column_ids=parse_source_ids(text_column_ids),
         exclude_facilitator=exclude_facilitator,
         participant_ids=parse_int_list(participant_ids),
         coder_ids=parse_int_list(coder_ids),
         layer_scope=layer_scope,
+        document_ids=parse_source_ids(document_ids),
+        observation_ids=parse_source_ids(observation_ids),
     )
 
     output = io.StringIO()
     writer = csv.writer(output)
 
     groups = result["groups"]
+    basis = result["basis"]
+    unit_word = cmp_basis.UNIT_CSV_LABEL[basis["unit"]]
+    correction_word = cmp_basis.CORRECTION_CSV_LABEL[basis["correction"]]
 
-    # Header
+    # #1545 (1.6.0): the scope line, as the Source Data CSV above — none when nothing narrows.
+    scope = file_scope_line(
+        db, coder_ids=parse_int_list(coder_ids), layer_scope=layer_scope,
+        participant_ids=parse_int_list(participant_ids),
+        participant_filter_label=participant_filter_label,
+    )
+    if scope:
+        writer.writerow([csv_safe(scope)])
+
+    # Header — #1323: the UNIT is in every count column's name, the n beside it.
     header = ["Code", "Category"]
     for g in groups:
-        header.append(csv_safe(f"{g} (Count)"))
+        header.append(csv_safe(f"{g} ({unit_word} who used it)"))
+        header.append(csv_safe(f"{g} ({unit_word} with material)"))
         header.append(csv_safe(f"{g} (Proportion)"))
+        header.append(csv_safe(f"{g} (Passages coded)"))
     if len(groups) == 2:
-        header.append("Delta")
-    header.extend(["Test Method", "p-value", "Sig"])
+        # D3: Δ's interval, named for what it is — not adjusted for the codes compared.
+        level = round(cmp_basis.DELTA_CI_LEVEL * 100)
+        header.extend(["Delta", f"Delta {level}% CI lower (Newcombe, unadjusted)",
+                       f"Delta {level}% CI upper (Newcombe, unadjusted)"])
+    header.extend(["Test Method", "p-value", f"p-value (adjusted, {correction_word})", "Sig",
+                   # D2: from the margins alone — "no" means no data with these group
+                   # sizes could star this code, so an empty Sig is not "no difference".
+                   "Can reach significance at these group sizes", "No test because"])
     writer.writerow(header)
 
     # Data rows
@@ -870,18 +907,28 @@ async def demographic_comparison_csv(
         for g in groups:
             stats = entry["by_group"].get(g, {})
             row.append(stats.get("count", 0))
-            # #1421: a group with no segments has no proportion — BLANK, the
+            row.append(result["group_totals"][g]["n"])
+            # #1421: a group with no material has no proportion — BLANK, the
             # export convention (`_fmt_stat`); a bare `:.4f` on None is a 500.
             row.append(_fmt_stat(stats.get("proportion"), 4))
+            row.append(stats.get("passages", 0))
         if len(groups) == 2:
             row.append(f"{entry.get('delta_proportion', 0):.4f}" if entry.get("delta_proportion") is not None else "")
+            ci = entry.get("delta_ci")
+            row.append(_fmt_stat(ci["lower"], 4) if ci else "")
+            row.append(_fmt_stat(ci["upper"], 4) if ci else "")
         test = entry.get("test")
         if test:
             row.append(test["method"])
-            row.append(f"{test['p_value']:.6f}")
+            row.append(_fmt_stat(test.get("p_value"), 6))
+            row.append(_fmt_stat(test.get("p_adjusted"), 6))
+            # The star reads the ADJUSTED p (`significant`), as on the screen.
             row.append("*" if test["significant"] else "")
+            reach = test.get("can_reach_significance")
+            row.append("" if reach is None else ("yes" if reach else "no"))
+            row.append("")
         else:
-            row.extend(["", "", ""])
+            row.extend(["", "", "", "", "", entry.get("test_omitted_reason") or basis.get("test_omitted_reason") or ""])
         writer.writerow(row)
 
     output.seek(0)

@@ -280,14 +280,31 @@ describe('fetchChartTables — qualitative embeds', () => {
     expect(sent.level).toBe('segment')
   })
 
+  it('#1335 (D47): the co-occurrence table says the rule its pairs were counted by, under the table', async () => {
+    // A Markdown or HTML reader sees no caption, so the figure's sentence rides as
+    // the table's note. Written out here, not imported: the words are the claim.
+    const RULE = 'Two codes count as co-occurring only where one coder applied both.'
+    const tables = await fetchChartTables(
+      themeWithChart(qualConfig({ tab: 'relationships', rel_view: 'cooccurrence' })), 3, LENS,
+    )
+    const entry = tables.get(1)!
+    expect(entry.table?.note).toBe(RULE)
+    expect(entry.md.endsWith(`\n\n${RULE}`)).toBe(true)
+    expect(entry.html).toContain(`<p>${RULE}</p>`)
+  })
+
   it('exports a comparison with counts AND proportions per group', async () => {
     const tables = await fetchChartTables(
       themeWithChart(qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: 'role' })), 3, LENS,
     )
 
     const md = tables.get(1)!.md
-    expect(md.split('\n')[0]).toBe('| Code | Staff n | Volunteer n | Staff % | Volunteer % |')
-    expect(md).toContain('| Trust | 4 | 1 | 40.0% | 20.0% |')
+    // #1323 D3: two groups carry Δ. A payload from before the basis carries no
+    // interval, so no interval column and no note — nothing is relabelled.
+    expect(md.split('\n')[0]).toBe('| Code | Staff n | Volunteer n | Staff % | Volunteer % | Δ (percentage points) |')
+    expect(md).toContain('| Trust | 4 | 1 | 40.0% | 20.0% | +20.0 |')
+    expect(md).not.toContain('CI')
+    expect(md.trimEnd().endsWith('|')).toBe(true)
   })
 
   it('exports — and the reason for a group with no segments, and keeps a real 0.0% (#1421)', async () => {
@@ -316,7 +333,52 @@ describe('fetchChartTables — qualitative embeds', () => {
     const cells = row.split('|').slice(1, -1).map(c => c.trim())
     // Code, Staff n, Volunteer n, Board n, Staff %, Volunteer %, Board %
     expect(cells.slice(0, 6)).toEqual(['Trust', '4', '0', '0', '40.0%', '0.0%'])
-    expect(cells[6]).toMatch(/^— No participant turns from this group/)  // HEAD: ''
+    expect(cells[6]).toMatch(/^— Nobody in this group has material/)  // HEAD: ''
+  })
+
+  it('exports the unit, both p-values and why a code was not tested (#1323)', async () => {
+    vi.mocked(codeAnalysisApi.demographicComparison).mockResolvedValueOnce({
+      groups: ['Staff', 'Board'],
+      group_totals: {
+        Staff: { n: 8, participants: 8, total_segments: 40, total_word_count: 0 },
+        Board: { n: 8, participants: 8, total_segments: 30, total_word_count: 0 },
+      },
+      codes: [
+        { code_id: 65, code_name: 'Trust', category_name: null,
+          by_group: { Staff: { count: 6, proportion: 0.75, undefined_reason: null, passages: 9 },
+                      Board: { count: 1, proportion: 0.125, undefined_reason: null, passages: 1 } },
+          delta_proportion: 0.625,
+          delta_ci: { lower: 0.1704, upper: 0.8231, level: 0.95, method: 'newcombe_hybrid_score' },
+          test: { method: 'fisher_exact', statistic: null, p_value: 0.040559, p_adjusted: 0.081119,
+                  significant: false, effect_size: null, effect_size_label: null } },
+        { code_id: 66, code_name: 'Unclear', category_name: null,
+          by_group: { Staff: { count: 2, proportion: 0.25, undefined_reason: null, passages: 2 },
+                      Board: { count: 0, proportion: 0, undefined_reason: null, passages: 0 } },
+          delta_proportion: 0.25,
+          delta_ci: { lower: -0.0934, upper: 0.5918, level: 0.95, method: 'newcombe_hybrid_score' },
+          test: null, test_omitted_reason: 'universal_code' },
+      ],
+      basis: { unit: 'participant', correction: 'discrete_holm', family_size: 1, family_reachable: 1,
+               tarone_family_size: 1, alpha: 0.05, tested_groups: ['Staff', 'Board'], test_omitted_reason: null },
+      scope: { conversations: 1, documents: 0, text_columns: 0, observations_left_out: 0,
+               unassigned_passages: 0, participants_without_group: 0 },
+    } as never)
+    const tables = await fetchChartTables(
+      themeWithChart(qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: 'role' })), 3, LENS,
+    )
+    const md = tables.get(1)!.md
+    // The correction is NAMED (never the wire key `discrete_holm`), and Δ's interval
+    // is labelled by `ci-label.ts` as UNADJUSTED (D3) — the p beside it is adjusted.
+    expect(md).toContain('| Code | Staff (of 8 participants) | Board (of 8 participants) | Staff % | Board % | Δ (percentage points) | Δ 95% CI (unadjusted) | p | p adjusted (discrete Holm) |')
+    expect(md).toContain('| Trust | 6 | 1 | 75.0% | 12.5% | +62.5 | [17.0, 82.3] | .041 | .081 |')   // HEAD: no p at all
+    // A negative bound takes the minus the Δ column uses.
+    expect(md).toMatch(/\| Unclear \|.*\| \+25\.0 \| \[-9\.3, 59\.2\] \| — \| Not tested: a universal code/)
+    // The method note the figure prints beneath itself rides under the table (session B):
+    // the Markdown export has no image to carry it.
+    const after = md.split('\n').slice(-1)[0]
+    expect(after).toMatch(/^Each participant counts once/)
+    expect(after).toContain('not adjusted for the number of codes')
+    expect(tables.get(1)!.html).toMatch(/<\/table>\n<p>Each participant counts once/)
   })
 
   it('emits nothing for a comparison with no grouping variable', async () => {
@@ -583,6 +645,34 @@ describe('#817 — a comparison exports the comparison', () => {
     } as never)
     const tables = await fetchChartTables(themeWithChart(comparisonConfig), 4, LENS)
     expect(tables.get(1)?.md ?? '').toMatch(/Too few values/)
+  })
+
+  it('1.5.9 session A: the p names its method and the groups the tests left out are said', async () => {
+    // #1326 STAT-12 (D58) and #1329 (D51): the rendered table says both, so the
+    // exported one does — the method in the p cell, the groups under the table.
+    vi.mocked(comparisonsApi.groupComparison).mockResolvedValue({
+      groups: ['A', 'B', 'C'], group_column_label: 'g',
+      rows: [{
+        label: 'x', full_label: 'Score', source_id: 1, source_type: 'column',
+        group_stats: [{ group: 'A', n: 6, mean: 1 }, { group: 'B', n: 5, mean: 2 },
+                      { group: 'C', n: 1, mean: 3 }],
+        test: { test_type: 'kruskal_wallis', statistic: 5.1, df: 2, p: 0.0781,
+                effect_size: 0.4, effect_size_type: 'epsilon_squared' },
+        test_omitted_reason: null, untested_groups: ['C'],
+      }, {
+        label: 'y', full_label: 'Other', source_id: 2, source_type: 'column',
+        group_stats: [{ group: 'A', n: 6, mean: 1 }, { group: 'B', n: 5, mean: 2 }],
+        test: { test_type: 'mann_whitney_u', statistic: 22, df: 18, p: 0.0355,
+                effect_size: 0.56, effect_size_type: 'rank_biserial_r', p_method: 'exact' },
+        test_omitted_reason: null, untested_groups: [],
+      }],
+      bonferroni_warning: false, bonferroni_threshold: null, unavailable_reason: null,
+    } as never)
+    const tables = await fetchChartTables(themeWithChart(comparisonConfig), 4, LENS)
+    const md = tables.get(1)?.md ?? ''
+    expect(md).toContain('0.0355 (exact p)')
+    expect(md).toContain('Score: C has only one value, so it is shown without an SD and left out of the tests.')
+    expect(md).not.toContain('Other: ')
   })
 })
 

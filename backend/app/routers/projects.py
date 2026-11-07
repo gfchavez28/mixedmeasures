@@ -54,6 +54,7 @@ from ..services.coding_counts import (
     coded_segment_counts,
     coded_segment_count_for_project,
     participant_segment_counts,
+    visible_segment_count_for_project,
 )
 from ..services.coding_coverage import project_coder_counts
 from ..services.project_deletion import delete_project_tree
@@ -328,12 +329,19 @@ async def get_project_export_ceiling(
 
 
 @router.get("/{project_id}/summary", response_model=ProjectSummaryResponse)
-async def get_project_summary(
+def get_project_summary(
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get summary counts for a project."""
+    """Get summary counts for a project.
+
+    ``def``, not ``async def`` (#1463, D62): TopRail reads it on every project page,
+    and on 1.2M turns (encrypted) it took 10.7 s alone and 18.9 s inside the
+    Overview's load — every second of it on the event loop, so the page's other
+    requests and the packaged app's ``/health`` waited behind it. The document and
+    observation counts below are planned from the parent (``from_parent=True``).
+    """
     _get_project_or_404(db, project_id, user.id)
 
     conversations = db.query(func.count(Conversation.id)).filter(
@@ -487,23 +495,13 @@ async def get_project_summary(
         Observation.project_id == project_id
     ).scalar() or 0
 
-    document_segments = db.query(func.count(Segment.id)).join(
-        Document, Segment.document_id == Document.id
-    ).filter(
-        Document.project_id == project_id,
-        *visible_segment_filter(),
-    ).scalar() or 0
+    document_segments = visible_segment_count_for_project(db, project_id, source="document")
 
     # #627: project-wide clip total for the Overview's Observations stat cell.
     # `recent_observations` carries per-observation counts for the four most
     # recent only, so the sub-label needs its own aggregate — same shape as
     # document_segments directly above.
-    observation_clips = db.query(func.count(Segment.id)).join(
-        Observation, Segment.observation_id == Observation.id
-    ).filter(
-        Observation.project_id == project_id,
-        *visible_segment_filter(),
-    ).scalar() or 0
+    observation_clips = visible_segment_count_for_project(db, project_id, source="observation")
 
     # Recent documents (4 most recently updated)
     recent_docs = db.query(Document).filter(

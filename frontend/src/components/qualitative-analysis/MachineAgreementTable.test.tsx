@@ -96,6 +96,23 @@ describe('the table', () => {
     expect(await screen.findByText(/gpt-4o-2024-08-06 · via API/)).toBeInTheDocument()
   })
 
+  it('#1333 / #1334 — says what a unit is, from the payload, and nothing for an older one', async () => {
+    machineAgreement.mockResolvedValue({
+      available: true, unavailable_reason: null, pairs: [PAIR], unit_basis: 'participant_passages',
+    })
+    const { unmount } = renderTable()
+    const line = await screen.findByTestId('machine-agreement-unit-basis')
+    expect(line).toHaveTextContent(/turns are left out, and a group of turns counts once/)
+    unmount()
+
+    machineAgreement.mockResolvedValue({
+      available: true, unavailable_reason: null, pairs: [PAIR],
+    })
+    renderTable()
+    await screen.findByRole('rowheader', { name: /Trust/ })
+    expect(screen.queryByTestId('machine-agreement-unit-basis')).not.toBeInTheDocument()
+  })
+
   it('🔴 SAYS SO when no configuration was recorded', async () => {
     machineAgreement.mockResolvedValue({
       available: true,
@@ -144,6 +161,65 @@ describe('the table', () => {
     await screen.findByRole('rowheader', { name: /Trust/ })
     expect(container.textContent).toContain('not inter-rater reliability')
     expect(container.textContent).toContain('not evidence that the coding is correct')
+  })
+})
+
+describe('#1505 (D43) — a κ over too few units keeps its number and loses its verdict', () => {
+  // `Trust` (8 units) is under the payload's floor of 18; `Access` (40) is the
+  // positive control for every absence asserted.
+  const BELOW = { ...ROW, kappa_interpretation: null, verdict_withheld_reason: 'too_few_units' }
+  const OVER = {
+    ...ROW, code_id: 6, code_name: 'Access', n_units: 40, kappa: 0.81,
+    kappa_interpretation: 'almost_perfect', verdict_withheld_reason: null,
+  }
+  const payload = (floor: number | null = 18) => ({
+    available: true, unavailable_reason: null, verdict_min_units: floor,
+    pairs: [{ ...PAIR, per_code: [BELOW, OVER] }],
+  })
+
+  it('says "too few to judge" in the row’s name with its count against the floor, and in the cell', async () => {
+    machineAgreement.mockResolvedValue(payload())
+    renderTable()
+    const row = await screen.findByRole('rowheader', { name: /Trust/ })
+    expect(row).toHaveAccessibleName(/Kappa 0\.47, too few to judge \(8 of the 18 units a verdict needs\)\.$/)
+    const cell = screen.getByText('0.47').closest('td')!
+    expect(cell.textContent).toBe('0.47 too few to judge')
+    expect(cell).toHaveAttribute('title', '8 of the 18 units a verdict needs')
+
+    const control = screen.getByRole('rowheader', { name: /Access/ })
+    expect(control).toHaveAccessibleName(/Kappa 0\.81, almost perfect\.$/)
+    expect(screen.getByText('0.81').closest('td')!.textContent).toBe('0.81')
+  })
+
+  it('explains the floor once below the pairs, in words that do not call it reliability', async () => {
+    machineAgreement.mockResolvedValue({
+      ...payload(),
+      pairs: [
+        { ...PAIR, per_code: [BELOW, OVER] },
+        { ...PAIR, machine_id: 10, machine_name: 'Claude', per_code: [BELOW] },
+      ],
+    })
+    renderTable()
+    await screen.findAllByRole('rowheader', { name: /Trust/ })
+    const notes = screen.getAllByTestId('machine-agreement-verdict-note')
+    expect(notes).toHaveLength(1)
+    expect(notes[0]).toHaveTextContent(/^Too few to judge: a coefficient over fewer than 18 units/)
+    expect(notes[0].textContent).not.toMatch(/reliab/i)
+  })
+
+  it('takes the floor from the payload, and says nothing when no row is under it', async () => {
+    machineAgreement.mockResolvedValue(payload(30))
+    const { unmount } = renderTable()
+    expect(await screen.findByRole('rowheader', { name: /Trust/ }))
+      .toHaveAccessibleName(/8 of the 30 units a verdict needs/)
+    expect(screen.getByTestId('machine-agreement-verdict-note')).toHaveTextContent('fewer than 30 units')
+    unmount()
+
+    machineAgreement.mockResolvedValue({ ...payload(), pairs: [{ ...PAIR, per_code: [OVER] }] })
+    renderTable()
+    await screen.findByRole('rowheader', { name: /Access/ })
+    expect(screen.queryByTestId('machine-agreement-verdict-note')).not.toBeInTheDocument()
+    expect(screen.queryByText(/too few to judge/)).not.toBeInTheDocument()
   })
 })
 

@@ -280,8 +280,12 @@ def test_score_columns_are_read_by_the_csvs_own_names(db_session):
 
     def after(script):
         # Every line below was WRITTEN by the export; the runner only re-evaluates it.
-        kw = _emitted(script, r"^kruskal\.test\(.*\)$")
-        tt = _emitted(script, r"^t\.test\(.*~ data\$grp2, var\.equal = FALSE\)$")
+        # Since #1329 (D52) each test reads a `.mm_testable` frame and is wrapped in
+        # `if (!is.null(frame)) print(…)`: the call is lifted from inside the print.
+        kw = _emitted(script, r"(?<=print\()kruskal\.test\(y ~ g, data = cmp_rank_\w+\)")
+        _emitted(script, r"^tt_frame <- \.mm_testable\(.*, data\$grp2, have_groups = c\(2, 2\),"
+                         r" test_name = \"Independent t-test\"\)$")  # the saved t-test's frame (#1540)
+        tt = _emitted(script, r"(?<=print\()t\.test\(y ~ g, data = tt_frame, var\.equal = FALSE\)")
         well = _emitted(script, r"(?<=^# well mean\n)mean\(.*\)$")
         trust = _emitted(script, r"(?<=^# trust mean\n)mean\(.*\)$")
         return f'''

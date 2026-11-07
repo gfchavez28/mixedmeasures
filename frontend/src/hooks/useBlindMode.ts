@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAuth } from '@/lib/auth-context'
 import { useCoders } from '@/hooks/useCoders'
 import { codeAnalysisApi } from '@/lib/api'
@@ -18,6 +18,17 @@ import { onlyCoders, type CoderLens } from '@/lib/coder-color'
  */
 const revealKey = (projectId: number, userId: number | null) =>
   `mm-blind-revealed-${projectId}-${userId ?? 'anon'}`
+
+/**
+ * #1530/#1531 (1.5.9) — a toggle tells EVERY mounted instance, because the state is ONE per
+ * (project, coder) and several surfaces now hold an instance at once: the page, the Export
+ * dialog (a persistent layout overlay) and Text Coding's Cross-analysis panel. Before, each
+ * instance read storage once, so a reveal in the dialog left the page behind it blind, and a
+ * reveal on the page left the dialog scoping files to the viewer — measured, 2026-11-05c.
+ * The event carries the new value, so it holds when storage is unavailable (private mode).
+ */
+const REVEAL_CHANGED = 'mm-blind-reveal-changed'
+interface RevealChanged { key: string; revealed: boolean }
 
 /**
  * Read the per-(project, coder) reveal flag straight from storage. Exported for
@@ -97,6 +108,17 @@ export function useBlindMode(projectId: number): BlindModeState {
     setRevealed(readRevealed(projectId, self))
   }
 
+  // Hear a toggle made through ANOTHER instance of this (project, coder) — see REVEAL_CHANGED.
+  // The toggling instance hears its own event too, harmlessly: the value is the one it just set.
+  useEffect(() => {
+    const onChange = (e: Event) => {
+      const { key, revealed: next } = (e as CustomEvent<RevealChanged>).detail
+      if (key === currentKey) setRevealed(next)
+    }
+    window.addEventListener(REVEAL_CHANGED, onChange)
+    return () => window.removeEventListener(REVEAL_CHANGED, onChange)
+  }, [currentKey])
+
   const rosterKnown = rosterStatus === 'ready'
   // `multiHumanCoder` is only ever true of an answered roster, so `blind` needs no status.
   const blind = multiHumanCoder && !revealed
@@ -128,6 +150,10 @@ export function useBlindMode(projectId: number): BlindModeState {
     // Only BREAKING blindness (blind → revealed) is logged.
     if (next) codeAnalysisApi.revealBlindMode(projectId, { surface }).catch(() => { /* best-effort */ })
     setRevealed(next)
+    // Outside the updater, like the log: StrictMode would otherwise broadcast twice.
+    window.dispatchEvent(new CustomEvent<RevealChanged>(REVEAL_CHANGED, {
+      detail: { key: revealKey(projectId, self), revealed: next },
+    }))
   }, [projectId, self])
 
   return { blind, withholding, settled, blindLens, toggleReveal }

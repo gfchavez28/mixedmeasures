@@ -13,6 +13,8 @@ import type {
   DemographicComparisonRequest,
 } from '@/lib/api'
 import { asLayerScope, type LayerScope } from '@/lib/coding-layers'
+import { comparisonSources, cooccurrenceFilterParams } from '@/lib/qual-comparison'
+import { drawsCodedShare } from '@/components/qualitative-analysis/qual-chart-data'
 import {
   orientationFromToken,
   type QualChartType,
@@ -121,10 +123,11 @@ export function extractComputeParams(content: Record<string, unknown>): {
 //     — the view's own saturation query omits all three, so an embed must too,
 //     even though the config carries them.
 //
-// **Demographic comparison omits `document_ids` / `observation_ids` by design**
-// (it groups by participant demographics, and neither documents nor observation
-// clips carry a speaker→participant link). Mirror it; do NOT read it as a
-// parent-arm omission to be fixed here.
+// **Demographic comparison (#1297/#1298, 1.5.9) counts conversations, documents and
+// open-text answers** — each reaches a person (speaker link, `Document.participant_id`,
+// the answer row's participant); observations have none and are reported as left out.
+// Its source lists come from `lib/qual-comparison.ts::comparisonSources`, the view's
+// own builder, so an embed and the view cannot read one selection two ways.
 
 export interface QualComputeParams {
   request: SourceFrequenciesRequest
@@ -327,6 +330,26 @@ export function isQualChartRenderable(params: QualComputeParams): boolean {
 }
 
 /**
+ * #1529 D94 (1.5.9) — does this source-frequency embed draw a share of the CODED total? The summary
+ * table always does (*% of Coded*); a heatmap, bar or stacked bar only under *Proportion · Coded
+ * only* (`qual-chart-data.ts::drawsCodedShare`, the rule the charts themselves apply). Decides
+ * whether `figure-baseline.ts::fingerprintSourceFrequencies` records the universal rows, so an
+ * embed whose drawn shares changed says so and one that draws counts stays quiet.
+ */
+export function sourceFrequencyDrawsCodedShare(params: QualComputeParams): boolean {
+  switch (qualChartKind(params)) {
+    case 'summary':
+      return true
+    case 'heatmap':
+    case 'bar':
+    case 'stacked_bar':
+      return drawsCodedShare(params.valueMode, params.denominatorMode)
+    default:
+      return false
+  }
+}
+
+/**
  * Does this chart have everything it needs to be fetched at all?
  *
  * Deliberately per-kind, because the four endpoints do NOT share a notion of
@@ -426,17 +449,18 @@ export function buildQualCooccurrenceParams(params: QualComputeParams): CodeAnal
   // after the other chart type reads as if the two still share a contract.
   const csv = (ids: number[] | null | undefined) => (ids && ids.length > 0 ? ids.join(',') : undefined)
   const req = params.request
-  return {
+  // #1527 D84: the source lists through the view's own builder — a saved selection is
+  // counted exactly, an unselected kind as none (it counted in full until 1.5.9).
+  return cooccurrenceFilterParams({
     exclude_facilitator: req.exclude_facilitator,
-    conversation_ids: csv(req.conversation_ids),
     participant_ids: csv(req.participant_ids),
-    text_column_ids: csv(req.text_column_ids),
-    document_ids: csv(req.document_ids),
-    observation_ids: csv(req.observation_ids),
     source: params.source,
     coder_ids: csv(req.coder_ids),
     layer_scope: req.layer_scope ?? 'human',
-  }
+  }, {
+    conversations: req.conversation_ids ?? [], textColumns: req.text_column_ids ?? [],
+    documents: req.document_ids ?? [], observations: req.observation_ids ?? [],
+  })
 }
 
 /**
@@ -445,10 +469,11 @@ export function buildQualCooccurrenceParams(params: QualComputeParams): CodeAnal
  * Returns `null` without a `group_by`, exactly as the view does, so the caller
  * cannot accidentally fire a request the analysis surface would never send.
  *
- * ⚠️ Sends `conversation_ids` + `text_column_ids` only. Documents and
- * observations are absent BY DESIGN (grouping runs through participant
- * demographics, and neither carries a speaker→participant link) — mirroring the
- * view here is correct, not an omission to fix.
+ * #1297/#1298 (1.5.9): the four source lists go through `comparisonSources`, the
+ * view's own builder — nothing saved selects every source; anything saved selects
+ * exactly that. ⚠️ An OLD material keeps its saved lists, so a comparison saved with
+ * documents selected (ignored until 1.5.9) now counts them: the upgrade note's
+ * "recheck" item, not a regression.
  */
 export function buildQualComparisonRequest(params: QualComputeParams): DemographicComparisonRequest | null {
   if (!params.groupBy) return null
@@ -457,8 +482,10 @@ export function buildQualComparisonRequest(params: QualComputeParams): Demograph
   return {
     group_by_subtype: params.groupBy,
     code_ids: nonEmpty(req.code_ids),
-    conversation_ids: nonEmpty(req.conversation_ids),
-    text_column_ids: nonEmpty(req.text_column_ids),
+    ...comparisonSources({
+      conversations: req.conversation_ids ?? [], textColumns: req.text_column_ids ?? [],
+      documents: req.document_ids ?? [], observations: req.observation_ids ?? [],
+    }),
     exclude_facilitator: req.exclude_facilitator,
     participant_ids: nonEmpty(req.participant_ids),
     coder_ids: req.coder_ids ?? null,

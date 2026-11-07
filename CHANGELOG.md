@@ -2,10 +2,601 @@
 
 All notable changes to Mixed Measures are documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Version numbers take the MAJOR.MINOR.PATCH form of
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html), with meanings set for a
+desktop app rather than a programming interface:
+
+- **Major (2.0.0):** a change in what can truthfully be said about the tool. No 1.x
+  release will add generative AI; if AI comes, it will be in a 2.x.
+- **Minor (1.7.0):** a tested group of new features and changes.
+- **Patch (1.6.1):** an urgent fix only (a crash, lost data, a security problem or a
+  broken installer), with nothing new added.
+
+Releases before 1.6.0 did not keep to the patch rule: 1.3.1 and 1.5.1–1.5.4 added
+features, and 1.3.1, 1.5.2 and 1.5.4–1.5.7 changed existing behaviour.
 
 ## [Unreleased]
+
+## [1.6.0] - 2026-11-08
+
+### Upgrade notes
+
+- **Your database is upgraded on first launch, and a copy of it is taken first.** The
+  upgrade adds one index to your codings and queues the consensus of grouped turns for a
+  recompute (below); it changes none of your coding, and while it runs the start-up
+  screen says it is updating your data for this version. The copy is written to
+  your backup folder before anything changes, so the first launch needs free disk space
+  about the size of your database and takes longer than usual on a large one (about half
+  a minute in all on a 1.4 GB test database with 3.6 million codings). Only the five most
+  recent of these pre-update copies are kept; for a copy you control, use *Backup now*
+  under Settings › Backup & Data before updating.
+- **Once 1.6.0 has opened your data, 1.5.8 cannot.** Started again on it, 1.5.8 stops with
+  a message that a newer version updated the data and that nothing was changed, and it
+  refuses a `.mmbackup` made by 1.6.0 the same way. **`.mmproject` files are unchanged**
+  (still format 7), so the two versions open each other's — but 1.5.8 ignores the names a
+  1.6.0 withdrawal remembers and does not stop the merge described under *Fixed*. A team
+  that shares project files should update together. (#1470, #1472)
+- **Numbers change on the same data.** This release corrects how several results are
+  counted, so a figure you reported from 1.5.8 can differ; each entry below says which way.
+  - The code-by-group comparison counts participants, not passages, and adjusts its p
+    across the codes tested — expect fewer stars. (#1323, #1297, #1298)
+  - Reliability, the Model comparison and the R script's agreement figures change, in
+    either direction, on any transcript coded by two or more people that has interviewer
+    turns or grouped turns. A verdict now needs 18 passages, so one quoted from 1.5.8 can
+    read "too few to judge" with no coding changed. (#1333, #1334, #1505)
+  - The consensus layer changes on groups of turns whose coders coded different turns.
+    The update recomputes it in the background after the first launch; the
+    Reconciliation grid shows the new decision at once. (#1334, #1597)
+  - Participant rating scores change where turns were grouped, and the update does not
+    recompute them: in the dataset that holds them, right-click a score column and choose
+    *Refresh scores*. (#1334)
+  - Qualitative frequencies fall where a code was applied to a "no response" answer;
+    "Unclear" and "Unsubstantive/Artifact" have no share of the coded total; co-occurrence
+    counts fall on projects coded by more than one person or under a selection, and its N
+    rises on projects with documents or clips. (#1526, #1529, #1335, #1527)
+  - Under a participant filter, documents count only when linked to a selected
+    participant and observation clips are left out; Text Coding's Cross-analysis with a
+    filter on only some datasets compares only those datasets. (#1536, #1534)
+  - A 2 × 2 cross-tabulation's χ² and V rise and its p falls; a group with one value
+    leaves the post hoc table and the equal-variance check; some Mann–Whitney p-values
+    change; intervals over a variable group's pooled answers usually widen; and an answer
+    that differs from a scale label only in capitals or spaces counts under the label.
+    (#1328, #1329, #1326, #1330, #1332)
+
+  Most Canvas embeds placed before this update say once that their figures changed
+  (saturation and Timeline embeds do not). **Export again any R script you rely on**: its
+  numbers follow 1.6.0's.
+- **Some files have a new layout; a script that reads them needs updating.**
+  - The code-by-group Comparison CSV has four columns per group where it had two
+    (participants who used the code, participants with material, the proportion,
+    passages coded); with two groups, the difference's interval; and after the p, the
+    adjusted p, whether the code could reach significance, and why a code was not tested.
+    (#1323)
+  - The group-comparison CSV has degrees-of-freedom columns beside the statistic, so *p*
+    moves right (for Mann–Whitney it stays, and a *p method* column follows it), a last
+    *Note* column, and a first line when groups are excluded. (#1543, #1326)
+  - The Frequencies CSV is the Descriptives summary table: its columns, only the codes you
+    selected, the largest count first, a *Totals* row, and up to three lines before its
+    header. (#1528)
+  - The Co-occurrence CSV opens with a line saying how its pairs are counted, with the
+    header on line 2 (in R, `skip = 1`). (#1335, #1527)
+  - Under a participant filter, a coder scope or the consensus layer, the Source Data and
+    Comparison CSVs start with a scope line, and so does the Quote Board CSV under a filter
+    or while blind. (#1545)
+  - The Cross-analysis CSV has a *Base* block above its code frequencies, and *Not
+    compared* and *Coders* rows when they apply. (#1534, #1531)
+  - The analysis page's Segments CSV is named `_selection` by default and its rows follow
+    the page; its columns are unchanged, so the coding import still reads it. (#1535)
+  - The R script's agreement lines gain `reason=` and `irr_value=` before `name=`. (#1325)
+  - In the Excel workbook, the Audit Trail gains a last *Coder* column and can hold more
+    than 1,000 rows, the last one a sentence; unticking *Sources* now leaves that sheet
+    out, so the sheets after it move up; and while blind a *Scope* sheet comes last.
+    (#1532, #1534, #1530)
+  - While blind, the workbook, the Study and Coded Segments CSVs, the R archive and the
+    Text Coding CSV end their names with your name. (#1530, #1531)
+- **The comparison table's p column now shows the adjusted p** (the raw p is in its
+  tooltip), and with three or more groups the table has no χ² column. The Export dialog's
+  *Summaries* box is now *Sources*. (#1323, #1534)
+- **A project that took in a colleague's withdrawal through a merge in 1.5.8 now refuses
+  every merge until you withdraw that participant in it.** In 1.5.8 such a project could
+  already not be duplicated or copied; 1.6.0 says why at each of those doors and at the
+  merge, and names the participants by your project's own IDs. Withdraw them on the
+  Participants page, then merge or duplicate again. (#1470, #1552)
+- **A withdrawal made before 1.6.0 remembers the participant's ID only**, not the names
+  the project knew them by, so a transcript that names them by name can still link a
+  speaker to a new participant. (#1472)
+
+### Changed
+
+- **The code-by-group comparison now counts participants, not passages, and its
+  stars allow for testing many codes at once.** It used to count passages and test
+  them as if each were independent, so one talkative participant could make a code
+  look significant: in a test with no real difference between groups, nearly half of
+  40 codes were starred. Each cell now says how many participants in the group used
+  the code, out of those with material in what you compared (the n beside the group's
+  name); the CSV gives the passage count beside it as a description, and passages are
+  never tested. Two groups are compared with Fisher's exact test and three or more with
+  an exact Freeman–Halton test (a seeded simulation when the groups are too large to
+  count every table, which the method note then says), and the p-values are adjusted
+  across the codes tested with a discrete Holm correction, which, unlike plain Holm,
+  can still find a difference at the small group sizes qualitative studies have. The
+  stars read the adjusted p; the raw p is in the p cell's tooltip, the CSV and Canvas
+  exports. A code that cannot reach significance at your group sizes, whatever the
+  data, is marked. Universal codes and codes nobody (or everybody) used keep their rows
+  and are not tested. The method note says what was counted, how it was tested and
+  adjusted, and that the tests are exploratory.
+  **Every count, share, p-value and star in this comparison changes** — on screen, in
+  its CSV and in Canvas embeds of it; recheck any you have reported. (#1323)
+- **The comparison counts what you selected.** Selecting only open-text answers used
+  to count every conversation instead, and documents linked to a participant were
+  never counted. Selected answers and linked documents now count for their
+  participant, an unselected kind of source is left out, and the comparison says
+  what it counted and what it left out (observations have no participant link). The
+  CSV now matches the screen, including when you choose to keep facilitator turns.
+  (#1297, #1298)
+- **A difference between two groups now comes with its interval.** With two groups,
+  the comparison shows the difference in the share of participants who used each code
+  with a 95% interval (Newcombe's method), on screen, in the CSV and in Canvas
+  exports. Unlike the p-values beside it, the interval is not adjusted for the number
+  of codes compared, and it says so. The CSV also says, per code, whether it could be
+  starred at all at your group sizes, so an empty star column is not read as "no
+  difference". A Canvas exported as Markdown now carries the comparison's method note
+  under its table. (#1323)
+- **Canvas embeds of the comparison now say when their figures change**, as most other
+  chart embeds do (saturation and Timeline embeds do not yet). An embed placed before
+  this update says once that the way the comparison is counted has changed, and what
+  it now shows, until you mark it reviewed — so the new numbers never replace the old
+  ones without a word. (#1323)
+- **Reliability no longer counts interviewer turns.** Two coders who both leave an
+  interviewer's questions uncoded agree on every one of them, so counting those turns
+  raised agreement without saying anything about how well the coders agree. A turn
+  by a speaker marked as a facilitator is now left out of κ, α and percent agreement
+  — by the speaker's role, never because nobody coded it; a participant's turn that
+  every coder left uncoded still counts. A sentence above the Reliability tab's table
+  says so: how many facilitator turns it left out, whose they were, and which codes a
+  coder applied to one anyway. Only speakers marked as facilitators are left out — at
+  import that happens automatically only for labels like "Interviewer" or
+  "Facilitator", so check that a "Moderator" is marked too (a turn's menu has *Mark as
+  Facilitator*). The Model comparison and the R script count the same units and say
+  so. (#1333)
+- **A group of turns now counts once.** Grouped turns are coded as one unit, but
+  reliability, the Model comparison, the R script and participants' rating scores
+  counted each turn of a group separately, so one judgement counted as many times as
+  the group had turns. A group is now one unit — in a score, one passage of each
+  participant it contains — and a coder who gave a group two different ratings has
+  no rating on it, where each turn's rating used to count on its own. Grouping,
+  ungrouping or changing a speaker's role now marks participant scores out of date.
+  The Reconciliation grid still lists interviewer turns, and says its count is not the
+  Reliability tab's *Units*. **Reliability figures change** on any transcript coded by
+  two or more people that has interviewer turns (coded or not) or grouped turns, and
+  **participant scores change** wherever turns were grouped; recheck any you have
+  reported. (#1334)
+- **Consensus decides a group of turns once.** The consensus layer decided each turn
+  of a group separately, so a group whose coders' codings sat on different turns (a
+  coding made before the turns were grouped, a bulk apply, or a colleague's merged
+  copy) could reach no consensus at all, or a different one on each turn. A group is now
+  decided once and its consensus lands on every turn of it, interviewer turns
+  included; a coder who gave the group two different ratings has no rating in its
+  consensus median. Grouping or ungrouping turns now brings their consensus up to
+  date. The Reconciliation grid decides the same way: a group is one row, *Group of N
+  turns*, whose own-cell actions apply to the whole group, and a coder who rated the
+  group's turns differently is flagged *Turns rated differently* until they rate it
+  again. The update recomputes, in the background after its first launch, the
+  consensus an earlier version saved on every group two or more people coded, so the
+  other Analysis tabs and the grid agree. **The consensus layer can change** wherever
+  grouped turns carry different codings; recheck consensus counts you have reported.
+  (#1334, #1597)
+- **Quotes may overlap and nest, and a turn that has them now reads correctly.** A
+  quote inside another quote, or two quotes that cross, made the transcript draw the
+  shared words twice — and a selection made later in that turn could land on other
+  words than the ones you selected. Each word is now drawn once; words under two or
+  more quotes are highlighted one step deeper, and hovering them names every quote
+  that covers them, with its note. Hovering a quote's note no longer slips the note's
+  words into the passage's text, where a selection or a screen reader met them. The
+  turn's right-click menu lists its quotes in reading order, outer first, each named
+  by its first and last words so two quotes that start alike can be told apart. If
+  the passage on screen ever differs from its saved text, a selection there is refused
+  with a message rather than saved on the wrong words. No number changes, but **a quote
+  made in a turn that already had overlapping quotes, or while a quote's note was
+  showing, may have been saved on other words** — check those quotes. (#1324)
+- **A reliability figure over one passage is no longer shown, and a verdict needs
+  enough passages.** Over a single passage coded by two people, α is 0 whenever they
+  differ — by arithmetic, whatever the coding — so the first passage a team compared
+  read "unreliable". κ and α are now undefined there, and the tab says why. Below 18
+  passages coded by two or more people, the coefficient and its interval are still
+  shown but carry no verdict ("reliable", "unreliable", or κ's bands): the row reads
+  "too few to judge", its hover text says how many passages it has of the 18 a verdict
+  needs, and a note below the table explains the floor, which is taken from the most
+  lenient standard in Krippendorff's table of minimum sample sizes. This applies to the
+  per-code, rating and code-set tables, the headline α and the Model comparison; an
+  open-cut observation's unitizing α and time-binned κ keep their verdicts. An interval
+  that comes out with no width (perfect agreement, or a coder who never varies) is no
+  longer shown as a certainty either. No other coefficient's value changes. (#1505)
+- **Two codes now co-occur only where one coder applied both.** With more than one
+  coder, the co-occurrence matrix put every coder's codes for a passage together, so
+  one coder's code beside a colleague's different code on the same passage counted as
+  the two codes occurring together — a disagreement about the passage read as a
+  relationship between the codes. On a test project coded by eleven people, 13 of 18
+  co-occurring pairs existed only that way. A pair now counts on a passage only where
+  one coder applied both codes there (at the source level, somewhere in the source);
+  a passage counts once however many coders applied the pair. The diagonal — how many
+  passages carry each code — is unchanged, so the matrix still agrees with the
+  frequencies beside it. On a project coded by one person, and under the consensus
+  layer, this rule changes nothing. The matrix's caption, the first line of its CSV,
+  the Excel sheet and Canvas exports say the rule. **On projects coded by more than one
+  person, co-occurrence counts fall**; recheck any you have reported. (#1335)
+- **A 2 × 2 cross-tabulation's chi-square no longer applies Yates's correction, and
+  Cramér's V comes from the uncorrected statistic.** Every package we checked
+  computes V from the uncorrected chi-square; the app took it from the corrected one,
+  which understated the association, and the corrected chi-square added nothing beside
+  the Fisher's exact p the table already shows. **On 2 × 2 tables χ² and V rise and p
+  falls** (Fisher's p does not change). So does a larger table on which only two
+  answers on each side were chosen, which is tested as a 2 × 2; other tables do not
+  change. The R script now matches and also prints Fisher's p on a 2 × 2. (#1328)
+- **A comparison group with one person is shown but left out of the tests that need
+  its spread, and says so.** Such a group used to show an SD of 0 and an interval of
+  no width, its ANOVA left it out while the post hoc table beside it kept it, and the
+  equal-variance check kept it as a perfect zero. The group now shows its n and mean
+  with no SD or interval; ANOVA, the post hoc table, Welch's t and Levene's check all
+  leave it out, and a line under the table names it. Mann–Whitney and Kruskal–Wallis,
+  which rank every value, still include it. **The F does not change**; the post hoc
+  table loses that group's pairs and the rest move slightly. An explicitly chosen
+  t-test over three or more groups compares the first two that can be tested. The R
+  script applies the same rule as it runs, and a comparison with a one-person group no
+  longer stops the script. (#1329)
+- **Mann–Whitney now chooses its p as R, jamovi and JASP do:** exact when both groups
+  have fewer than 50 values and no value is tied, otherwise the normal approximation
+  with a continuity correction. Before, the p was exact only when a group had 8 or
+  fewer values. So two tie-free groups of 9 to 49 values now get the exact p (usually
+  slightly smaller), and a tie-free group of 8 or fewer beside one of 50 or more now
+  gets the approximation. Each p says which method produced it, on screen, in the CSV
+  and in Canvas exports. **Tied data (most rating scales) do not change.** (#1326)
+- **A variable group's intervals now count each record once.** A mean, proportion or
+  frequency over a variable group pools every answer to its variables into one list,
+  and its 95% interval treated each answer as a different person — so someone who
+  answered four of the items counted four times, and the interval was too narrow (on a
+  simulated four-item survey, a little over half as wide as it should be). The interval
+  now counts each
+  record once: for the mean, a t interval over records, which equals the interval on
+  each record's average whenever everyone answered every item; for a proportion and
+  each answer of a frequency, a Wilson interval on an effective sample size. The
+  estimates do not change. The interval is labelled *over records*, the *n* reads "N
+  values from M records", and the summary table's SE is the one over records.
+  **These intervals usually widen** (a mean's can narrow where a record's answers to
+  the items run in opposite directions), on screen, in the Excel workbook and in the R
+  script, which now prints the same intervals for a pooled proportion and frequency;
+  recheck any you have reported. (#1330)
+- **An answer that differs from a scale label only in capitals or spaces is counted
+  under the label.** A survey whose cells say "Strongly Agree" under a scale labelled
+  "Strongly agree" was already scored as that answer, but frequency tables,
+  cross-tabulations and groups counted it as a category of its own, after the scale.
+  It is now counted under its label everywhere a category is formed — frequencies,
+  cross-tabs, comparison groups, the qualitative comparison's participant groups and
+  their filter, and the R script — while the data itself keeps the answer as typed.
+  Answers in a variable without labels are unaffected. **Percentages, cross-tab counts
+  and group sizes change where such answers exist.** (#1332)
+- **The R script's Krippendorff's α now matches the app when every coder coded every
+  passage.** The `irr` package's `kripp.alpha` miscounts complete data from three or
+  more coders (it weights every pair of values as if there were two), so for that
+  design the script printed a lower α than the app. The script now calls it through
+  the package's missing-data route, which computes Krippendorff's own figure, for
+  codes, ratings and code sets alike. Where the app reports no coefficient, the script
+  now prints NA with the app's reason (too few passages, or nothing to agree about)
+  and the package's own value beside it, instead of a number the app declines — for
+  example α = 1 for a code nobody used. **The script's α changes for complete data
+  from three or more coders**; the app's figures do not. (#1325)
+- **The R script reproduces more of what the app shows.** A cross-tabulation with a
+  declared answer nobody chose prints a chi-square (it printed NaN); means,
+  frequencies, proportions and charts leave out the answers the analysis excluded,
+  matched as the app matches them (ignoring capitals and surrounding spaces) — a chart
+  now leaves them out of its percentages too; and the script's Mann–Whitney is the
+  app's method. (#1326)
+- **A code applied to an answer your project counts as no response no longer counts in
+  the Descriptives.** Answers such as "N/A", "-" or "None" — the list under *What counts
+  as no response* in Text Coding's column picker — were already left out of the coded
+  texts a code's percentage is divided by, and out of its Records count, but a code
+  applied to one still counted it under *Count* and *Texts*. So a code could read more
+  than 100% of the coded texts, and *Texts* could exceed *Records* on a question
+  everyone answered once. Such answers now count nowhere in the Descriptives — the
+  summary table, the heatmap, the bar and stacked-bar charts, their Canvas embeds, and
+  the Frequencies and Source Data CSVs — as that list has always said. If one of those
+  answers is a real answer in your study, take it out of the list and it counts
+  everywhere, coding progress included. **A code's Count, Texts, percentages and word
+  share fall where you coded such answers;** a Canvas embed of an affected chart says
+  its figures have changed. (#1526)
+- **"Unclear" and "Unsubstantive/Artifact" no longer show a share of the coded total.**
+  A passage or answer marked only with them has never counted as coded, so their *% of
+  Coded* and *% Texts* divided their count by a total that left those very passages out,
+  and could read 150% or 200%. Those two cells now read "—", and a note under the table
+  says why — under *Per Code* and *Per Category* alike. Their other columns (*% Docs*,
+  *% Rec.*, and the rest) keep their numbers, and their counts change only where the entry
+  above applies. The Frequencies CSV leaves the same columns blank for them and says why
+  above the table. (#1526, #1529)
+- **The Descriptives charts no longer draw "Unclear" and "Unsubstantive/Artifact" as a
+  share of the coded total.** Under *Proportion* with *Coded only*, the heatmap, the bar
+  chart and the stacked bar divided their counts by the coded passages — a document's
+  "Unclear" cell could read 400%. They are left off those charts now, and a note under the
+  chart names them and says why; *All segments* and *Count* draw them as before. The *Coded
+  only* option now says what it divides by. (#1529)
+- **If a universal code was ever filed in a category** (possible only through an imported
+  project file, or a project changed outside the app), that category no longer counts it
+  under *Per Category*: it has its own row, as the codebook already showed it, and the app
+  now refuses such a filing. (#1529)
+- **A Canvas figure whose coded shares changed says so.** An embedded summary table, or a
+  *Coded only* chart, placed before this update with "Unclear" or "Unsubstantive/Artifact"
+  on it shows "The figures have changed" once, with *Mark as reviewed* — its shares changed
+  even where no count did. When a figure's numbers change but its headline does not, the
+  notice no longer reads "5 coded is now 5 coded". (#1529)
+- **The co-occurrence matrix counts what you selected.** A kind of source you selected
+  nothing from used to count in full, so selecting one interview still counted every
+  document and observation clip; and at the passage level, selecting one survey question
+  still counted every question. The matrix now counts exactly your selection, at both
+  levels — on screen, in its CSV, and in Canvas embeds and exports of it. With nothing
+  selected it counts every source the sidebar shows, as before. An answer your project
+  treats as no response ("N/A", "-" and the rest of that list) no longer counts in it
+  either, as it no longer counts in the frequency table. **Co-occurrence counts fall
+  wherever a selection was made or such answers were coded;** recheck any you have reported. A Canvas embed of a
+  co-occurrence matrix placed before this update says its figures have changed. (#1527)
+- **The co-occurrence figure's N counts every unit the matrix counted.** It left out
+  document passages and observation clips, so on a project with documents the N could
+  be smaller than a count inside the matrix, and a documents-only project showed N = 0.
+  (#1527)
+- **The Frequencies CSV is the Descriptives summary table.** It now holds the table's own
+  columns and numbers — *Count*, *% of Coded*, *% Words* and *Sources*, then the count and
+  share for each kind of source the selection holds (conversations and their participants,
+  documents, observation clips, survey answers and their records) — for the codes and
+  sources you selected, per code or per category as the table shows them, with the table's
+  notes above it and a totals row. It used to be counted another way: from the Text source
+  it wrote 0 for every code, under All it had no column for survey answers, it listed
+  every code whatever you had selected, with a selection it counted every source of a kind
+  you had selected nothing from, and its share of conversations divided by the
+  conversations holding any coding. With nothing selected it holds every code and every
+  source the sidebar lists (with *Text*, every survey question); from the Export dialog,
+  the whole project. **Its columns are renamed and depend on what you selected, notes can
+  come before its header, and its rows run from the largest count down — a script that
+  read the old file needs updating. Frequencies exported before this update can differ
+  from the table; recheck any you have reported.** (#1528)
+- **The Excel workbook's Audit Trail says who did each act.** A new *Coder* column, added
+  at the end so no other column moves, names the coder behind each entry. The sheet still
+  lists the newest 1,000 entries, and now also every time someone revealed colleagues'
+  work in blind mode in this copy of the project, however long ago; its last row says how
+  many older entries it left out, which it used to do without a word. A reveal made in a
+  colleague's copy is not carried over when you merge it. (#1532)
+- **Blind coding now reaches the files.** While your colleagues' coding is hidden, the
+  Export dialog's coding files hold your own coding: the Excel workbook (its coding sheets
+  and Audit Trail, and a new *Scope* sheet at the end saying whose work each sheet holds),
+  the Study, Frequencies, Coded Segments and Co-occurrence CSVs, and the R export, which
+  leaves out intercoder agreement while the Reliability tab is hidden from you. The
+  workbook, the Study and Coded Segments CSVs and the R export end their file name with
+  your name; the Frequencies and Co-occurrence CSVs say it on their first line. The dialog
+  says blind mode is on and has the same *Colleagues hidden* button as the coding screens;
+  revealing is logged. The codebook's usage counts still include every coder, as the
+  Codebook page does, and a project file (.mmproject) still holds everyone's coding: it is
+  what a colleague's merge reads. Before this, a file exported while blind held every
+  coder's work — by name, passage and rating. The analysis page's own Segments CSV now
+  matches the page beside it too. (#1530)
+- **The Text Coding page's Export, its Cross-analysis panel, the Quote Board and the
+  analysis page's passage lists follow blind mode.** While you are blind, Cross-analysis
+  no longer lists colleagues by name in its coder filter and counts only your coding (its
+  CSV says whose coding it holds); the Quote Board shows only your codes on each quote, so
+  a quote only a colleague coded sits under *Uncoded*; the passages under a code, and
+  the *By Source* view, show only your codes; and the Codebook's *Sample Segments* come
+  from your own coding (its usage counts still include every coder). Revealing colleagues'
+  work on one screen now reveals it on all of them and in the Export dialog. (#1531)
+- **Text Coding › Cross-analysis: with questions from two or more datasets and a filter
+  on only some of them, the comparison leaves out the datasets no filter applies to, and
+  says which.** Before, every record of those datasets was counted as matching, so
+  *"N records, M texts match"* and the filtered percentages included them (with a Wave 1
+  filter, every Wave 2 answer counted as Wave 1's subgroup). The overall side is now the same
+  datasets, so the comparison sets a subgroup beside the population it was drawn from. A
+  filter now names what it selects (*"region is one of North"*, *"age above its mean
+  (41.83)"*), and a line under the filters says they apply to the code frequency
+  comparison only — the cross-tabulation, code density and response length never took
+  them. **Recheck any filtered comparison across several datasets you have reported.**
+  (#1534)
+- **Export dialog: the *Summaries* option is now *Sources*, and unticking it leaves the
+  sheet out.** From 1.5.2 to 1.5.8 the workbook's *Sources* sheet was included either
+  way. (#1534)
+- **Qualitative analysis › Exports › Segments CSV: the file's name ends `_selection`
+  whenever the page's selection, its codes, a participant filter or leaving interviewer
+  turns out (the page's default) can make it less than every coded passage, and under the
+  *Text* source the export is unavailable and says why.** The file lists coded passages
+  (interviews, documents and clips) and never survey answers: it is the file the coding
+  import reads back, by its *Unit ID* column. So with only questions selected there is
+  nothing to export, and with questions selected beside passages a line under the export
+  says the answers are not in the file. The Export dialog's
+  Segments CSV is unchanged. (#1535)
+- **Qualitative analysis: a participant filter counts what is linked to the selected
+  participants, on every screen.** A filter built from demographic values (*Filters* in the
+  sidebar) narrowed interview turns and survey answers but counted every document and every
+  observation clip, so under one group's filter a document linked to someone in another
+  group, or to no one, still counted; the Quote Board did the opposite and left out every
+  document quote and clip, the selected people's own documents included. Every screen now
+  reads the filter as the code-by-group comparison now does (above): interview turns by
+  speaker, documents by the person each is linked to, survey answers by record.
+  Observations have no participant link, so their clips are left out while a filter is
+  on, and a line under the filters says so. The saturation curve and the Timeline do not take the filter, and each
+  says so while one is on. **Recheck any figure you reported with a participant filter on a
+  project that has documents or observations.** (#1536)
+
+### Fixed
+
+- **Three tables can now be sorted from the keyboard.** The qualitative comparison table,
+  Data Quality's missing-values table and the post-hoc comparisons table could be re-sorted
+  only with a mouse: their column headers were not buttons, so there was nothing to Tab to.
+  They are buttons now, as in the code summary table. In all four tables a screen reader
+  hears a column's name without the arrow drawn beside it, and its order from the column
+  that is sorted. The comparison table's group headers read with a space before the group
+  size — *"Clinical Services (n=2 participants)"* — and a group's hover text says
+  *"1 passage"*, not *"1 segments"*. (#1465)
+- **A grouped frequency table is named for its group.** When a frequency table is split by
+  a group, a screen reader heard each group's table by the variable's name alone, so group
+  A's and group B's tables sounded the same. Each table's name now carries its group —
+  *"q1 (A)"* — as the Canvas export already labels it. Nothing on screen changes. (#1466)
+- **Ratings page: choosing a code puts keyboard focus on the rating scale.** Choosing a code
+  whose passages had not loaded yet removed that code's button while they loaded, and the row
+  read *"All codes 0"*, so keyboard focus fell to the top of the page; and choosing a code
+  whose passages were already loaded, when its first passage was the one on screen, left focus
+  on the button, where the number keys and Escape did nothing. The row now keeps its codes and
+  counts while the queue loads, and once the passages are there focus moves to the rating
+  scale, every time. (#1467)
+- **Qualitative analysis: a participant filter stays on until you change it.** Collapsing
+  and reopening *Filters* cleared the filter you had chosen; a filter that came with a link
+  or a saved analysis was cleared the moment *Filters* was opened; and a saved analysis, or
+  a link to the page such as *Analysis › Qualitative* or a search result, opened while
+  *Filters* was open kept the panel's filter instead of its own. The filter now changes only
+  when you choose or clear a value, or when a saved analysis or a link brings its own (or
+  none). A filter that came with a link or a saved analysis — which records the
+  participants, not the values that chose them — is described under *Filters*, with a
+  *Clear filter* button. (#1537, #1542)
+- **Qualitative analysis: filter values that no participant holds together no longer show
+  the whole project.** Choosing, for example, a group and a site that no one shares applied
+  no filter at all, so every figure counted the whole project beside the values you had
+  chosen, and a saved analysis made then was unfiltered. The page now says that no
+  participant matches, shows no figures, and holds its exports and *Add to Materials* until
+  a filter is changed. (#1538)
+- **The Cross-analysis CSV holds the comparison on screen.** In every version before this
+  one it never applied the panel's subgroup filters: its *Filters* row read *None* and it
+  gave every code's overall count, whatever was filtered on screen. It now holds the filtered
+  and overall counts the panel shows, names the filters and their values, states how many
+  texts and records each side counts, names any dataset left out of the comparison, and
+  says its Response Length section is not filtered. While a filter is unfinished the
+  export waits and says so. **Export again any Cross-analysis CSV you meant to be
+  filtered.** (#1534)
+- **Qualitative analysis › Exports › Segments CSV holds the passages you selected.** Before
+  this version, one selected document or clip exported every coded passage in the project,
+  an interview selected beside a document left the document out, the code selection was
+  ignored, the *Text* source exported every passage, and a participant filter left out every
+  document passage, the selected people's own documents included. The file now holds
+  exactly the interviews, documents, clips and codes you selected (every coded passage when
+  nothing is selected, interviewer turns as the page has them), a participant filter
+  narrows it as the screens do (#1536), and a coder filter keeps only those coders' rows.
+  **Export again any Segments CSV you made from a selection or under a filter.** (#1535)
+- **A project with several million codings opens.** On our largest test project (3.6
+  million codings), the project list said the projects could not be loaded and a project's
+  Overview failed, because finding out who had coded the project counted every coding —
+  about 30 seconds, longer than the app waits; on a project of 1.4 million it cost every
+  page about 3 seconds. The project list, every project page and the analysis page now ask
+  each coder whether they have a coding there, which takes a few milliseconds whatever the
+  project holds, and the project summary no longer holds up the rest of the app while it
+  counts. At 3.6 million codings the code list and the categories still take over a minute,
+  longer than the app waits, so that project's coding, Codebook and analysis pages still do
+  not load. **No reported number changes.** The first launch after updating builds one
+  index on your codings; see *Upgrade notes*. (#1463)
+- **The Qualitative analysis page loads on a large survey project.** On a project with
+  about 1.4 million codings on open-text answers, the page said the coding counts could not
+  be loaded: its requests ran one after another, and counting the coded answers alone took
+  about half of the 30 seconds the app waits. That count now reads the codings once instead
+  of three times (about 7 seconds instead of 14 there), and the page's slow requests — the
+  code list, the categories, the conversation list, the frequency count and the list of
+  open-text questions — run side by side without holding up the rest of the app, so the
+  coding counts arrive in about 11 seconds. **No reported number changes.** (#1463)
+- **Withdrawing a participant now also removes their words from turns that were
+  combined and later separated again.** If one of their turns was merged with someone
+  else's, the merged turn edited, and the merge then undone, the edit's entry in the
+  project's history kept the merged words, and the Excel export's Audit Trail sheet
+  listed them after the withdrawal. The same was true of an edit made to a piece of a
+  split turn before the split was undone. And once such a merge was undone, a Canvas
+  quote taken from the merged turn across the point where the two turns joined stayed on
+  the Canvas, in its snapshots and in its exports, because those words sat inside neither
+  original turn. A withdrawal now finds these through the project's history and removes
+  them, as it already did for turns still merged; for these, a quote of only the other
+  speaker's words is kept. History from before a project was imported from a file is not
+  searched. Still open: words in a conversation or dataset deleted before the withdrawal
+  (#1546); a turn stored under the same internal number as an earlier, removed one, where
+  the withdrawal can remove that earlier turn's history and another participant's quote
+  (#1547); and a joined quote is missed if one of the original turns was edited after the
+  merge was undone (#1552). (#1473)
+- **A withdrawal made in a colleague's copy no longer disappears when the copy is
+  merged in.** If a colleague withdrew a participant in their copy, merging that copy
+  kept the participant and all of their data in your project, said nothing, and from
+  then on the project could not be duplicated or copied — and the message said to
+  import a copy made after the withdrawal, which could not help. The merge now stops
+  before changing anything and names the participants your project still holds, so you
+  can withdraw them here first and then merge the copy again; the Merge page says so as
+  soon as the file is chosen. A project already in that state now says what fixes it
+  when you duplicate, copy or merge into it: withdraw the participant in the project
+  itself. Until you do, every merge into it is refused, and that message says the copy
+  records the withdrawal even when the record is the project's own (#1552). (#1470)
+- **Importing a transcript no longer brings a withdrawn participant back under their
+  name.** A withdrawal remembered only the participant's ID, so a transcript that named
+  them the way the project already knew them — say "Maria", where their ID was M01 —
+  made them a participant again. A withdrawal now also remembers the names the project
+  knew them by (their display name, their speaker names and the labels their turns
+  arrived with), kept as one-way codes like the ID, and a transcript import never makes a
+  speaker with one of those names, or the ID, into a participant. A withdrawal made in an
+  earlier version remembers the ID only. Someone else who shares one of those names — or
+  a generic label such as "Speaker 2" that the withdrawn participant had — is left
+  unlinked too; give them a different name under Map Speakers. Linking records and
+  merging a copy still recognise the ID only, so a colleague's copy that knew them by
+  another name can bring their words in without a word said (#1552). (#1472)
+- **The import now says when it left a speaker unlinked because of a withdrawal.**
+  Before, a speaker named with a withdrawn participant's ID was left unlinked with no
+  word, and the transcript's turns were imported. The import's warnings now count those
+  speakers (never naming them), say how to link someone else, and say that if the
+  transcript holds the withdrawn participant's words, importing it brought them back and
+  deleting the conversation removes them. (#1391)
+- **The Qualitative analysis page says nothing has been coded yet when the only coding on
+  survey answers is "Unclear" or "Unsubstantive/Artifact"**, as it already did for
+  transcripts and documents; before, it opened the analysis tabs as though something had
+  been coded. The Descriptives also stop holding up the rest of the app while they count
+  on a large project (about 11 seconds on a survey with about 1.4 million codings). **No
+  reported number changes.** (#1526)
+- **The co-occurrence CSV is the matrix on screen.** It was always the passage-level
+  matrix over every survey question, whatever the screen showed, and from the Export
+  dialog it left every survey answer out. It now follows the level and the selection,
+  opens with a line stating how its pairs are counted (and, at the source level, that it
+  counts sources), with the header on the line below, and a project-wide export includes
+  survey answers. The matrix and its CSV also stop holding up the rest
+  of the app while they count on a large project (about 10 seconds on a project with
+  millions of codings). (#1527)
+- **The Source Data CSV holds what the screen holds.** With some sources selected it
+  also listed every document, observation and survey question of the kinds you had
+  selected nothing from, and it left interviewer turns out even when you had included
+  them. It now lists only what you selected and follows *include interviewer turns*. It
+  also stops holding up the rest of the app while it counts on a large project. (#1528)
+- **The Quote Board opens with a thousand quotes or more.** From about 1,000 quotes it
+  answered with an error, because of a limit in how it looked up the turn before each
+  quote. It is also much faster on a large project, and no longer holds up the rest of the
+  app while it loads. (#1539)
+- **The Text Coding export keeps its `.csv` ending with a long project name.** The file's
+  name was cut at 80 characters, ending included, so a project name longer than about 55
+  characters downloaded without `.csv`. (#1530)
+- **The exported R script no longer stops at a saved Cronbach's alpha whose records
+  have gone.** A saved alpha whose data had since lost all but one complete record
+  stopped the script there, and nothing after it ran; with two it printed an alpha the
+  app refuses. Below three complete records it now prints the app's own reason —
+  *"Not computed: Cronbach's alpha requires at least 3 complete records, got 1 as in
+  Mixed Measures."* — and the script carries on. Alpha's output also prints now when
+  the script is sourced; before, it printed nothing. (#1540)
+- **The group-comparison CSV says what its tests covered.** It gave no degrees of
+  freedom, left a row whose test did not run blank with no reason, never said which
+  groups you had excluded, and printed an ANOVA's F beside a one-value group the F had
+  left out, with nothing to say so. A last *Note* column now gives the screen's
+  sentence for a left-out group or a test that did not run, degrees-of-freedom columns
+  stand beside the statistic, and a first line names any groups you excluded. **The
+  *p* column moves one or two columns to the right (for Mann–Whitney it stays, and a
+  *p method* column follows it), and a file with excluded groups has one more line
+  above its header; a script that reads this file by position needs updating.** (#1543)
+- **A file exported under a participant filter says so on its first line** — the values
+  chosen (a filter from a link or a saved analysis gives the count alone), how many
+  participants, and which passages a filter keeps — in the Co-occurrence, Source Data,
+  code-by-group Comparison, Frequencies and Quote Board CSVs. The Source Data and
+  Comparison CSVs also now say a coder scope (blind mode or a coder filter) or the
+  consensus layer, which they never did; the machine layer is not yet named there
+  (#1558). So a Source Data or Comparison file exported under any of these, and a Quote
+  Board file exported under a filter or while blind, starts with one line above its
+  header (in R, `skip = 1`). (#1545)
+- **The Value display and Denominator boxes in the qualitative chart options show only the
+  option's name.** A closed box also showed the option's explanation, which did not fit the
+  one-line box and ran out of it; the explanation now stays in the open list. (#1561)
+- **Numbers in the Quantitative cross-tab, the qualitative heatmap and co-occurrence matrix,
+  and Text Coding's cross-tabulation are readable on every cell colour,** in both themes and
+  in exported images — the text colour now follows the cell's colour. (#1560)
+- **The Data Quality link after a dataset import goes to the Data Quality tab.** When an
+  import recognized values as missing (such as "N/A"), its **Review them on the Data Quality
+  tab** link opened the Analysis page's overview instead. (#1567)
 
 ## [1.5.8] - 2026-10-30
 
@@ -3405,7 +3996,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.8...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.8...v1.6.0
 [1.5.8]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.7...v1.5.8
 [1.5.7]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.6...v1.5.7
 [1.5.6]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.5...v1.5.6

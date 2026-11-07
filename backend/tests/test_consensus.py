@@ -1074,6 +1074,7 @@ class TestTheWritersGatherSkipsTargetsThatCannotDecide:
         )
         return gather_target_votes(
             db, self.PID, segment_scope=SEGMENT_SCOPE_CONSENSUS_ELIGIBLE, min_voters=n,
+            group_units=True,  # the writer's form (this fixture has no groups)
         )
 
     def test_the_filter_keeps_exactly_the_targets_that_can_decide(self, db_session):
@@ -1239,7 +1240,8 @@ class TestTheWritersGatherSkipsTargetsThatCannotDecide:
         assert param.kind is inspect.Parameter.KEYWORD_ONLY
         for bad in (0, -1, True, 1.5):
             with pytest.raises(ValueError, match="min_voters"):
-                gather_target_votes(db_session, 1, segment_scope="project", min_voters=bad)
+                gather_target_votes(db_session, 1, segment_scope="project", min_voters=bad,
+                                    group_units=True)
 
 
 # ── #958 · the shared gather STREAMS ─────────────────────────────────────────
@@ -1306,7 +1308,8 @@ class TestTheGatherStreams:
         monkeypatch.setattr(consensus, "GATHER_STREAM_BATCH", 50)
 
         def stream(pid):
-            votes = gather_target_votes(db, pid, segment_scope=SEGMENT_SCOPE_PROJECT, min_voters=2)
+            votes = gather_target_votes(db, pid, segment_scope=SEGMENT_SCOPE_PROJECT, min_voters=2,
+                                        group_units=True)
             return lambda: sum(1 for _ in votes.ballots())
 
         # Warm SQLAlchemy's statement caches on BOTH sizes first: they grow with
@@ -1316,7 +1319,7 @@ class TestTheGatherStreams:
         small, large = self._peak(stream(971)), self._peak(stream(972))
         held = self._peak(lambda: list(
             gather_target_votes(db, 972, segment_scope=SEGMENT_SCOPE_PROJECT,
-                                min_voters=2).ballots()
+                                min_voters=2, group_units=True).ballots()
         ))
         # The fixture could have disagreed: HOLDING the large project's ballots
         # costs many times what streaming it does (#707a).

@@ -522,9 +522,10 @@ for (rn in rownames(tk)) {
 kw <- kruskal.test(mpg ~ cyl, data = data)
 emit("kw_H", unname(kw$statistic)); emit("kw_df", unname(kw$parameter))
 
-# Mann-Whitney: the export emits wilcox.test for the 2-group comparison — re-run
-# identical (defaults reproduce scipy.stats.mannwhitneyu).
-mw <- suppressWarnings(wilcox.test(mpg ~ am, data = data))
+# Mann-Whitney: the export emits wilcox.test for the 2-group comparison on its
+# `.mm_testable` frame — re-run that call on that frame. Since #1326 STAT-12
+# (D58) the app takes R's default rule, so the defaults ARE the app's method.
+mw <- suppressWarnings(wilcox.test(y ~ g, data = cmp_rank_mpg_by_am))
 emit("mw_stat", unname(mw$statistic)); emit("mw_p", mw$p.value)
 
 # #821(a): the comparison MATERIAL's ANOVA, from the object the script named.
@@ -532,11 +533,12 @@ emit("mw_stat", unname(mw$statistic)); emit("mw_p", mw$p.value)
 casum <- summary(aov_mpg_by_cyl)[[1]]
 emit("cmp_anova_F", casum[["F value"]][1])
 
-# #821(a): the forced t-test over 3 groups. The script subsets to the first two
-# and drops the unused level; re-run the identical call on its own object.
-ftt <- t.test(.mm_num(tt_data_mpg$mpg, "mpg") ~ tt_data_mpg$cyl, var.equal = FALSE)
+# #821(a): the forced t-test over 3 groups. The script's `.mm_testable` frame
+# holds the first two testable groups (#1329, D52); re-run the identical call on
+# the frame the script built.
+ftt <- t.test(y ~ g, data = cmp_t_mpg_by_cyl, var.equal = FALSE)
 emit("cmp_forced_t", unname(ftt$statistic))
-emit("cmp_forced_t_levels", nlevels(factor(tt_data_mpg$cyl)))
+emit("cmp_forced_t_levels", nlevels(cmp_t_mpg_by_cyl$g))
 
 # Pearson + Spearman: reuse the `cor_vars` the exported script created.
 cmp <- cor(.mm_num(data[, cor_vars]), use = "pairwise.complete.obs", method = "pearson")
@@ -544,12 +546,11 @@ emit("cor_mpg_hp", cmp[1, 2]); emit("cor_mpg_wt", cmp[1, 3])
 cms <- cor(.mm_num(data[, cor_vars]), use = "pairwise.complete.obs", method = "spearman")
 emit("scor_mpg_hp", cms[1, 2]); emit("scor_mpg_wt", cms[1, 3])
 
-# chi-square + Cramer's V: reuse the `cross_tab` the exported script created.
-ct <- suppressWarnings(chisq.test(cross_tab))
-emit("chisq", unname(ct$statistic)); emit("chisq_df", unname(ct$parameter))
-# #495d: the table's own N (== nrow(data) on this complete single-dataset
-# fixture, but the emitted script now uses sum(cross_tab) — mirror it).
-emit("cramers_v", sqrt(unname(ct$statistic) / (sum(cross_tab) * (min(dim(cross_tab)) - 1))))
+# chi-square + Cramer's V: the OBJECTS the exported script built (#1328/#1326,
+# D49/D50 — Pearson's chi-square on the observed table, V from it), never a
+# restatement of its calls (#1039 h).
+emit("chisq", unname(xt_chisq$statistic)); emit("chisq_df", unname(xt_chisq$parameter))
+emit("cramers_v", xt_v)
 
 # Cronbach: re-run psych::alpha on the item frame the exported script built
 # (#495a: items are EG-collapsed + listwise-complete; frame name lifted from
@@ -669,21 +670,21 @@ def test_exported_script_reproduces_tool_results(db_session):
         # The export fix must branch by effective group count: Mann-Whitney
         # (wilcox.test) for the 2-group comparison, Kruskal-Wallis for the 3-group.
         script_text = (workdir / setup_name).read_text(encoding="utf-8")
-        assert re.search(
-            r'wilcox\.test\(\.mm_num\(data\$mpg, "mpg"\) ~ data\$am', script_text
-        ), "2-group non-parametric comparison must emit wilcox.test (Mann-Whitney)"
-        assert re.search(
-            r'kruskal\.test\(\.mm_num\(data\$mpg, "mpg"\) ~ data\$cyl', script_text
-        ), "3-group non-parametric comparison must emit kruskal.test"
-        assert 'kruskal.test(.mm_num(data$mpg, "mpg") ~ data$am' not in script_text, \
+        # #1329 (D52): each test reads a `.mm_testable` frame of the groups it
+        # may use, built at run time from the same values.
+        assert 'cmp_rank_mpg_by_am <- .mm_testable(.mm_num(data$mpg, "mpg"), data$am, min_n = 1)' \
+            in script_text
+        assert "print(wilcox.test(y ~ g, data = cmp_rank_mpg_by_am))" in script_text, \
+            "2-group non-parametric comparison must emit wilcox.test (Mann-Whitney)"
+        assert "print(kruskal.test(y ~ g, data = cmp_rank_mpg_by_cyl))" in script_text, \
+            "3-group non-parametric comparison must emit kruskal.test"
+        assert "kruskal.test(y ~ g, data = cmp_rank_mpg_by_am)" not in script_text, \
             "2-group comparison must NOT emit kruskal.test"
         # #821(a): the PARAMETRIC arm branches on group count too. The comment
         # that used to carry the correct call ("If 3+ groups, use: aov(...)")
         # must be gone — a comment is not a reproduction.
-        assert re.search(
-            r'aov_mpg_by_cyl <- aov\(\.mm_num\(data\$mpg, "mpg"\) ~ data\$cyl\)',
-            script_text,
-        ), "3-group parametric comparison must emit aov, not t.test"
+        assert "aov_mpg_by_cyl <- aov(y ~ g, data = cmp_aov_mpg_by_cyl)" in script_text, \
+            "3-group parametric comparison must emit aov, not t.test"
         assert "If 3+ groups, use" not in script_text, \
             "the correct call must be emitted, not left in a comment"
         # #537: the level-value registry must carry the real codes.

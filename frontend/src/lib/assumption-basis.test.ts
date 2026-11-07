@@ -70,14 +70,15 @@ describe('#525b — groups in the comparison but not in the test', () => {
   })
 
   /**
-   * MEASURED: `levene([1.0], [1,2,3,4], center="median")` returns a
-   * confident-looking p = 0.219 resting on a deviation that is zero by
-   * construction. Naming it is not refusing it.
+   * MEASURED under the old rule: `levene([1.0], [1,2,3,4], center="median")`
+   * returned a confident p = 0.219 resting on a deviation that is zero by
+   * construction. Since #1329 (D51) the server leaves the group OUT of the test,
+   * so the caveat says it is not in it.
    */
-  it('names a SINGLETON group, whose deviation is structurally zero', () => {
+  it('names a SINGLETON group as left out of the test', () => {
     const s = leveneCaveat({ excluded_groups: [], singleton_groups: ['Solo'] })!
     expect(s).toMatch(/Solo/)
-    expect(s).toMatch(/single observation/i)
+    expect(s).toMatch(/single value, not in the test/i)
   })
 
   it('keeps the two cases DISTINCT', () => {

@@ -6,7 +6,11 @@ percent agreement (always), Cohen's κ (exactly 2 coders), and Krippendorff's α
 this is the computation engine + an on-demand read.
 
 **Unit = target × code, binary.** For a given code, each coder's value on a unit
-(a segment XOR a dataset value) is 1 (applied) or 0 (did not apply) or MISSING.
+(a segment, a segment GROUP, or a dataset value) is 1 (applied) or 0 (did not
+apply) or MISSING. What one unit is — a facilitator's turn left out, a group of
+turns counted once — is the stated `unit_basis` (#1333 / #1334,
+`reliability_basis.UNIT_BASIS_*`), applied by `reliability_segment_rows` and
+`_unit_of` below.
 
 **Option B — source-level engagement (developer-confirmed 2026-06-23).** The data
 only records codes that were *applied*; there is no "reviewed but declined" record.
@@ -33,8 +37,9 @@ and round-tripped against R's ``irr`` package.
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import NamedTuple
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ..auth import reliability_coder_clause
@@ -58,12 +63,19 @@ from .code_sets import (
     build_code_set_index,
     matrix_cell,
 )
+from .coding_counts import participant_turn_query
 from .magnitude import read_scale
 from .reliability_basis import (
     ALPHA_METRIC_NOMINAL,
+    DEFAULT_RELIABILITY_UNIT_BASIS,
     MAGNITUDE_ALPHA_METRIC,
+    MIN_COMPARABLE_UNITS,
     RELIABILITY_FACET_CODERS,
+    VERDICT_MIN_UNITS,
+    unit_basis_excludes_facilitator_turns,
+    verdict_withheld_reason,
 )
+from .segment_groups import GROUP_RATING_CONFLICT, merge_unit_rating, unit_key
 # #987 — which dataset cells are CODEABLE is decided in one place (#519/#840).
 # Imported exactly as `code_analysis.py` does; no cycle (`text_analysis` reaches
 # models, `coding_layers` and `id_set`, never this module).
@@ -304,9 +316,12 @@ def _krippendorff_alpha(
     """Krippendorff's α, n coders, missing-data tolerant.
 
     Builds the coincidence matrix the canonical way, then applies the α formula.
-    Reproduces ``irr::kripp.alpha(method=metric)`` for numeric data. Non-nominal
-    metrics require numeric values; ratio additionally requires non-negative
-    values.
+    Reproduces ``irr::kripp.alpha(method=metric)`` for numeric data THROUGH irr's
+    missing-data branch only: with no missing cell, irr (0.84.1 and 0.85) weights
+    every pair 1 instead of 1/(m−1), which is wrong for three or more coders —
+    which is why the R export calls ``kripp.alpha(cbind(t(m), NA), …)`` (#1325,
+    D39). Non-nominal metrics require numeric values; ratio additionally
+    requires non-negative values.
 
     The binary presence/absence IRR surfaces use the nominal default; the metric
     generalization is the designed extension point for ordinal/interval magnitude
@@ -459,11 +474,173 @@ def _mean_abs_difference(units: list[list[float | None]]) -> float | None:
     return total / pairs if pairs else None
 
 
+# ── When a matrix has NO coefficient (#829, #1505) — ONE decision, two callers ──
+#
+# `compute_irr` and the R export (`routers/export_r.py`, which writes the app's
+# reason beside irr's raw value — D40) both ask these, so the script and the
+# screen cannot disagree about which codes have a coefficient. The order is the
+# order a researcher can act on: too little data first, then no variance.
+
+
+def binary_undefined_reason(rows: list[list[int | None]]) -> str | None:
+    """Why a 0/1 presence matrix has no κ/α, or ``None``.
+
+    `insufficient_n` below `MIN_COMPARABLE_UNITS` (one unit is an identity, not a
+    measurement — `reliability_basis`), then `no_variance` when nobody — or
+    everybody — applied the code (#829's zero-prevalence rider). ``_prevalence``
+    is legal here: the cells are 0/1."""
+    if _n_comparable_units(rows) < MIN_COMPARABLE_UNITS:
+        return INSUFFICIENT_N
+    prevalence = _prevalence(rows)
+    if prevalence == 0.0 or prevalence == 1.0:
+        return NO_VARIANCE
+    return None
+
+
+def valued_undefined_reason(rows: list[list]) -> str | None:
+    """Why a RATING or code-SET matrix has no α, or ``None``.
+
+    The cells are ratings or member code ids, so variance is decided over the
+    COMPARED values (`_distinct_comparable_values`) — never `_prevalence`, which
+    would sum code ids."""
+    if _n_comparable_units(rows) < MIN_COMPARABLE_UNITS:
+        return INSUFFICIENT_N
+    if len(_distinct_comparable_values(rows)) < 2:
+        return NO_VARIANCE
+    return None
+
+
+def set_undefined_reason(rows: list[list], n_members: int) -> str | None:
+    """`valued_undefined_reason` for a code set, after its own first question: a
+    set of fewer than two values is a binary code wearing a costume (`degenerate`)."""
+    if n_members < 2:
+        return DEGENERATE
+    return valued_undefined_reason(rows)
+
+
+def _verdict(value: float | None, n_units: int, interpret) -> tuple[str | None, str | None]:
+    """(band word, withheld reason) for a coefficient over ``n_units`` units (D43).
+
+    An undefined coefficient gets neither — its `undefined_reason` already
+    explains the blank, and two reasons for one cell is worse than one."""
+    if value is None:
+        return None, None
+    withheld = verdict_withheld_reason(n_units)
+    return (None if withheld else interpret(value)), withheld
+
+
+# ── The unit rule (#1333 / #1334) — shared with `machine_agreement._gather` ────
+
+
+def reliability_segment_rows(query, *, include_facilitator_turns: bool):
+    """The #1333 half of what a reliability unit is, applied to a query already
+    joined to `Segment`. ONE function for both gathers' both passes, because the
+    human table and the Model comparison table must count the same units
+    (`machine_agreement.py`: "the SAME rule the human table uses")."""
+    if include_facilitator_turns:
+        return query
+    return participant_turn_query(query)
+
+
+def _unit_of(seg_id: int, group_id: int | None, collapse_groups: bool) -> tuple[str, int]:
+    """The #1334 half: a grouped turn's unit is its group (`segment_groups.unit_key`)."""
+    return unit_key(seg_id, group_id if collapse_groups else None)
+
+
+def _record_rating(ratings, ukey, uid, code_id, magnitude) -> None:
+    """One application's rating into its unit — `merge_unit_rating` decides what
+    a coder's two members' ratings make. An entry exists for EVERY (unit, coder,
+    code) applied, so applied-but-unrated and never-applied stay distinct."""
+    mine = ratings[ukey][uid]
+    mine[code_id] = merge_unit_rating(mine[code_id], magnitude) if code_id in mine else magnitude
+
+
+def _settle_rating_conflicts(ratings) -> None:
+    """A coder's contradictory group rating is no rating (`None`), never a number."""
+    for per_coder in ratings.values():
+        for by_code in per_coder.values():
+            for code_id, value in by_code.items():
+                if value is GROUP_RATING_CONFLICT:
+                    by_code[code_id] = None
+
+
+class FacilitatorDisclosure(NamedTuple):
+    """What the #1333 exclusion LEFT OUT, said rather than dropped."""
+
+    #: Facilitator turns in scope (visible, in a conversation among the sources).
+    turns: int
+    #: ``{effective code: facilitator turns in scope carrying it, by any coder}``.
+    coded_by_code: dict[int, int]
+    #: D18 — the NAMES of the speakers whose turns were left out, sorted. The
+    #: exclusion keys on a flag the import sets only for an "Interviewer" or
+    #: "Facilitator" label, so a "Moderator" left as a participant is a unit
+    #: invisibly unless the researcher can see who WAS treated as a facilitator.
+    #: Transcript speakers, never coders, so blind mode has nothing to withhold.
+    speakers: list[str]
+
+
+def facilitator_turn_disclosure(
+    db: Session, project_id: int, coder_ids: list[int], sources: set[tuple],
+) -> FacilitatorDisclosure:
+    """What the #1333 exclusion LEFT OUT (`FacilitatorDisclosure`).
+
+    A facilitator turn is excluded by SPEAKER ROLE, never because nobody coded
+    it — so when a coder did code one, the researcher must be able to see that
+    the figure does not include it. Scope = the conversations among ``sources``
+    (documents, clips and answers have no speaker). Counted in TURNS: this is a
+    statement about material, not a unit count.
+    """
+    from ..models.speaker import Speaker
+
+    nothing = FacilitatorDisclosure(0, {}, [])
+    conv_ids = sorted(sid for (tag, sid) in sources if tag == "conv")
+    if not conv_ids or not coder_ids:
+        return nothing
+    facilitator_turn = (
+        Speaker.is_facilitator == 1,
+        Segment.conversation_id.in_(conv_ids),
+        *visible_segment_filter(),
+    )
+    per_speaker = (
+        db.query(Speaker.name, func.count(Segment.id))
+        .join(Segment, Segment.speaker_id == Speaker.id)
+        .filter(*facilitator_turn)
+        .group_by(Speaker.id, Speaker.name)
+        .all()
+    )
+    n_turns = sum(n for _name, n in per_speaker)
+    if not n_turns:
+        return nothing
+    eff = build_effective_code_map(db, project_id)
+    coded: dict[int, set[int]] = defaultdict(set)
+    for seg_id, code_id in (
+        db.query(Segment.id, CodeApplication.code_id)
+        .join(Speaker, Speaker.id == Segment.speaker_id)
+        .join(CodeApplication, CodeApplication.segment_id == Segment.id)
+        .join(Code, CodeApplication.code_id == Code.id)
+        .join(User, CodeApplication.user_id == User.id)
+        .filter(
+            *facilitator_turn,
+            non_consensus_filter(),
+            Code.is_universal == False,  # noqa: E712
+            reliability_coder_clause(),
+            CodeApplication.user_id.in_(coder_ids),
+        ).all()
+    ):
+        coded[resolve_effective_code(eff, code_id)].add(seg_id)
+    return FacilitatorDisclosure(
+        n_turns,
+        {code: len(segs) for code, segs in coded.items()},
+        sorted({name for name, _n in per_speaker}, key=str.casefold),
+    )
+
+
 # ── Option-B gather (mirrors consensus.py's roster-coder recipe) ───────────────
 
 
 def gather_coder_applications(
-    db: Session, project_id: int, coder_ids: list[int] | None = None,
+    db: Session, project_id: int, coder_ids: list[int] | None = None, *,
+    include_facilitator_turns: bool, collapse_groups: bool,
 ) -> tuple[
     list[int],
     dict[tuple, dict[int, set[int]]],
@@ -500,9 +677,28 @@ def gather_coder_applications(
       "applied but unrated" (``None``) and "never applied" (absent) stay distinct
       — the coverage figures need both.
 
-    ``ukey`` is ``("seg", id)`` / ``("val", id)``; source keys
+    ``ukey`` is ``("seg", id)`` / ``("val", id)`` — or ``("grp", id)`` for a
+    segment GROUP when ``collapse_groups``; source keys
     ``("conv"|"doc"|"obs", id)`` / ``("col", id)`` — tag-prefixed, so ids drawn from
     four independent sequences can never collide.
+
+    🔴 **The two unit-rule arguments have NO DEFAULT (#1333 / #1334)** — the
+    `gather_target_votes(segment_scope=)` precedent: the signature is what makes
+    each consumer decide. The agreement figures pass the stated basis's reading
+    (`compute_irr`); the reconciliation grid passes ``True, True``, because it
+    adjudicates the CONSENSUS LAYER, which covers facilitator turns (the analysis
+    view can include them — a facilitator turn somebody coded is still coding a
+    colleague may need to see) and decides a segment group once since 1.5.9's
+    unit 3 (D35; the writer's `consensus.TARGET_GROUP` ballots).
+
+    - ``include_facilitator_turns=False`` — a facilitator's turn is not a unit,
+      and a coding on one does not make its coder ENGAGED with the source (the
+      participant gauge, J-A, shows them nothing coded there either).
+    - ``collapse_groups=True`` — a group's members are ONE unit: a coder applied
+      a code to it if they applied it to ANY member (the apply fans out, so a
+      member coded alone came from a door that does not — `bulk_code`, a coding
+      made before the group existed, a merged copy), and a rating is
+      `segment_groups.merge_unit_rating`'s answer.
     """
     coder_q = db.query(User).filter(
         reliability_coder_clause(),
@@ -547,26 +743,30 @@ def gather_coder_applications(
     # — and `compute_irr` pools every code into one headline alpha, so a single
     # open observation would corrupt a project whose transcripts agree perfectly.
     seg_app_rows = (
-        consensus_scoped_segments(
-            db.query(Segment.id, Segment.conversation_id, Segment.document_id,
-                     Segment.observation_id,
-                     CodeApplication.user_id, CodeApplication.code_id,
-                     CodeApplication.magnitude)
-            .join(CodeApplication, CodeApplication.segment_id == Segment.id)
-            .join(Code, CodeApplication.code_id == Code.id)
-            .join(User, CodeApplication.user_id == User.id),
-            project_id,
+        reliability_segment_rows(
+            consensus_scoped_segments(
+                db.query(Segment.id, Segment.conversation_id, Segment.document_id,
+                         Segment.observation_id, Segment.group_id,
+                         CodeApplication.user_id, CodeApplication.code_id,
+                         CodeApplication.magnitude)
+                .join(CodeApplication, CodeApplication.segment_id == Segment.id)
+                .join(Code, CodeApplication.code_id == Code.id)
+                .join(User, CodeApplication.user_id == User.id),
+                project_id,
+            ),
+            include_facilitator_turns=include_facilitator_turns,
         )
         .filter(*visible_segment_filter(), *base_filters)
         .all()
     )
-    for seg_id, conv_id, doc_id, obs_id, uid, code_id, magnitude in seg_app_rows:
+    for seg_id, conv_id, doc_id, obs_id, group_id, uid, code_id, magnitude in seg_app_rows:
         src = _segment_source_key(conv_id, doc_id, obs_id)
-        ukey = ("seg", seg_id)
+        ukey = _unit_of(seg_id, group_id, collapse_groups)
         unit_source[ukey] = src
         engaged[src].add(uid)
         applied[ukey][uid].add(resolve_effective_code(eff, code_id))
-        ratings[ukey][uid][code_id] = magnitude
+        _record_rating(ratings, ukey, uid, code_id, magnitude)
+    _settle_rating_conflicts(ratings)
 
     # Dataset-value applications (open-ended text coding).
     #
@@ -621,9 +821,15 @@ def gather_coder_applications(
         # the two passes must agree on WHICH units exist, and an unfrozen clip
         # entering only here would be a unit with no applications, i.e. an all-zero
         # row of pure fabricated disagreement.
-        for seg_id, conv_id, doc_id, obs_id in (
-            db.query(Segment.id, Segment.conversation_id, Segment.document_id,
-                     Segment.observation_id)
+        # #1333 / #1334 — the SAME unit rule as pass 1, or a prompt nobody coded
+        # would re-enter here as a row of fabricated agreement, and a group's
+        # uncoded members as units of their own.
+        for seg_id, conv_id, doc_id, obs_id, group_id in (
+            reliability_segment_rows(
+                db.query(Segment.id, Segment.conversation_id, Segment.document_id,
+                         Segment.observation_id, Segment.group_id),
+                include_facilitator_turns=include_facilitator_turns,
+            )
             .filter(
                 *visible_segment_filter(),
                 consensus_eligible_segment_clause(),
@@ -635,7 +841,7 @@ def gather_coder_applications(
             ).all()
         ):
             src = _segment_source_key(conv_id, doc_id, obs_id)
-            unit_source.setdefault(("seg", seg_id), src)
+            unit_source.setdefault(_unit_of(seg_id, group_id, collapse_groups), src)
     if col_ids:
         # 🔴 #987 — `substantive_text_clause`, NEVER a hand-rolled emptiness test.
         # This was `value_text != ""`, which differs from the codeable set TWICE:
@@ -665,7 +871,8 @@ def gather_coder_applications(
 
 def build_irr_matrices(
     db: Session, project_id: int, coder_ids: list[int] | None = None,
-    source: tuple[str, int] | None = None,
+    source: tuple[str, int] | None = None, *,
+    unit_basis: str = DEFAULT_RELIABILITY_UNIT_BASIS,
 ) -> tuple[
     list[int], dict[int, str], dict[int, list[list[int | None]]],
     set[tuple], set[int], dict[int, dict], dict[int, dict],
@@ -676,8 +883,11 @@ def build_irr_matrices(
     ``units`` is the per-code matrix (one row per in-play unit; each row a list of
     length n_coders with 0/1/None). Source-level engagement (Option B) governs
     which cells are None. Built on the shared ``gather_coder_applications`` so IRR
-    and reconciliation see identical coder/unit data; the per-code matrix shaping
-    below is IRR-specific.
+    and reconciliation see the same CODERS and codings — but not the same UNITS
+    (#1333 / #1334): this passes the stated ``unit_basis``'s reading (facilitator
+    turns out, a group once) while the grid keeps facilitator turns (it counts a
+    group once too, since unit 3, D35). The per-code matrix shaping below is
+    IRR-specific.
 
     ``magnitude`` (#35) is ``{raw_code_id: {"code_name", "scale", "rows",
     "n_applications", "n_rated"}}`` for every code that DECLARES a scale and was
@@ -707,8 +917,13 @@ def build_irr_matrices(
     ``member_rows``, which is the breakdown that answers *which value is
     destroying my α*.
     """
+    # #1333 / #1334 — what a unit IS comes from the stated basis, never from a
+    # second flag: the payload and the R script say the value that produced the
+    # number. Every basis collapses groups; the two differ on facilitator turns.
     coder_id_list, applied, unit_source, engaged, multi_sources, ratings = gather_coder_applications(
-        db, project_id, coder_ids
+        db, project_id, coder_ids,
+        include_facilitator_turns=not unit_basis_excludes_facilitator_turns(unit_basis),
+        collapse_groups=True,
     )
     if len(coder_id_list) < 2 or not multi_sources:
         return coder_id_list, {}, {}, set(), set(), {}, {}
@@ -849,7 +1064,8 @@ def build_irr_matrices(
 
 def compute_irr(
     db: Session, project_id: int, coder_ids: list[int] | None = None,
-    source: tuple[str, int] | None = None,
+    source: tuple[str, int] | None = None, *,
+    unit_basis: str = DEFAULT_RELIABILITY_UNIT_BASIS,
 ) -> dict:
     """Compute per-code + overall IRR for a project, optionally scoped to ONE source.
 
@@ -870,7 +1086,7 @@ def compute_irr(
     against. **Do not quote either from this docstring** — re-measure.
     """
     coder_id_list, code_names, per_code, selectable, scope_coders, magnitude, code_sets = (
-        build_irr_matrices(db, project_id, coder_ids, source)
+        build_irr_matrices(db, project_id, coder_ids, source, unit_basis=unit_basis)
     )
     n = len(coder_id_list)
     coders = (
@@ -901,9 +1117,12 @@ def compute_irr(
             "per_code": [],
             "overall_alpha": None,
             "overall_alpha_interpretation": None,
+            "overall_verdict_withheld_reason": None,
             "overall_alpha_ci": None,
             "interpretation_thresholds": thresholds,
+            "verdict_min_units": VERDICT_MIN_UNITS,
             "reliability_facet": RELIABILITY_FACET_CODERS,
+            "unit_basis": unit_basis,
             "magnitude_per_code": [],
             "set_agreement": [],
         }
@@ -933,6 +1152,14 @@ def compute_irr(
     # `per_code` for the R export, and their binary α in each set's breakdown.
     set_member_ids = {cid for e in code_sets.values() for cid in e["members"]}
 
+    # #1333 — what the exclusion left out (all None when facilitator turns are units).
+    scope_sources = ({source} & selectable) if source is not None else selectable
+    if unit_basis_excludes_facilitator_turns(unit_basis):
+        fac = facilitator_turn_disclosure(db, project_id, coder_id_list, scope_sources)
+        fac_excluded, fac_coded, fac_speakers = fac.turns, fac.coded_by_code, fac.speakers
+    else:
+        fac_excluded, fac_coded, fac_speakers = None, {}, None
+
     per_code_results = []
     global_rows: list[list[int | None]] = []
     # The per-code matrices pooled into the headline, kept SEPARATE from
@@ -946,7 +1173,12 @@ def compute_irr(
         if n_units == 0:
             continue
         prevalence = _prevalence(rows)
+        reason = binary_undefined_reason(rows)
 
+        # 🔴 #1505 (D42) — ONE comparable unit is not a measurement: α is 0 for any
+        # disagreement over a single unit, and κ with it. `insufficient_n`, decided
+        # before variance (it is the one the researcher can act on).
+        #
         # 🔴 THE ZERO-PREVALENCE RIDER (#829). A code NOBODY applied in scope has
         # no variance to agree about, and the arithmetic says so loudly in the
         # wrong direction: every present cell is 0, so po = 1.0, the expected
@@ -964,8 +1196,7 @@ def compute_irr(
         # ⚠️ Per-source scoping makes this MORE visible, not less: a source where
         # a code was never used becomes its own κ = 1 row. The two ship together
         # or the fix makes the panel noisier than it found it.
-        no_variance = prevalence == 0.0 or prevalence == 1.0
-        if no_variance:
+        if reason is not None:
             per_code_results.append({
                 "code_id": code_id,
                 "code_name": code_names.get(code_id, str(code_id)),
@@ -976,18 +1207,26 @@ def compute_irr(
                 "kappa_interpretation": None,
                 "krippendorff_alpha": None,
                 "alpha_interpretation": None,
+                "verdict_withheld_reason": None,
                 "alpha_metric": ALPHA_METRIC_NOMINAL,
-                "undefined_reason": NO_VARIANCE,
+                "undefined_reason": reason,
                 # #43 — an undefined statistic gets no interval, and no SECOND
                 # reason: `undefined_reason` above already explains the blank.
                 "kappa_ci": None,
                 "alpha_ci": None,
+                "facilitator_turns_coded": (
+                    fac_coded.get(code_id, 0) if fac_excluded is not None else None
+                ),
             })
             continue
 
         alpha = _krippendorff_alpha(rows)
         pair_rows = _project_to_pair(rows, *pair_idx) if pair_idx else None
         kappa = _cohens_kappa(pair_rows) if pair_rows is not None else None
+        # D43 — below the verdict floor the numbers stay and the band words go;
+        # one reason per ROW, because κ and α rest on the same units.
+        kappa_band, _ = _verdict(kappa, n_units, _interpret_kappa)
+        alpha_band, withheld = _verdict(alpha, n_units, _interpret_alpha)
         per_code_results.append({
             "code_id": code_id,
             "code_name": code_names.get(code_id, str(code_id)),
@@ -995,9 +1234,10 @@ def compute_irr(
             "percent_agreement": _percent_agreement(rows),
             "prevalence": prevalence,
             "cohens_kappa": kappa,
-            "kappa_interpretation": _interpret_kappa(kappa),
+            "kappa_interpretation": kappa_band,
             "krippendorff_alpha": alpha,
-            "alpha_interpretation": _interpret_alpha(alpha),
+            "alpha_interpretation": alpha_band,
+            "verdict_withheld_reason": withheld,
             # Presence/absence is categorical, so its α is scored NOMINALLY.
             # Stated on the row rather than assumed: the rating table below
             # scores its α on the INTERVAL metric, and the two must never be
@@ -1009,6 +1249,9 @@ def compute_irr(
             # change can never move one without the other.
             "kappa_ci": kappa_interval(pair_rows) if kappa is not None else None,
             "alpha_ci": alpha_interval(unit_contributions(rows)) if alpha is not None else None,
+            "facilitator_turns_coded": (
+                fac_coded.get(code_id, 0) if fac_excluded is not None else None
+            ),
         })
         global_rows.extend(rows)
         pooled_matrices.append(rows)
@@ -1018,6 +1261,15 @@ def compute_irr(
     overall_alpha_ci = (
         alpha_interval(pooled_unit_contributions(pooled_matrices))
         if overall_alpha is not None else None
+    )
+    # D43 — the headline's UNITS are passages, not (passage × code) rows: every
+    # pooled matrix iterates the same unit list (`pooled_unit_contributions`
+    # asserts it), so any one of them counts them. A pooled set of ONE unit never
+    # reaches here — each of its codes is `insufficient_n` and adds no rows (D42).
+    overall_band, overall_withheld = _verdict(
+        overall_alpha,
+        _n_comparable_units(pooled_matrices[0]) if pooled_matrices else 0,
+        _interpret_alpha,
     )
 
     # ── #35 — rating agreement, one α PER scaled code, never pooled ───────────
@@ -1040,35 +1292,30 @@ def compute_irr(
             "mean_abs_difference": _mean_abs_difference(rows_m),
             "alpha_metric": MAGNITUDE_ALPHA_METRIC,
         }
-        if n_units_m == 0:
-            # Every rating here is one coder's alone — coverage, not agreement.
-            # The row still renders so the researcher sees HOW thin the ratings
-            # are; that visibility is why variant C (optional rating) was
-            # rejected in the design round.
+        # `insufficient_n` — no unit rated by two coders (every rating one coder's
+        # alone: coverage, not agreement), or ONE such unit (D42: an identity).
+        # The row still renders so the researcher sees HOW thin the ratings are;
+        # that visibility is why variant C (optional rating) was rejected in the
+        # design round. `no_variance` — #829's rule through ratings: identical
+        # compared values are no variance to agree about, not perfect agreement.
+        reason_m = valued_undefined_reason(rows_m)
+        if reason_m is not None:
             magnitude_results.append({
                 **base,
                 "krippendorff_alpha": None,
                 "alpha_interpretation": None,
-                "undefined_reason": INSUFFICIENT_N,
-                "alpha_ci": None,
-            })
-            continue
-        if len(_distinct_comparable_values(rows_m)) < 2:
-            # #829's rule through ratings: identical values everywhere is not
-            # "perfect agreement", it is no variance to agree about.
-            magnitude_results.append({
-                **base,
-                "krippendorff_alpha": None,
-                "alpha_interpretation": None,
-                "undefined_reason": NO_VARIANCE,
+                "verdict_withheld_reason": None,
+                "undefined_reason": reason_m,
                 "alpha_ci": None,
             })
             continue
         alpha_m = _krippendorff_alpha(rows_m, MAGNITUDE_ALPHA_METRIC)
+        band_m, withheld_m = _verdict(alpha_m, n_units_m, _interpret_alpha)
         magnitude_results.append({
             **base,
             "krippendorff_alpha": alpha_m,
-            "alpha_interpretation": _interpret_alpha(alpha_m),
+            "alpha_interpretation": band_m,
+            "verdict_withheld_reason": withheld_m,
             "undefined_reason": None,
             # The SAME metric as the point estimate, by construction — the
             # interval brackets the number it sits beside, not a nominal cousin.
@@ -1111,18 +1358,20 @@ def compute_irr(
             m_rows = entry["member_rows"].get(code_id)
             if m_rows is None:
                 continue
-            m_prev = _prevalence(m_rows)
-            m_no_variance = m_prev == 0.0 or m_prev == 1.0
-            m_alpha = None if m_no_variance else _krippendorff_alpha(m_rows)
+            m_reason = binary_undefined_reason(m_rows)
+            m_alpha = None if m_reason else _krippendorff_alpha(m_rows)
+            m_n = _n_comparable_units(m_rows)
+            m_band, m_withheld = _verdict(m_alpha, m_n, _interpret_alpha)
             member_results.append({
                 "code_id": code_id,
                 "code_name": member_names.get(code_id, str(code_id)),
-                "n_units": _n_comparable_units(m_rows),
-                "prevalence": m_prev,
+                "n_units": m_n,
+                "prevalence": _prevalence(m_rows),
                 "percent_agreement": _percent_agreement(m_rows),
                 "krippendorff_alpha": m_alpha,
-                "alpha_interpretation": _interpret_alpha(m_alpha),
-                "undefined_reason": NO_VARIANCE if m_no_variance else None,
+                "alpha_interpretation": m_band,
+                "verdict_withheld_reason": m_withheld,
+                "undefined_reason": m_reason,
             })
 
         confusion = [
@@ -1160,31 +1409,20 @@ def compute_irr(
             "percent_agreement": _percent_agreement(rows_s),
         }
 
-        if len(members) < 2:
-            # One member is a binary code wearing a costume, and α over a
-            # single-valued variable answers a question nobody asked. The MODEL
-            # permits a half-built set — a researcher adds members one at a time
-            # — so the refusal belongs to the statistic, and it says why.
+        # `degenerate` — one member is a binary code wearing a costume, and α over
+        # a single-valued variable answers a question nobody asked (the MODEL
+        # permits a half-built set — a researcher adds members one at a time — so
+        # the refusal belongs to the statistic, and it says why) · `insufficient_n`
+        # — no comparable unit, or one (D42) · `no_variance` — #829's rule through
+        # sets: every comparable unit taking one value is no variance to agree
+        # about, not perfect agreement.
+        reason_s = set_undefined_reason(rows_s, len(members))
+        if reason_s is not None:
             set_results.append({
                 **base, "cohens_kappa": None, "kappa_interpretation": None,
                 "krippendorff_alpha": None, "alpha_interpretation": None,
-                "undefined_reason": DEGENERATE, "kappa_ci": None, "alpha_ci": None,
-            })
-            continue
-        if n_units_s == 0:
-            set_results.append({
-                **base, "cohens_kappa": None, "kappa_interpretation": None,
-                "krippendorff_alpha": None, "alpha_interpretation": None,
-                "undefined_reason": INSUFFICIENT_N, "kappa_ci": None, "alpha_ci": None,
-            })
-            continue
-        if len(_distinct_comparable_values(rows_s)) < 2:
-            # #829's rule through sets: every comparable unit taking one value is
-            # no variance to agree about, not perfect agreement.
-            set_results.append({
-                **base, "cohens_kappa": None, "kappa_interpretation": None,
-                "krippendorff_alpha": None, "alpha_interpretation": None,
-                "undefined_reason": NO_VARIANCE, "kappa_ci": None, "alpha_ci": None,
+                "verdict_withheld_reason": None,
+                "undefined_reason": reason_s, "kappa_ci": None, "alpha_ci": None,
             })
             continue
 
@@ -1194,12 +1432,15 @@ def compute_irr(
         # per-code table does: exactly two engaged coders in scope.
         pair_rows_s = _project_to_pair(rows_s, *pair_idx) if pair_idx else None
         kappa_s = _cohens_kappa(pair_rows_s) if pair_rows_s is not None else None
+        kappa_band_s, _ = _verdict(kappa_s, n_units_s, _interpret_kappa)
+        alpha_band_s, withheld_s = _verdict(alpha_s, n_units_s, _interpret_alpha)
         set_results.append({
             **base,
             "cohens_kappa": kappa_s,
-            "kappa_interpretation": _interpret_kappa(kappa_s),
+            "kappa_interpretation": kappa_band_s,
             "krippendorff_alpha": alpha_s,
-            "alpha_interpretation": _interpret_alpha(alpha_s),
+            "alpha_interpretation": alpha_band_s,
+            "verdict_withheld_reason": withheld_s,
             "undefined_reason": None,
             "kappa_ci": kappa_interval(pair_rows_s) if kappa_s is not None else None,
             # The interval is built from the SET's rows, never a member's — the
@@ -1222,15 +1463,25 @@ def compute_irr(
         "metric_label": "kappa+alpha" if pair_idx else "alpha",
         "per_code": per_code_results,
         "overall_alpha": overall_alpha,
-        "overall_alpha_interpretation": _interpret_alpha(overall_alpha),
+        "overall_alpha_interpretation": overall_band,
+        "overall_verdict_withheld_reason": overall_withheld,
         # ⚠️ A CLUSTER bootstrap over units, not over the pooled rows — a unit
         # contributes one row per code and those rows move together (#43).
         "overall_alpha_ci": overall_alpha_ci,
         "interpretation_thresholds": thresholds,
+        # #1505 (D43) — the floor below which no row carries a band word. Rides
+        # the payload so the client's sentence says the server's number.
+        "verdict_min_units": VERDICT_MIN_UNITS,
         # The stated basis (#35): every α on this payload is over CODERS. A
         # dataset scale score's α is over ITEMS and says so on its own payload;
         # the client displays each and never infers either from the screen.
         "reliability_facet": RELIABILITY_FACET_CODERS,
+        # #1333 / #1334 — the FOURTEENTH stated-basis member: what "Units" counts.
+        # The same coding gives a different α under each value.
+        "unit_basis": unit_basis,
+        "facilitator_turns_excluded": fac_excluded,
+        # D18 — who was treated as a facilitator (None when nobody was left out).
+        "facilitator_speakers": fac_speakers,
         "magnitude_per_code": magnitude_results,
         # Row 48 — the THIRD table. Never pooled into `overall_alpha`.
         "set_agreement": set_results,

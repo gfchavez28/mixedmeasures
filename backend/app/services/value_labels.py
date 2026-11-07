@@ -224,6 +224,50 @@ def text_code_resolver(label_to_code: dict[str, float]):
     return resolve
 
 
+def _answer_as_stored(value_text):
+    return value_text
+
+
+def answer_label_resolver(column):
+    """The declared label an ANSWER is counted under (#1332, 1.5.9, D56).
+
+    Returns a function ``answer -> label``: the answer's own declared label when
+    ``text_code_resolver`` places it on one — exact, then stripped, then without
+    case, the rule the import NUMBERS a cell by — and the answer exactly as stored
+    otherwise (an undeclared answer, a bare number, ``None``). A survey whose cells
+    say "Strongly Agree" under a scale labelled "Strongly agree" was numbered under
+    that label at import, while every reader that keys a CATEGORY on the text
+    (a frequency, a cross-tab, a group) counted it as a category of its own, after
+    the scale. This is the one answer to "which category is this answer?".
+
+    ⚠️ **Read-side only — the stored cell is never rewritten** (D56): the data
+    view, the Excel data sheet and the recode workbench's value list keep the
+    answer as it was typed. ⚠️ A folded key two labels share with DIFFERENT codes
+    names neither (the resolver's own rule), so such an answer keeps its spelling.
+    ⚠️ Ask a cell's MISSING question of the stored text first — this does not.
+
+    ``column`` is anything with the ``scale_labels`` / ``scale_values`` JSON
+    attributes (a ``DatasetColumn`` or a query row). Memoised per distinct answer.
+    """
+    label_to_code = column_label_to_code(column)
+    if not label_to_code:
+        return _answer_as_stored
+    resolve = text_code_resolver(label_to_code)
+    memo: dict[str, str] = {}
+
+    def label_for(value_text):
+        if value_text is None:
+            return None
+        found = memo.get(value_text)
+        if found is None:
+            hit = resolve(value_text)
+            found = hit[1] if hit is not None and hit[1] is not None else value_text
+            memo[value_text] = found
+        return found
+
+    return label_for
+
+
 def column_label_to_code(column: DatasetColumn) -> dict[str, float]:
     """The column's own ``{label: code}`` dictionary, from its scale metadata.
 

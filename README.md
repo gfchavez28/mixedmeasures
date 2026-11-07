@@ -48,7 +48,7 @@ to stay on their own machine.
 
 ## Install
 
-**Recommended:** download the latest signed installer from the
+**Recommended:** download the latest installer from the
 [Releases page](https://github.com/gfchavez28/mixedmeasures/releases/latest) and run
 it — no setup required:
 
@@ -64,8 +64,9 @@ and the **macOS** line must read 14 or higher.
 
 Prefer to build it yourself? See [Running from source](#running-from-source).
 
-**First launch — a security prompt is expected.** The installers are signed (and
-notarized on macOS), so the verified publisher is **George Chavez**. Because Mixed
+**First launch — a security prompt is expected.** The Windows and macOS installers are
+signed (and notarized on macOS), so the verified publisher is **George Chavez**; the
+Linux AppImage is not signed. Because Mixed
 Measures is a new, independent app, your operating system may still show a first-run
 warning until the app builds up download reputation — this is normal and does not
 mean anything is wrong:
@@ -221,20 +222,26 @@ across, leaving the original and its coding untouched.
   identifier column ("Participant ID", "Respondent", …) link their rows to
   participants automatically at import, append, or retroactively; a document is
   linked by naming its subject, and one person can have any number of them.
-- Qualitative analysis: code frequencies, **co-occurrence**, a **thematic
-  saturation curve**, group comparisons of code frequency, and a **codebook
-  treemap** overview.
+- Qualitative analysis: code frequencies, **co-occurrence**, a **code saturation
+  curve** (how many distinct codes have appeared, source by source, in the order the
+  sources were added), **group comparisons that count participants** (how many in
+  each group used a code, tested with exact tests — a seeded simulation when the
+  groups are too large to count every table — and corrected across the codes
+  compared), and a **codebook treemap** overview.
 
 ### Analyze quantitatively
-- Descriptives (means, SDs, frequencies, proportions), with a **margin of error**
-  on frequency distributions.
+- Descriptives (means, SDs, frequencies, proportions). The Excel export and the R
+  script give each frequency category a **margin of error**; the charts do not draw
+  it yet.
 - **Distributions**: histograms for continuous variables, box plots for group
   comparisons, and **Q–Q plots** — each stating the convention it used, so the
   figure can be reproduced rather than just read.
 - Comparisons: **Welch's t-test**, **one-way ANOVA** with **Tukey HSD** post-hoc,
   and non-parametric **Mann-Whitney U** / **Kruskal-Wallis H**, with effect sizes
-  (Cohen's *d*, η², ω², ε²). Assumption checks report **whether you need the
-  non-parametric test**, rather than leaving you to interpret them.
+  (Cohen's *d*, η², ω², ε²). **Assumption checks** sit beside each test —
+  Shapiro–Wilk for normality in each group, and Levene's test centred on the median
+  (Brown–Forsythe) for equal variances — with a note when a group's size makes the
+  normality test misleading. They report; the choice of test stays yours.
 - **Correlation matrices** (Pearson / Spearman) with scatter matrix and trendlines.
 - **Cross-tabulation** with chi-square and Cramér's V, which says when its
   approximation is unreliable rather than printing a p-value you should not read.
@@ -272,8 +279,10 @@ across, leaving the original and its coding untouched.
   (with the margin of error on frequencies) — and the agreement between coders on
   codes, ratings and code sets (Krippendorff's alpha; Cohen's kappa and percent
   agreement when there are two coders). Each is verified by a round-trip test that
-  R's numbers match the app's. **Not in the script:** effect sizes, assumption
-  checks, Fisher's exact test, the missing-data diagnostics (Little's MCAR test
+  R's numbers match the app's. One known difference: where a split-half
+  Spearman–Brown coefficient comes out negative, the app shows 0 and the script
+  prints the formula's value. **Not in the script:** effect sizes, assumption
+  checks, the missing-data diagnostics (Little's MCAR test
   among them), trend lines, box plots and Q–Q plots, confidence
   intervals on means and on agreement, kappa and percent agreement with three or
   more coders, the agreement measures for recordings, the Model comparison
@@ -297,9 +306,9 @@ Being honest about scope:
 - **Not real-time collaborative.** There is no cloud workspace, no accounts, and
   no live co-editing. Team coding works asynchronously instead: colleagues code
   separate **copies** of a project and merge them back together, with per-coder
-  attribution, blind coding, intercoder reliability (Cohen's kappa, Krippendorff's
-  alpha, percent agreement — each with a **95% confidence interval**, and a stated
-  reason where one cannot be computed), agreement on **code ratings** and on **code
+  attribution, blind coding, intercoder reliability (Cohen's kappa and Krippendorff's
+  alpha, each with a **95% confidence interval** or a stated reason where one cannot
+  be computed, and percent agreement), agreement on **code ratings** and on **code
   sets** as well as on the codes themselves, side-by-side reconciliation, and a
   derived consensus layer. A separate **Model comparison** tab, there for a
   researcher coding alone as well, sets a machine coder's labels beside each
@@ -318,8 +327,9 @@ Being honest about scope:
   documented method you can inspect and check, computed locally and
   deterministically. The exported R script reproduces the statistics listed under
   *Export and reproduce* above, each checked against R by an automated test, and a
-  statistic joins the script only with such a test. A future 2.x will introduce generative
-  AI — local-first, off by default, and separable from the build.
+  statistic joins the script only with such a test. No 1.x release will add generative AI;
+  if AI comes, it will be in a 2.x that is local-first, off by default, and separable from
+  the build.
   *(AI coding tools did assist in **building** Mixed Measures — an honest note about
   development, distinct from what the product does.)*
 - **Withdrawal is supported, but it cannot *read* — and deleting a participant is
@@ -337,9 +347,14 @@ Being honest about scope:
   Quotes pointing into blanked text are removed with it, and so are the codes and notes on
   their deleted answers; the researcher's other codes, notes and memos are kept and reported
   for review, because deciding whether a memo quotes the person is reading, not matching. What it removed is remembered in the project —
-  by identity, and the person's ID as a one-way code, which is not anonymisation —
-  so merging a colleague's older copy, importing a copy or linking records does not
-  bring them back, and re-using their ID asks first. **That is the limit that matters: it cannot
+  by identity, and the person's ID and the names the project knew them by as one-way
+  codes, which is not anonymisation — so merging or importing a copy, linking records
+  or speakers, or importing a transcript whose speaker carries their ID does not bring
+  them back, nor does a transcript whose speaker carries one of those names, and
+  re-using their ID asks first. Linking records and merging a copy recognise the ID
+  only, so a colleague's copy that knew them by another name can still bring their
+  words in. (A withdrawal made in an earlier version kept the ID only.) **That is the limit that
+  matters: it cannot
   find the person's name inside *other* people's turns, or inside free-text
   answers, notes or memos.** Those need someone who knows the project. A full
   backup is taken first and there is no per-participant undo — restoring reverses
@@ -366,9 +381,9 @@ Being honest about scope:
   does **not** yet read or write `.qdpx`, the full project package that carries
   sources, coded selections and memos — so a complete project cannot currently move
   to NVivo or MAXQDA, or be deposited with an archive that requires QDPX. `.qdpx`
-  export is the next interoperability build; `.mmproject` is a documented, open
-  archive in the meantime, but it has one implementation and that is the honest
-  limitation.
+  export is the next interoperability build; `.mmproject` is an open archive (a ZIP
+  of JSON files) in the meantime, but its format is not yet written down as a
+  specification and it has one implementation — that is the honest limitation.
 
 ## Privacy & your data
 
@@ -414,7 +429,7 @@ Being honest about scope:
 
 ## Running from source
 
-Most users should install the signed desktop build (see [Install](#install) above).
+Most users should install the desktop build (see [Install](#install) above).
 To develop, contribute, or build it yourself, run the backend and frontend together:
 
 **Prerequisites**

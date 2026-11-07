@@ -104,8 +104,10 @@ for its duration. Measured on the real GSS corpus: the export alone was **118.6 
 this batch's streaming fix, and `duplicate` pays BOTH halves (export + re-import), making it
 the most expensive operation in this router.
 
-⚠️ Converted on a MEASUREMENT, never on the shape. `export.py`'s five CSV exports are
-deliberately still `async def` at 0.01–0.05 s (#837's own note), and
+⚠️ Converted on a MEASUREMENT, never on the shape. `export.py`'s small CSV exports are
+deliberately still `async def` at 0.01–0.05 s (#837's own note — five then; three since 1.5.9,
+which made the co-occurrence CSV `def` on #1335's measurement and deleted the code-frequencies
+file, #1527 / #1528), and
 `export_codebook_endpoint` is left alone here for the same reason — a codebook is small and
 nobody has measured it. ⚠️ `import_project_endpoint` genuinely awaits its upload, so it
 CANNOT become `def`; its synchronous half goes through `run_in_threadpool` instead."""

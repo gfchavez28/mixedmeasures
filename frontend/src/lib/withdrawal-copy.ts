@@ -157,22 +157,32 @@ export const WITHDRAWAL_SCOPE_NOTE =
  *   import's own linking and Append share `plan_identifier_links`; a conversation
  *   import's speaker linking is `ensure_participant_for_speaker`);
  * - **adding her ID by hand asks first** (D12, `lib/withdrawn-identifier.ts`);
+ * - **a transcript naming her by her ID or a name the project knew her by** does not
+ *   make her a participant again, and the import's warnings say so (#1472 / #1391,
+ *   D73–D74: the `participant_name` kind, read only by that door); a name she was never
+ *   given in the project is not recognised, and a withdrawal made before the names were
+ *   remembered kept the ID only (D76 — no backfill: her rows are gone). No version
+ *   number is named: the next release's number is not decided;
  * - **files exported afterwards carry the record** (`project.json`'s `tombstones`, D10).
  * Copies made BEFORE are the earlier sentence's — they still hold her, and another
  * install that never saw the record imports one as it is.
  *
- * 🔴 D9 — the record keeps her identifier as a one-way code (SHA-256 over the
- * normalised ID). Short codes and names are recoverable from such a code by guessing,
- * so it is NOT anonymisation, and the sentence says so: a researcher reporting that a
- * request was honoured must know that a coded trace of the ID stays in the project and
- * travels in every file exported from it.
+ * 🔴 D9 — the record keeps her identifier, and since #1472 her names, as one-way codes
+ * (SHA-256 over the trimmed text). Short codes and names are recoverable from such a
+ * code by guessing, so it is NOT anonymisation, and the sentence says so: a researcher
+ * reporting that a request was honoured must know that a coded trace of the ID and the
+ * names stays in the project and travels in every file exported from it.
  */
 export const WITHDRAWAL_RECORD_NOTE =
   'Afterwards this project keeps a record of the withdrawal: merging or importing a copy '
   + 'of it, or linking records or speakers to participants, does not bring them back, and '
-  + 'adding a participant with their ID asks first. Project files exported afterwards carry '
-  + 'that record. It keeps their ID as a one-way code, which is not anonymisation — anyone '
-  + 'who can guess the ID can confirm it from the code.'
+  + 'adding a participant with their ID asks first. A transcript that names a speaker with '
+  + 'their ID, or with a name this project knew them by, does not make them a participant '
+  + 'again, and its import says so; a name this project never used for them is not '
+  + 'recognised. Project files exported afterwards carry that record. It keeps their ID and '
+  + 'those names as one-way codes, which is not anonymisation — anyone who can guess one can '
+  + 'confirm it from the code. A withdrawal made in an earlier version of Mixed Measures kept '
+  + 'their ID only.'
 
 /**
  * #1320 (D12) — what the confirm says BEFORE it lists anything: the backup, every

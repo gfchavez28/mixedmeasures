@@ -81,4 +81,14 @@ class CodeApplication(Base):
         # so a partial index is cheap. Non-unique (many rows share 'consensus').
         Index("ix_code_applications_consensus", "origin",
               sqlite_where=text("origin='consensus'")),
+        # "Has this coder a coding here?" (#1463, D59–D61, migration `0a5c5d4ceb29`).
+        # `services/coding_coverage.py::coded_in_project_clause` and
+        # `machine_coder.locked_coder_ids` ask it per coder, and this index makes each
+        # one seek per (code, coder) — about 1 ms where a DISTINCT over every coding
+        # took 29 s on 3.6M codings. CODE-first on purpose: a coder-first index would
+        # let SQLite (no statistics here) start any of ~50 `user_id`-filtered queries
+        # from one coder's codings across the whole install (#1021's class).
+        # `ix_code_applications_code_id` (the column's own index) is kept; see the
+        # migration's docstring.
+        Index("ix_code_applications_code_user", "code_id", "user_id"),
     )

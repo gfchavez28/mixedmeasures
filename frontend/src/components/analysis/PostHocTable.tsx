@@ -1,6 +1,8 @@
 import { useId, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { formatP, getSignificanceStars } from '@/lib/chart-data'
+import { columnSort } from '@/lib/column-sort'
+import { SortableColumnHeader } from '@/components/ui/sortable-column-header'
 
 interface PostHocComparison {
   group_a: string
@@ -83,15 +85,16 @@ export default function PostHocTable({
               <th scope="col" className="px-2 py-1 text-left font-normal text-mm-text-faint">Group A</th>
               <th scope="col" className="px-2 py-1 text-left font-normal text-mm-text-faint">Group B</th>
               <th scope="col" className="px-2 py-1 text-right font-normal text-mm-text-faint">&Delta;</th>
-              <th
-                scope="col"
-                className="px-2 py-1 text-right font-normal text-mm-text-faint cursor-pointer select-none"
-                aria-sort={sortAsc ? 'ascending' : 'descending'}
-                onClick={() => setSortAsc(v => !v)}
-                title="Click to toggle sort order"
-              >
-                p {sortAsc ? '\u25B2' : '\u25BC'}
-              </th>
+              {/* #1465 (D128/D129) \u2014 the shared header: a real button (this was an
+                  `onClick` on the `<th>`, mouse-only), named "p" with the arrow
+                  hidden, the order in `aria-sort`. Its "Click to toggle sort
+                  order" title went with the click. */}
+              <SortableColumnHeader
+                label="p"
+                sort={columnSort(true, sortAsc ? 'asc' : 'desc')}
+                onSort={() => setSortAsc(v => !v)}
+                className="px-2 py-1 text-right font-normal text-mm-text-faint select-none"
+              />
               <th scope="col" className="px-2 py-1 text-right font-normal text-mm-text-faint">95% CI</th>
             </tr>
           </thead>

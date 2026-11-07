@@ -209,9 +209,21 @@ describe('#1190 — what the withdrawal leaves behind on purpose', () => {
     expect(WITHDRAWAL_RECORD_NOTE).toBe(
       'Afterwards this project keeps a record of the withdrawal: merging or importing a copy '
       + 'of it, or linking records or speakers to participants, does not bring them back, and '
-      + 'adding a participant with their ID asks first. Project files exported afterwards carry '
-      + 'that record. It keeps their ID as a one-way code, which is not anonymisation — anyone '
-      + 'who can guess the ID can confirm it from the code.')
+      + 'adding a participant with their ID asks first. A transcript that names a speaker with '
+      + 'their ID, or with a name this project knew them by, does not make them a participant '
+      + 'again, and its import says so; a name this project never used for them is not '
+      + 'recognised. Project files exported afterwards carry that record. It keeps their ID and '
+      + 'those names as one-way codes, which is not anonymisation — anyone who can guess one can '
+      + 'confirm it from the code. A withdrawal made in an earlier version of Mixed Measures kept '
+      + 'their ID only.')
+  })
+
+  it('#1472 (D76): says the NAMES are remembered, what is not caught, and what older withdrawals kept', () => {
+    expect(WITHDRAWAL_RECORD_NOTE).toMatch(/a name this project knew them by/)
+    expect(WITHDRAWAL_RECORD_NOTE).toMatch(/a name this project never used for them is not recognised/)
+    expect(WITHDRAWAL_RECORD_NOTE).toMatch(/earlier version of Mixed Measures kept their ID only/)
+    // The next release's number is not decided, so the note names none.
+    expect(WITHDRAWAL_RECORD_NOTE).not.toMatch(/\d+\.\d+/)
   })
 
   it('D9: never calls the kept ID anonymous', () => {

@@ -1,9 +1,11 @@
 """Shared helper functions for router modules."""
 
 from fastapi import HTTPException, UploadFile
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..models.project import Project
+from ..models.user import User
 from ..models.segment import Segment
 from ..models.conversation import Conversation
 from ..models.document import Document
@@ -19,11 +21,25 @@ MAX_UPLOAD_SIZE = 50 * 1024 * 1024
 TEXT_TYPES = sorted(TEXT_CODEABLE_TYPES, key=lambda t: t.value)
 
 
-def visible_segment_filter():
+def visible_segment_filter(*, from_parent: bool = False):
     """Return filter conditions for visible (non-soft-deleted) segments.
 
     A segment is hidden when it has been merged into another OR split into parts.
+
+    ``from_parent=True`` (#1463, D62) returns the SAME rule written so SQLite cannot
+    use an index for it — one ``coalesce(merged_into_id, split_into_id) IS NULL``,
+    which is NULL exactly when both are. Pass it from a query that also scopes the
+    segment's PARENT (a project's documents or observations). SQLite has no statistics
+    here and prices ``split_into_id IS NULL`` as selective, so with the default form it
+    starts from ``ix_segments_split_into_id`` — every visible segment on the INSTALL —
+    and probes each for the parent: 1.45 s per count on 1.2M turns, encrypted, for a
+    project with no documents at all. Written this way the parent's index is the only
+    way in, and the same count takes about 1 ms (EXPLAIN QUERY PLAN, measured).
+    ⚠️ The default stays as it is: its ~59 callers' plans were not swept, and flipping
+    the seam would move every one of them.
     """
+    if from_parent:
+        return (func.coalesce(Segment.merged_into_id, Segment.split_into_id).is_(None),)
     return (Segment.merged_into_id == None, Segment.split_into_id == None)
 
 
@@ -146,6 +162,19 @@ def parse_int_list(value: str | None) -> list[int] | None:
         return None
 
 
+def parse_source_ids(raw: str | None) -> list[int] | None:
+    """A SOURCE-list query param that keeps "absent" apart from "present and empty".
+
+    ``None`` (the param was not sent) is every source of that kind; ``""`` (sent
+    empty) is NONE of that kind. `parse_int_list` folds ``""`` into ``None``, which
+    turned a selection of one kind back into every source of the others — a
+    text-only selection counted every conversation (#1297), one interview selected
+    counted every document and clip in the co-occurrence (#1527 D84). The client
+    side of the rule is `lib/qual-comparison.ts::comparisonSourceParams`.
+    """
+    return None if raw is None else (parse_int_list(raw) or [])
+
+
 def _parse_ids(raw: str | None) -> list[int]:
     """Parse comma-separated IDs from query param."""
     if not raw:
@@ -156,27 +185,54 @@ def _parse_ids(raw: str | None) -> list[int]:
 import re
 import unicodedata
 
-def sanitize_csv_filename(name: str) -> str:
+def sanitize_csv_filename(name: str, fallback: str = "project") -> str:
     """Sanitize a user-supplied string for use in a Content-Disposition filename.
 
     Must return ASCII: header values are encoded latin-1 at the ASGI layer, so
     any non-latin-1 character (CJK, Cyrillic, Greek...) raises UnicodeEncodeError
     at response time and 500s the export. Accented Latin folds to its base letter
     (NFKD); anything else non-ASCII is dropped before the word-character filter.
+    A name with nothing left becomes ``fallback``.
     """
     folded = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
     safe = re.sub(r'[^\w\-.]', '_', folded, flags=re.ASCII)[:80]
-    return safe if safe.strip('_.') else "project"
+    return safe if safe.strip('_.') else fallback
 
 
-def sanitize_content_disposition(name: str) -> str:
+def sanitize_content_disposition(name: str, fallback: str = "project") -> str:
     """Sanitize a string for safe use in Content-Disposition headers.
 
     Strips control characters (\\r, \\n, \\0) that could enable header injection,
     then applies the standard filename sanitization.
     """
     cleaned = name.replace('\r', '').replace('\n', '').replace('\0', '')
-    return sanitize_csv_filename(cleaned)
+    return sanitize_csv_filename(cleaned, fallback)
+
+
+def coder_scope_names(db: Session, coder_ids: list[int]) -> list[str]:
+    """The coders a scoped file holds, by name, in the order asked. A coder
+    with no row (a stale id) reads as its number rather than vanishing."""
+    names = dict(db.query(User.id, User.username).filter(User.id.in_(coder_ids)).all())
+    return [names.get(cid) or str(cid) for cid in coder_ids]
+
+
+def coder_scope_filename_suffix(db: Session, coder_ids: list[int] | None) -> str:
+    """#1530 D97 (1.5.9) — a server file asked for some coders' coding only ends
+    ``_coder-<name>`` (before its extension), so the file says whose coding it
+    holds wherever it travels; ``""`` when no scope was asked (every coder — the
+    file's name exactly as before).
+
+    Each name goes through `sanitize_content_disposition` (ASCII, #792); one with
+    nothing left after it (a wholly non-Latin name) is the coder's id instead,
+    never the sanitiser's ``project`` fallback, which would name the wrong thing.
+    """
+    if not coder_ids:
+        return ""
+    parts = [
+        sanitize_content_disposition(name, fallback=str(cid))
+        for cid, name in zip(coder_ids, coder_scope_names(db, coder_ids))
+    ]
+    return "_coder-" + "-".join(parts)
 
 
 def _fmt_p(p: float | None) -> str:

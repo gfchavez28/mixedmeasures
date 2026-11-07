@@ -165,48 +165,11 @@ def test_excel_cooccurrence_builder_matches_csv_default(multicoder_project, db_s
     assert excel_matrix == csv_default_matrix
 
 
-def test_code_frequencies_csv_honors_coder_scope(multicoder_project, db_session):
-    """#499: the CSV export must accept and honor the screen's coder/layer
-    scope — pre-fix the endpoint had no such params, so a coder-filtered
-    screen exported silently-unfiltered numbers. A scoped file also carries a
-    'Scope:' claim line."""
-    import io as _io
-    import csv as _csv
-    from app.routers.export import export_code_frequencies_csv
-    from app.services.code_analysis import get_code_frequencies
-
-    def rows(coder_ids=None):
-        text = _stream_to_text(_run(export_code_frequencies_csv(
-            project_id=730, code_ids=None, exclude_facilitator=True,
-            conversation_ids=None, participant_ids=None,
-            source="conversations", document_ids=None,
-            coder_ids=coder_ids, layer_scope=None,
-            user=multicoder_project, db=db_session,
-        )))
-        return list(_csv.reader(_io.StringIO(text)))
-
-    all_rows = rows()
-    ben_rows = rows(coder_ids="2")
-    assert all_rows[0][0] == "Code", "unscoped export must not carry a Scope line"
-    assert ben_rows[0][0].startswith("Scope:") and "Ben" in ben_rows[0][0]
-
-    def seg_count(parsed, code_name):
-        header_idx = 1 if parsed[0][0].startswith("Scope:") else 0
-        header = parsed[header_idx]
-        for r in parsed[header_idx + 1:]:
-            if r[header.index("Code")] == code_name:
-                return int(r[header.index("Segments")])
-        return None
-
-    screen = get_code_frequencies(db_session, 730, coder_ids=[2])
-    screen_count = next(
-        f["segment_count"] for f in screen["frequencies"]
-        if f["code_name"] == "theme A"
-    )
-    assert seg_count(ben_rows, "theme A") == screen_count
-    assert seg_count(all_rows, "theme A") != seg_count(ben_rows, "theme A"), (
-        "fixture should make the scoped and unscoped counts differ"
-    )
+# #499's code-frequencies half lived here until #1528 (1.5.9, D87) deleted the server file: the
+# Frequencies CSV is written in the browser from the summary table's read, which carries the
+# EFFECTIVE coder scope, and says it on a `Scope:` line — pinned in
+# `frontend/src/components/qualitative-analysis/qual-summary-columns.test.tsx` and
+# `frontend/src/pages/QualitativeAnalysisView.frequencies-wiring-1528.test.ts`.
 
 
 def test_cooccurrence_csv_honors_coder_scope(multicoder_project, db_session):
@@ -219,26 +182,30 @@ def test_cooccurrence_csv_honors_coder_scope(multicoder_project, db_session):
     from app.services.code_analysis import get_code_cooccurrence
 
     def parsed(coder_ids=None):
-        text = _stream_to_text(_run(export_code_cooccurrence_csv(
+        # `def` since #1527 D89 — called directly, not through `_run`.
+        text = _stream_to_text(export_code_cooccurrence_csv(
             project_id=730, code_ids=None, exclude_facilitator=True,
             conversation_ids=None, participant_ids=None,
             source="conversations", document_ids=None,
             coder_ids=coder_ids, layer_scope=None,
             user=multicoder_project, db=db_session,
-        )))
+        ))
         return list(csv_module.reader(io.StringIO(text)))
 
     def diagonal(rows, code_name):
-        start = 1 if rows[0][0].startswith("Scope:") else 0
+        start = 1  # #1335 (D47): the first line always says the rule (and the scope, when scoped)
         header = rows[start]
         col = header.index(code_name)
         row = next(r for r in rows[start + 1:] if r[0] == code_name)
         return int(row[col])
 
+    from app.services.code_analysis import COOCCURRENCE_RULE
+
     all_rows = parsed()
     ben_rows = parsed(coder_ids="2")
-    assert not all_rows[0][0].startswith("Scope:")
+    assert all_rows[0] == [COOCCURRENCE_RULE], "an unscoped file says the rule and claims no scope"
     assert ben_rows[0][0].startswith("Scope:") and "Ben" in ben_rows[0][0]
+    assert ben_rows[0][0].endswith(COOCCURRENCE_RULE)
 
     # Fixture: theme A on participant segs 7300 (both coders) + 7301 (Ada only)
     # → all-coder diagonal 2, Ben-only diagonal 1.
@@ -250,6 +217,80 @@ def test_cooccurrence_csv_honors_coder_scope(multicoder_project, db_session):
         screen = get_code_cooccurrence(db_session, 730, coder_ids=coder_ids)
         i = next(idx for idx, c in enumerate(screen["codes"]) if c["name"] == "theme A")
         assert diagonal(rows, "theme A") == screen["matrix"][i][i]
+
+
+def test_every_cooccurrence_reader_counts_a_pair_by_one_coder_and_says_so(
+    multicoder_project, db_session,
+):
+    """#1335 (D46–D48, 1.5.9): the screen endpoint, the CSV and the Excel sheet give
+    the SAME matrix under the one-coder rule, and the two files SAY the rule (the
+    client's two readers, the caption and the Canvas export note, are pinned in
+    `QualCooccurrence.test.tsx` and `canvas-export.test.ts`).
+
+    The fixture adds the case where the old union and the rule DISAGREE: seg 7303,
+    where Ada applied theme A and Ben theme B. theme A × theme B is then 1 (seg
+    7301, where Ada applied both) — the union read 2.
+    """
+    from openpyxl import load_workbook
+    from app.routers.code_analysis import code_cooccurrence
+    from app.routers.export import export_code_cooccurrence_csv
+    from app.routers.export_excel import export_study_excel
+    from app.services.code_analysis import COOCCURRENCE_RULE
+    from tests.test_export_formula_injection import _stream_to_bytes
+
+    db = db_session
+    db.add(Segment(id=7303, conversation_id=730, sequence_order=3,
+                   text="Participant three.", speaker_id=7301))
+    db.flush()
+    db.add_all([
+        CodeApplication(segment_id=7303, code_id=7300, user_id=1, origin="human"),
+        CodeApplication(segment_id=7303, code_id=7301, user_id=2, origin="human"),
+    ])
+    db.flush()
+
+    # The union, recomputed from the participant segments' rows: the fixture must
+    # be one on which the old rule and the new disagree (#707a).
+    by_seg: dict[int, set[int]] = {}
+    for seg, code in (db.query(CodeApplication.segment_id, CodeApplication.code_id)
+                      .filter(CodeApplication.segment_id.in_([7300, 7301, 7303]),
+                              CodeApplication.origin == "human").all()):
+        by_seg.setdefault(seg, set()).add(code)
+    assert sum(1 for codes in by_seg.values() if {7300, 7301} <= codes) == 2
+
+    # Both endpoints are `def` since #1527 D89 — called directly, not through `_run`.
+    screen = code_cooccurrence(
+        project_id=730, code_ids=None, exclude_facilitator=True, conversation_ids=None,
+        participant_ids=None, text_column_ids=None, document_ids=None, coder_ids=None,
+        layer_scope=None, source="conversations", level="segment", observation_ids=None,
+        user=multicoder_project, db=db,
+    )
+    names = [c["name"] for c in screen["codes"]]
+    a, b = names.index("theme A"), names.index("theme B")
+    assert screen["matrix"][a][b] == 1, "Ada's A beside Ben's B on seg 7303 is not a pair"
+
+    csv_rows = list(csv_module.reader(io.StringIO(_stream_to_text(export_code_cooccurrence_csv(
+        project_id=730, code_ids=None, exclude_facilitator=True, conversation_ids=None,
+        participant_ids=None, source="conversations", document_ids=None, coder_ids=None,
+        layer_scope=None, user=multicoder_project, db=db,
+    )))))
+    assert csv_rows[0] == [COOCCURRENCE_RULE]
+    csv_header = csv_rows[1]
+    csv_a = next(r for r in csv_rows[2:] if r[0] == "theme A")
+    assert int(csv_a[csv_header.index("theme B")]) == screen["matrix"][a][b]
+
+    ws = load_workbook(io.BytesIO(_stream_to_bytes(
+        export_study_excel(project_id=730, user=multicoder_project, db=db)
+    )))["Code Co-occurrence"]
+    assert ws.cell(row=1, column=1).value == f"Participant segments only. {COOCCURRENCE_RULE}"
+    header = [c.value for c in ws[1]]
+    row_a = next(r for r in ws.iter_rows(min_row=2, values_only=True) if r[0] == "2 - theme A")
+    assert row_a[header.index("3 - theme B")] == screen["matrix"][a][b]
+    # And the whole sheet equals the screen, cell for cell (an empty cell is 0).
+    by_label = {f"{n} - {name}": i for i, (n, name) in enumerate([(2, "theme A"), (3, "theme B")])}
+    for r in ws.iter_rows(min_row=2, values_only=True):
+        for label, j in by_label.items():
+            cell = r[header.index(label)]
+            assert (cell or 0) == screen["matrix"][names.index(r[0].split(" - ", 1)[1])][j]
 
 
 # ── #732 — the group-comparison CSV vs the two screens that show the same test ──
@@ -378,13 +419,18 @@ def test_column_labels_follow_the_test_that_actually_ran(mtcars_session):
     while the requested test says t, and only the effective test type is right.
     """
     db = mtcars_session
+    # #1543 (1.6.0): the degrees of freedom beside the statistic (none for U), and a
+    # last `Note` column — who the row's test left out, or why it did not run.
     cases = [
-        (dict(), ["F", "p", "eta_sq", "omega_sq", "Sig"]),
-        (dict(nonparametric=True), ["H", "p", "epsilon_sq", "Sig"]),
-        (dict(grouping_column_id=AM_ID), ["Delta", "p", "d", "d_CI_lower", "d_CI_upper", "Sig"]),
-        (dict(grouping_column_id=AM_ID, nonparametric=True), ["U", "p", "r", "Sig"]),
+        (dict(), ["F", "df1", "df2", "p", "eta_sq", "omega_sq", "Sig", "Note"]),
+        (dict(nonparametric=True), ["H", "df", "p", "epsilon_sq", "Sig", "Note"]),
+        (dict(grouping_column_id=AM_ID),
+         ["Delta", "df", "p", "d", "d_CI_lower", "d_CI_upper", "Sig", "Note"]),
+        # #1326 STAT-12 (D58): Mann–Whitney's p states its method, beside the p.
+        (dict(grouping_column_id=AM_ID, nonparametric=True),
+         ["U", "p", "p method", "r", "Sig", "Note"]),
         # 3 groups, t-test requested → the first two groups get a Welch t-test
-        (dict(test_type="t_test"), ["t", "p", "d", "d_CI_lower", "d_CI_upper", "Sig"]),
+        (dict(test_type="t_test"), ["t", "df", "p", "d", "d_CI_lower", "d_CI_upper", "Sig", "Note"]),
     ]
     for overrides, expected_tail in cases:
         header = _comparison_csv(db, **overrides)[0]

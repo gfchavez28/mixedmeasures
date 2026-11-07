@@ -22,7 +22,7 @@ findings with live excerpts and results on the Canvas.
 
 ## Get the files
 
-The sample data set is distributed with each release (it's data, not code, so it
+The sample data set is attached to the v1.0.0 release (it's data, not code, so it
 lives with the installers rather than in the source tree):
 
 - **`ferncrest-example.mmproject`** — the finished project. Open it directly in
@@ -31,7 +31,7 @@ lives with the installers rather than in the source tree):
   principal interviews, four teacher focus groups, two program documents) if you'd
   rather build the project yourself by following the walkthrough.
 
-Download both from the [latest release](https://github.com/gfchavez28/mixedmeasures/releases/latest).
+Download both from the [v1.0.0 release](https://github.com/gfchavez28/mixedmeasures/releases/tag/v1.0.0).
 
 ## Walk through it
 

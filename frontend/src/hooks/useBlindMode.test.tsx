@@ -207,6 +207,46 @@ describe('useBlindMode', () => {
     act(() => result.current.toggleReveal('workbench'))
     expect(codeAnalysisApi.revealBlindMode).toHaveBeenCalledTimes(1)
   })
+
+  /**
+   * #1530/#1531 (1.5.9) — ONE state per (project, coder), however many surfaces hold it. Driven:
+   * a reveal in the Export dialog (a persistent layout overlay with its own instance) left the
+   * analysis page behind it reading "Colleagues hidden" and keeping its blind scope.
+   */
+  describe('every mounted instance hears a toggle', () => {
+    it('a reveal through one instance un-blinds the other; re-hiding re-blinds it', () => {
+      setRoster(true, 1)
+      const page = renderHook(() => useBlindMode(99))
+      const dialog = renderHook(() => useBlindMode(99))
+      act(() => dialog.result.current.toggleReveal('export'))
+      expect(page.result.current.blind).toBe(false)
+      expect(page.result.current.withholding).toBe(false)
+      act(() => page.result.current.toggleReveal())
+      expect(dialog.result.current.blind).toBe(true)
+      expect(codeAnalysisApi.revealBlindMode).toHaveBeenCalledTimes(1)   // one act, one log
+    })
+
+    it('another project, or another coder, is not touched', () => {
+      setRoster(true, 1)
+      const other = renderHook(() => useBlindMode(100))
+      const here = renderHook(() => useBlindMode(99))
+      act(() => here.result.current.toggleReveal('export'))
+      expect(here.result.current.blind).toBe(false)
+      expect(other.result.current.blind).toBe(true)
+    })
+
+    it('holds when storage is unavailable — the event carries the value', () => {
+      setRoster(true, 1)
+      Object.defineProperty(window, 'localStorage', {
+        configurable: true,
+        value: { getItem: () => { throw new Error('denied') }, setItem: () => { throw new Error('denied') }, removeItem: () => {} },
+      })
+      const page = renderHook(() => useBlindMode(99))
+      const dialog = renderHook(() => useBlindMode(99))
+      act(() => dialog.result.current.toggleReveal('export'))
+      expect(page.result.current.blind).toBe(false)
+    })
+  })
 })
 
 describe('readRevealed (fresh-read primitive for the TopRail switcher, #3)', () => {

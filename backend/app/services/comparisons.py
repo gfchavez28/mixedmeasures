@@ -24,6 +24,11 @@ from .statistical_tests import (
 )
 from .assumption_checks import normality_check, variance_homogeneity_check
 from .qq_plot import qq_summary
+from .testable_groups import (
+    MIN_VALUES_PER_GROUP_PARAMETRIC,
+    MIN_VALUES_PER_GROUP_RANK,
+    split_testable,
+)
 from .undefined_stats import (
     DEGENERATE,
     DOMAIN_SCORES_MISSING,
@@ -50,6 +55,78 @@ logger = logging.getLogger(__name__)
 _Z_CRIT_975 = _Z_975
 
 RANK_BISERIAL_THRESHOLDS = {"small": 0.1, "medium": 0.3, "large": 0.5}
+
+
+# ── How a Mann–Whitney p was computed (#1326 STAT-12, 1.5.9, D58) ─────────────
+#
+# 🔴 **The app takes R's rule, so the script's default `wilcox.test` IS the rule.**
+# An EXACT p when neither group holds `MANN_WHITNEY_EXACT_MAX_N` or more values
+# and no value is tied (anywhere in the combined sample); otherwise the
+# tie-corrected normal approximation with a continuity correction, as before.
+# scipy's own `method='auto'` goes exact only at 8 or fewer, so on tie-free
+# 10 v 10 data the app printed .0376 where R and every R-based package (jamovi,
+# JASP) print the exact .0355 — and the normal approximation overstates a
+# tie-free p by 13–27% near .01 at these sizes. ⚠️ **scipy's `method='exact'`
+# IGNORES ties silently** (on tied data it returns a p for an untied sample), so
+# the tie check is the app's own, never scipy's. Measured, scipy 1.18.0.
+#
+# The method is chosen BY THE DATA, so it rides the result as `p_method` — the
+# FIFTEENTH stated-basis member (`statistics.md` §2), mirrored in
+# `frontend/src/lib/p-method.ts`; `test_mann_whitney_p_method.py` holds the two
+# equal. Another test that gains a data-chosen p method takes these values.
+MANN_WHITNEY_EXACT_MAX_N = 50
+P_METHOD_EXACT = "exact"
+P_METHOD_NORMAL_APPROXIMATION = "normal_approximation"
+
+#: What the CSV prints in its `p method` column — words, never the wire key
+#: (the #1323 `CORRECTION_CSV_LABEL` precedent: a file is read by people).
+P_METHOD_CSV_LABEL = {
+    P_METHOD_EXACT: "exact",
+    P_METHOD_NORMAL_APPROXIMATION: "normal approximation, continuity-corrected",
+}
+
+#: #1543 (1.6.0): what the group-comparison CSV's `Note` column says about a row
+#: whose test was not run — the screen's sentence for the same reason, held equal to
+#: `frontend/src/lib/stat-format.ts::REASON_TEXT` by
+#: `test_comparison_csv_notes_1543.py` (hand-mirrored; no codegen). Only the reasons
+#: `_run_test` and the not-numeric arm can give a row.
+TEST_OMITTED_CSV_TEXT = {
+    EMPTY_GROUP: "No values in this group, after missing data was excluded.",
+    INSUFFICIENT_N: "Too few values to compute this, after missing data was excluded.",
+    DEGENERATE: "Too few distinct categories to compute this.",
+    NO_VARIANCE: "Every value here is identical, so this cannot be computed.",
+    NOT_NUMERIC: "This variable holds categories, not numbers, so it cannot be compared "
+                 "across groups.",
+}
+
+
+def untested_groups_note(groups: list[str] | None) -> str | None:
+    """The screen's sentence for a row's left-out groups (#1329's `untested_groups`) —
+    `frontend/src/lib/untested-groups.ts::untestedGroupsNote`, mirrored for the CSV
+    (#1543) and held equal to it by `test_comparison_csv_notes_1543.py`."""
+    if not groups:
+        return None
+    one = len(groups) == 1
+    names = groups[0] if one else f"{', '.join(groups[:-1])} and {groups[-1]}"
+    return (
+        f"{names} {'has' if one else 'have'} only one value{'' if one else ' each'}, "
+        f"so {'it is' if one else 'they are'} shown without an SD and left out of the tests."
+    )
+
+
+def mann_whitney_p_method(v1: list[float], v2: list[float]) -> str:
+    """R's `wilcox.test` choice for two independent samples (D58).
+
+    R: `exact <- (n.x < 50) && (n.y < 50)`, then the exact distribution only
+    when the combined sample has no ties. A tie is two EQUAL values, which is
+    what equal ranks are.
+    """
+    n1, n2 = len(v1), len(v2)
+    if n1 >= MANN_WHITNEY_EXACT_MAX_N or n2 >= MANN_WHITNEY_EXACT_MAX_N:
+        return P_METHOD_NORMAL_APPROXIMATION
+    if len(set(v1) | set(v2)) < n1 + n2:
+        return P_METHOD_NORMAL_APPROXIMATION
+    return P_METHOD_EXACT
 
 
 # ── Box-plot five-number summary (#522b) ───────────────────────────────────────
@@ -162,12 +239,15 @@ def _cohens_d_ci(d: float, n1: int, n2: int) -> tuple[float, float]:
     return (round(d - _Z_CRIT_975 * se, 4), round(d + _Z_CRIT_975 * se, 4))
 
 
-def _mean_ci(values: list[float]) -> tuple[float, float]:
-    """Compute 95% CI for the mean using t-distribution."""
+def _mean_ci(values: list[float]) -> tuple[float | None, float | None]:
+    """Compute 95% CI for the mean using t-distribution.
+
+    #1329 (D51): below two values there is no interval — `(None, None)`, never
+    the zero-width `(m, m)` this returned, which read as a mean known exactly.
+    """
     n = len(values)
     if n < 2:
-        m = values[0] if values else 0.0
-        return (m, m)
+        return (None, None)
     m = statistics.mean(values)
     se = statistics.stdev(values) / math.sqrt(n)
     t_crit = _t_critical(n - 1)
@@ -376,7 +456,9 @@ def compute_group_comparison(
                 })
                 continue
             m = statistics.mean(gvals)
-            sd = statistics.stdev(gvals) if n >= 2 else 0.0
+            # #1329 (D51): one value has no SD and no interval. The old `0.0`
+            # read as a group whose every member answered alike.
+            sd = round(statistics.stdev(gvals), 4) if n >= 2 else None
             mdn = statistics.median(gvals)
             if nonparametric:
                 ci_lower, ci_upper = None, None
@@ -384,9 +466,11 @@ def compute_group_comparison(
                 ci_lower, ci_upper = _mean_ci(gvals)
             group_stats.append({
                 "group": g, "n": n,
-                "mean": round(m, 4), "sd": round(sd, 4),
+                "mean": round(m, 4), "sd": sd,
                 "median": round(mdn, 4),
                 "ci_lower": ci_lower, "ci_upper": ci_upper,
+                # Why `sd` (and the interval) are absent, when they are.
+                "undefined_reason": INSUFFICIENT_N if sd is None else None,
                 # #522b — the box plot's five-number summary. Computed here
                 # because the client never receives the raw values: it gets this
                 # summary, so quartiles cannot be derived downstream.
@@ -410,6 +494,14 @@ def compute_group_comparison(
         if test_result is None and var_id in non_numeric_ids:
             test_omitted_reason = NOT_NUMERIC
 
+        # #1329 (D51): the groups this row SHOWS and its tests leave out — the
+        # same function `_run_test` asks, with the same inputs, so the sentence
+        # and the test cannot disagree about who was tested.
+        _, untested_groups = split_testable(
+            grouped, unique_groups,
+            MIN_VALUES_PER_GROUP_RANK if nonparametric else MIN_VALUES_PER_GROUP_PARAMETRIC,
+        )
+
         rows.append({
             "label": label,
             "full_label": full_label,
@@ -418,6 +510,9 @@ def compute_group_comparison(
             "group_stats": group_stats,
             "test": test_result,
             "test_omitted_reason": test_omitted_reason,
+            # #1329 (D51): shown in the table, left out of every test of this
+            # row (too few values for it) — named, never silently absorbed.
+            "untested_groups": untested_groups,
             # #525 — equal variances is a property of the COMPARISON, not of any
             # one group, so it rides the row rather than the group stats.
             "variance_homogeneity": variance_homogeneity_check(
@@ -536,22 +631,26 @@ def _run_test(
     is no case where a test is half-defined. One reason per omitted test covers
     every case, and the row-level field is what the screen and the CSV read.
     """
-    # Non-parametric tests only need ≥1 per group; parametric need ≥2
-    min_per_group = 1 if nonparametric else 2
+    # Rank tests need ≥1 value per group, the variance-based ones ≥2. #1329
+    # (D51): every runner below receives ONLY the groups that clear that bar —
+    # the F, Tukey and the Welch t alike — so a one-value group cannot be in one
+    # of them and out of another (the F dropped it while its own Tukey kept it).
+    min_per_group = MIN_VALUES_PER_GROUP_RANK if nonparametric else MIN_VALUES_PER_GROUP_PARAMETRIC
     arrays = [grouped[g] for g in group_names]
     if len([a for a in arrays if a]) < 2:
         return None, EMPTY_GROUP
-    if len([a for a in arrays if len(a) >= min_per_group]) < 2:
+    testable, _untested = split_testable(grouped, group_names, min_per_group)
+    if len(testable) < 2:
         return None, INSUFFICIENT_N
 
     if test_type == "independent_t_test":
-        result = _run_t_test(grouped, group_names, include_ci)
+        result = _run_t_test(grouped, testable, include_ci)
     elif test_type == "one_way_anova":
-        result = _run_anova(grouped, group_names, include_ci)
+        result = _run_anova(grouped, testable, include_ci)
     elif test_type == "mann_whitney_u":
-        result = _run_mann_whitney(grouped, group_names)
+        result = _run_mann_whitney(grouped, testable)
     elif test_type == "kruskal_wallis":
-        result = _run_kruskal_wallis(grouped, group_names)
+        result = _run_kruskal_wallis(grouped, testable)
     else:
         return None, DEGENERATE
 
@@ -566,8 +665,8 @@ def _run_test(
     #   Kruskal H all values identical             ->  nan  (the NON-parametric
     #             path, i.e. the robust alternative a researcher switches to
     #             after the first failure, fails the same way)
-    #   Mann-Whitney U is safe by construction (U is a rank count; its effect
-    #             size divides by n1*n2, both ≥ 1) — deliberately not special-cased.
+    #   Mann-Whitney p all values identical        ->  nan under scipy 1.18 (it
+    #             was 1.0 under 1.17 — NOT safe by construction; `statistics.md` §1)
     # A non-finite number here is not a bad value, it is a 500: starlette's
     # JSONResponse renders with allow_nan=False and raises at RESPONSE time.
     for key in ("statistic", "p", "df", "df2", "effect_size"):
@@ -647,10 +746,16 @@ def _run_anova(
     group_names: list[str],
     include_ci: bool,
 ) -> dict | None:
-    """Run one-way ANOVA for 3+ group comparison."""
+    """Run one-way ANOVA (with Tukey's post hoc) over ``group_names``.
+
+    #1329 (D51): ``group_names`` are the TESTABLE groups — `_run_test` passes
+    only what `split_testable` returns — and the F and Tukey both read exactly
+    them. The F used to filter one-value groups here while `_run_post_hoc` was
+    handed every group, so one row carried two models.
+    """
     from scipy.stats import f_oneway
 
-    arrays = [grouped[g] for g in group_names if len(grouped[g]) >= 2]
+    arrays = [grouped[g] for g in group_names]
     if len(arrays) < 2:
         return None
 
@@ -784,7 +889,15 @@ def _run_mann_whitney(
     if len(v1) < 1 or len(v2) < 1:
         return None
 
-    u_stat, p_value = mannwhitneyu(v1, v2, alternative='two-sided')
+    # #1326 STAT-12 (D58): R's rule, decided by the app — never scipy's `auto`
+    # (exact only at ≤ 8) and never scipy's `exact` on tied data (it ignores
+    # the ties). `asymptotic` keeps scipy's tie correction and continuity
+    # correction, which is what R's `wilcox.test` applies off the exact arm.
+    p_method = mann_whitney_p_method(v1, v2)
+    u_stat, p_value = mannwhitneyu(
+        v1, v2, alternative='two-sided',
+        method='exact' if p_method == P_METHOD_EXACT else 'asymptotic',
+    )
 
     n1, n2 = len(v1), len(v2)
     # Rank-biserial correlation as effect size
@@ -795,6 +908,8 @@ def _run_mann_whitney(
         "statistic": round(float(u_stat), 4),
         "df": float(n1 + n2 - 2),
         "p": round(float(p_value), 6),
+        # D58 — chosen by the data, so stated (the fifteenth stated-basis member).
+        "p_method": p_method,
         "effect_size": round(r, 4),
         "effect_size_type": "rank_biserial_r",
         "effect_size_label": _classify_effect_rank_biserial(r),

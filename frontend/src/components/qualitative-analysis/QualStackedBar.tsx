@@ -16,7 +16,8 @@ import type { SourceFrequenciesResponse } from '@/lib/api'
 import type { QualOrientation, QualSortOrder, QualValueMode, QualDenominatorMode } from '@/lib/qual-analysis-types'
 import type { DataLabelPosition } from '@/lib/chart-data'
 import type { ChartDataRow } from '@/lib/chart-types'
-import { shapeQualStackedBarData } from './qual-chart-data'
+import { shapeQualStackedBarData, codedShareAxis } from './qual-chart-data'
+import { UniversalChartNote } from './UniversalChartNote'
 import { ChartFigure } from '@/components/charts/ChartFigure'
 import { barClickRow } from '@/components/charts/bar-row-label'
 
@@ -82,6 +83,12 @@ export default function QualStackedBar({
 
   const { rows, segmentLabels, colors } = stackedData
 
+  // #1529 D92 — the universal rows a *Coded only* proportion leaves off, named under the chart.
+  const leftOut = useMemo(
+    () => codedShareAxis(data.codes, valueMode, denominatorMode).leftOut,
+    [data.codes, valueMode, denominatorMode],
+  )
+
   const chartData = useMemo(() => {
     return rows.map(row => {
       const entry: ChartDataRow = {
@@ -105,7 +112,12 @@ export default function QualStackedBar({
   }, [chartData])
 
   if (chartData.length === 0 || segmentLabels.length === 0) {
-    return <div className="text-center py-16 text-mm-text-muted">No data available.</div>
+    return (
+      <div className="text-center py-16 text-mm-text-muted">
+        No data available.
+        <UniversalChartNote leftOut={leftOut} />
+      </div>
+    )
   }
 
   const rowHeight = 32
@@ -194,6 +206,7 @@ export default function QualStackedBar({
           ))}
         </BarChart>
       </ResponsiveContainer>
+      <UniversalChartNote leftOut={leftOut} />
     </ChartFigure>
   )
 }

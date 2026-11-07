@@ -13,6 +13,7 @@ import { formatTimestamp, cn, getCodeColor, getContrastColor, hexToRowBg, hexToR
 import { useTheme } from '@/lib/theme-context'
 import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import { isCodeAppliedByActiveCoder } from '@/lib/coding-progress'
+import { invalidateAfterRating, invalidateDerivedCounts } from '@/lib/coding-cache'
 import type { CoderLens } from '@/lib/coder-color'
 import type { FloatingCoords } from '@/lib/floating-utils'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
@@ -29,6 +30,7 @@ import {
 import {
   Tooltip,
   TooltipContent,
+  TooltipPortal,
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
@@ -50,6 +52,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { sliceByCodePoints, codePointLength } from '@/lib/text-offsets'
+import { quoteRuns, quoteRunClass, quoteLabel, compareQuotesInPassageOrder } from '@/lib/quote-runs'
 
 // Speaker background colors using mm-* tokens (dark mode aware)
 const SPEAKER_BG_TOKENS = [
@@ -308,6 +311,14 @@ function SegmentRow({
       segmentsApi.updateSpeakerRole(conversationId, segment.id, isFacilitator),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['segments', conversationId] })
+      // #1333 — a speaker's role decides which turns are reliability units (and
+      // which frequencies count them), so the figures move with it — and which
+      // ratings reach a participant's score, so the rating figures and the
+      // participant table's "out of date" marker move too (the server marks it).
+      if (projectId) {
+        invalidateDerivedCounts(queryClient, projectId)
+        invalidateAfterRating(queryClient, projectId)
+      }
     },
   })
 
@@ -320,59 +331,82 @@ function SegmentRow({
     },
   })
 
-  // Render text with sub-segment excerpt highlights
+  // Render text with sub-segment excerpt highlights.
+  //
+  // #1324: quotes may OVERLAP and NEST, so the passage is drawn as RUNS from a
+  // boundary sweep (`lib/quote-runs.ts`) — every character exactly once, each run
+  // tinted by how many quotes cover it. One element per quote drew shared words twice,
+  // and `charOffsetInElement` reads this element's rendered text.
+  //
+  // 🔴 Nothing but the passage's own characters may sit inside the
+  // `[data-segment-id]` element. The note tooltip is therefore PORTALLED: the shared
+  // `TooltipContent` renders in place, so an open tooltip put its note preview —
+  // twice, with Radix's visually-hidden copy — into this element's text, and a
+  // selection made while it was open (or fading out) resolved to other words.
   const renderTextWithExcerpts = (text: string, excerpts: SegmentExcerptInfo[]) => {
-    const subExcerpts = excerpts
-      .filter(e => e.start_offset !== null && e.end_offset !== null)
-      .sort((a, b) => a.start_offset! - b.start_offset!)
+    const runs = quoteRuns(text, excerpts)
+    if (!runs.some(r => r.quoteIds.length > 0)) return text
 
-    if (subExcerpts.length === 0) return text
-
-    const parts: React.ReactNode[] = []
-    let lastEnd = 0
-
-    for (const exc of subExcerpts) {
-      const start = exc.start_offset!
-      const end = Math.min(exc.end_offset!, codePointLength(text))
-      if (start > lastEnd) {
-        parts.push(sliceByCodePoints(text, lastEnd, start))
-      }
-      const markEl = (
-        <mark
-          key={exc.id}
-          className="bg-amber-100 dark:bg-amber-900/30 text-inherit border-b-2 border-amber-400 dark:border-amber-600 rounded-sm px-px cursor-default"
-        >
-          {sliceByCodePoints(text, start, end)}
-        </mark>
-      )
-      if (exc.has_note && exc.note_preview) {
-        parts.push(
-          <Tooltip key={exc.id}>
-            <TooltipTrigger asChild>{markEl}</TooltipTrigger>
-            <TooltipContent side="top" className="max-w-xs">
-              <p className="text-xs flex items-start gap-1.5">
-                <Paperclip className="w-3 h-3 mt-0.5 flex-shrink-0 text-amber-500" />
-                <span>{exc.note_preview}</span>
-              </p>
-            </TooltipContent>
-          </Tooltip>
-        )
-      } else {
-        parts.push(markEl)
-      }
-      lastEnd = end
-    }
-
-    // `lastEnd` is a CODE-POINT offset, so it must be compared against the code-point
-    // length — `text.length` is UTF-16 units and is larger on astral text (#687). The
-    // slice below already clamps, so the mismatch only ever pushed an empty node; it
-    // is corrected because a mixed-basis comparison is the exact reflex this module
-    // exists to remove, and the next reader would copy it.
-    if (lastEnd < codePointLength(text)) {
-      parts.push(sliceByCodePoints(text, lastEnd, codePointLength(text)))
-    }
-
-    return <>{parts}</>
+    const byId = new Map(excerpts.map(e => [e.id, e]))
+    return (
+      <>
+        {runs.map((run, i) => {
+          const words = sliceByCodePoints(text, run.start, run.end)
+          if (run.quoteIds.length === 0) {
+            return <React.Fragment key={`t${run.start}`}>{words}</React.Fragment>
+          }
+          // Round and pad only a highlight's OUTER edges, so a single quote looks as
+          // it always did and a nested one shows no seam between its runs.
+          const opensHighlight = i === 0 || runs[i - 1].quoteIds.length === 0
+          const closesHighlight = i === runs.length - 1 || runs[i + 1].quoteIds.length === 0
+          const markEl = (
+            <mark
+              key={`q${run.start}`}
+              data-quote-ids={run.quoteIds.join(' ')}
+              className={cn(
+                quoteRunClass(run.quoteIds.length),
+                opensHighlight && 'rounded-l-sm pl-px',
+                closesHighlight && 'rounded-r-sm pr-px',
+              )}
+            >
+              {words}
+            </mark>
+          )
+          const covering = run.quoteIds
+            .map(id => byId.get(id))
+            .filter((e): e is SegmentExcerptInfo => e !== undefined)
+          const noted = covering.filter(e => e.has_note && e.note_preview)
+          // One quote: the tooltip it always had, its note if it has one. Two or more: every
+          // covering quote BY ITS WORDS — crossing and nested pairs draw the same
+          // tints, so the words are what tell the researcher which quotes these are.
+          if (covering.length < 2 && noted.length === 0) return markEl
+          return (
+            <Tooltip key={`q${run.start}`}>
+              <TooltipTrigger asChild>{markEl}</TooltipTrigger>
+              <TooltipPortal>
+                <TooltipContent side="top" className="max-w-xs space-y-1">
+                  {covering.length > 1 && (
+                    <p className="text-xs font-medium">{covering.length} quotes overlap here</p>
+                  )}
+                  {covering.map(e => (covering.length > 1 || e.has_note) && (
+                    <p key={e.id} className="text-xs flex items-start gap-1.5">
+                      {e.has_note && e.note_preview && (
+                        <Paperclip className="w-3 h-3 mt-0.5 flex-shrink-0 text-amber-500" />
+                      )}
+                      <span>
+                        {covering.length > 1 && `“${quoteLabel(text, e.start_offset!, e.end_offset!)}”`}
+                        {covering.length > 1 && e.has_note && e.note_preview && ' — '}
+                        {e.has_note && e.note_preview}
+                      </span>
+                    </p>
+                  ))}
+                </TooltipContent>
+              </TooltipPortal>
+            </Tooltip>
+          )
+        })}
+      </>
+    )
   }
 
   // Visual treatment based on speaker role and coding status
@@ -814,14 +848,17 @@ function SegmentRow({
           {onDeleteExcerpt && segment.excerpts.filter(e => e.start_offset !== null).length > 0 && (
             <>
               <ContextMenuSeparator />
+              {/* #1324: in passage order, outer before inner, each named by its head
+                  AND tail — nested quotes share a start, and a first-30 label named
+                  two different quotes identically. The Add Note list below takes the
+                  same order. */}
               {segment.excerpts
                 .filter(e => e.start_offset !== null)
+                .sort(compareQuotesInPassageOrder)
                 .map(e => {
-                  const excerptText = sliceByCodePoints(segment.text, e.start_offset!, e.end_offset!)
-                  const truncated = excerptText.length > 30 ? excerptText.slice(0, 30) + '...' : excerptText
                   return (
                     <ContextMenuItem key={e.id} onClick={() => onDeleteExcerpt(e.id)}>
-                      Remove Excerpt: &ldquo;{truncated}&rdquo;
+                      Remove Excerpt: &ldquo;{quoteLabel(segment.text, e.start_offset!, e.end_offset!)}&rdquo;
                     </ContextMenuItem>
                   )
                 })}
@@ -831,13 +868,12 @@ function SegmentRow({
             <>
               {segment.excerpts
                 .filter(e => !e.has_note)
+                .sort(compareQuotesInPassageOrder)
                 .map(e => {
                   if (e.start_offset !== null && e.end_offset !== null) {
-                    const excerptText = sliceByCodePoints(segment.text, e.start_offset, e.end_offset)
-                    const truncated = excerptText.length > 30 ? excerptText.slice(0, 30) + '...' : excerptText
                     return (
                       <ContextMenuItem key={`note-${e.id}`} onClick={() => onAddNoteToExcerpt(e.id, segment.id)}>
-                        Add Note to Excerpt: &ldquo;{truncated}&rdquo;
+                        Add Note to Excerpt: &ldquo;{quoteLabel(segment.text, e.start_offset, e.end_offset)}&rdquo;
                       </ContextMenuItem>
                     )
                   }

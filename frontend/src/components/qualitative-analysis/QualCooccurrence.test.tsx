@@ -44,15 +44,18 @@ const MATRIX = {
   ],
   matrix: [[4, 2], [2, 6]],
   max_cooccurrence: 4,
-  total_coded_segments: 9,
-  total_coded_texts: 0,
+  n_units: 9,
   source: 'all',
 }
 
 /** An ANSWERED refusal — duck-typed on `status`, like the real predicates. */
 const answered500 = () => Object.assign(new Error('boom'), { status: 500 })
 
-function renderMatrix(over: { noticeSize?: 'page' | 'panel' } = {}) {
+function renderMatrix(over: {
+  noticeSize?: 'page' | 'panel'
+  cooccurrenceLevel?: 'segment' | 'source'
+  showProportion?: boolean
+} = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={qc}>
@@ -142,5 +145,46 @@ describe('#963 Tier 3 — what the co-occurrence matrix says before, and instead
     renderMatrix()
     const full = await screen.findByText('Loading co-occurrence matrix…')
     expect(full.closest('[role="status"]')?.className).toContain('py-16')
+  })
+})
+
+describe('#1335 (D47) — the caption says the rule a pair is counted by', () => {
+  // Since 1.5.9 two codes co-occur only where ONE coder applied both. The caption
+  // is what the analysis tab, its PNG export and the Canvas embed all show, so it
+  // is where the rule is said — on every view and both levels. Written out, not
+  // imported: the words are the claim (`lib/cooccurrence-rule.ts` holds them, and
+  // the backend holds that equal to the server's CSV and Excel wording).
+  const RULE = /Two codes count as co-occurring only where one coder applied both\./
+
+  it.each([
+    ['the segment level', {}],
+    ['the source level', { cooccurrenceLevel: 'source' as const }],
+    ['the proportion view', { showProportion: true }],
+  ])('on %s', async (_label, over) => {
+    renderMatrix(over)
+    await screen.findAllByText('Pacing')
+    expect(screen.getByText(RULE)).toBeInTheDocument()
+  })
+
+  it('not while there is no matrix to read (a notice is not a caption)', async () => {
+    cooccurrence.mockResolvedValue({ ...MATRIX, codes: [], matrix: [] })
+    renderMatrix()
+    await screen.findByText('No coded units found with current filters.')
+    expect(screen.queryByText(RULE)).toBeNull()
+  })
+})
+
+describe('#1527 D83 — the parent reads the figure’s N from the payload', () => {
+  it('hands the whole answered payload up, n_units included', async () => {
+    const onDataLoad = vi.fn()
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <QualCooccurrence projectId={1} filterParams={FILTERS} cooccurrenceLevel="segment"
+          showProportion={false} onDataLoad={onDataLoad} />
+      </QueryClientProvider>,
+    )
+    await screen.findAllByText('Pacing')
+    expect(onDataLoad).toHaveBeenLastCalledWith(expect.objectContaining({ n_units: 9 }))
   })
 })

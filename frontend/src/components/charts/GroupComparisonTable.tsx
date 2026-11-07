@@ -4,6 +4,8 @@ import type { ComparisonRow, GroupStat, TestResult } from '@/lib/api'
 import { formatP, formatPValue, getSignificanceStars } from '@/lib/chart-data'
 import PostHocTable from '@/components/analysis/PostHocTable'
 import { NO_VALUE, describeUndefined, formatStat } from '@/lib/stat-format'
+import { pMethodFooter, pMethodShort } from '@/lib/p-method'
+import { SINGLE_VALUE_SD_NOTE, untestedGroupsNote } from '@/lib/untested-groups'
 
 interface GroupComparisonTableProps {
   groups: string[]
@@ -149,6 +151,9 @@ export default function GroupComparisonTable({
   let testTypeLabel = ''
   if (nonparametric) {
     testTypeLabel = isTwoGroup ? 'Mann-Whitney U test' : 'Kruskal-Wallis H test'
+    // #1326 STAT-12 (D58): the data chooses Mann–Whitney's method, per row.
+    const methodLine = pMethodFooter(rows.map(r => r.test?.p_method))
+    if (methodLine) testTypeLabel = `${testTypeLabel} — ${methodLine}`
   } else if (firstTest?.test_type === 'independent_t_test') {
     testTypeLabel = "Welch's t-test (unequal variances)"
   } else if (firstTest?.test_type === 'one_way_anova') {
@@ -290,6 +295,10 @@ export default function GroupComparisonTable({
         </table>
       </ScrollableTable>
 
+      {/* #1329 (D51): a group shown here and left out of its row's tests is
+          SAID, once per row — the server names it; nothing is re-derived. */}
+      <UntestedGroupsNotes rows={rows} />
+
       {/* Footer */}
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-mm-text-faint">
         {sigLevels.show_05 && <span>* p &lt; .05</span>}
@@ -309,6 +318,19 @@ export default function GroupComparisonTable({
 }
 
 // ── Sub-components ──────────────────────────────────────────────────────────
+
+function UntestedGroupsNotes({ rows }: { rows: ComparisonRow[] }) {
+  const several = rows.length > 1
+  const notes = rows
+    .map(r => untestedGroupsNote(r.untested_groups, several ? r.label : undefined))
+    .filter((n): n is string => n != null)
+  if (notes.length === 0) return null
+  return (
+    <div className="mt-2 space-y-0.5 text-[11px] text-mm-text-muted" data-testid="untested-groups-notes">
+      {notes.map(n => <p key={n}>{n}</p>)}
+    </div>
+  )
+}
 
 function SubHeader({ label }: { label: string }) {
   return (
@@ -392,7 +414,13 @@ function GroupStatCells({ stat, nonparametric }: { stat: GroupStat | undefined; 
       >
         {formatStat(stat.mean)}
       </td>
-      <td className="px-2 py-2 text-center text-mm-text-muted tabular-nums" title={`SD = ${stat.sd}`}>{formatStat(stat.sd)}</td>
+      {/* #1329: a one-value group has no SD (`null`); the title said "SD = null". */}
+      <td
+        className="px-2 py-2 text-center text-mm-text-muted tabular-nums"
+        title={stat.sd != null ? `SD = ${stat.sd}` : stat.n === 1 ? SINGLE_VALUE_SD_NOTE : describeUndefined(stat.undefined_reason) ?? 'No SD'}
+      >
+        {formatStat(stat.sd)}
+      </td>
     </>
   )
 }
@@ -499,6 +527,9 @@ function NonParametricTestCells({ row, isTwoGroup, sigLevels }: { row: Compariso
   // \u03B5\u00B2 (epsilon-squared) \u2014 must match the column header (#430); the backend
   // computes Tomczak & Tomczak (2014) epsilon-squared for Kruskal-Wallis.
   const esLabel = isTwoGroup ? 'r' : '\u03B5\u00B2'
+  // #1326 STAT-12 (D58): the data chose this p's method; the cell says which,
+  // in its title AND as text a screen reader reaches (a title is not reachable).
+  const method = pMethodShort(test.p_method)
 
   return (
     <>
@@ -510,9 +541,10 @@ function NonParametricTestCells({ row, isTwoGroup, sigLevels }: { row: Compariso
       </td>
       <td
         className={`px-2 py-2 text-center tabular-nums font-medium ${pColor(test.p)}`}
-        title={`${statLabel} = ${test.statistic.toFixed(2)}, ${formatPValue(test.p)}`}
+        title={`${statLabel} = ${test.statistic.toFixed(2)}, ${formatPValue(test.p)}${method ? ` (${method})` : ''}`}
       >
         {formatP(test.p)}{stars && <sup className="ml-0.5 text-[0.7em]">{stars}</sup>}
+        {method && <span className="sr-only"> ({method})</span>}
       </td>
       <td
         className="px-2 py-2 text-center tabular-nums"

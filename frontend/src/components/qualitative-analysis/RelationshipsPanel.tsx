@@ -13,11 +13,14 @@ import {
 } from 'lucide-react'
 import {
   type CodeAnalysisFilterParams,
+  type CooccurrenceMatrixResponse,
   type DemographicFilter,
   type DemographicComparisonResponse,
   exportApi,
 } from '@/lib/api'
 import { HEATMAP_LABELS, PALETTE_LABELS, COLOR_PALETTES } from '@/lib/chart-data'
+import { comparisonScopeSentence } from '@/lib/comparison-basis'
+import { comparisonSourceParams, comparisonSources, type QualCsvParams } from '@/lib/qual-comparison'
 import type { QualRelView, QualComparisonChartMode } from '@/lib/qual-analysis-types'
 import type { QualitativeAnalysisState, QualitativeAnalysisActions } from '@/hooks/useQualitativeAnalysis'
 import { Button } from '@/components/ui/button'
@@ -314,31 +317,39 @@ export function RelationshipsSidebar({ qa, demoFilters, setSrAnnouncement }: Rel
 
 // ── Content ──────────────────────────────────────────────────────────────────
 
-/** What the demographic comparison counts, said on the screen (2026-10-19). The
- *  backend joins segments to participants through each speaker, so only
- *  conversations count: open-text sources are accepted and ignored (#1297) and
- *  participant-linked documents are not counted (#1298). Change this sentence in
- *  the same edit that changes either. */
+/** What the comparison counts, before a result says it in numbers (#1297/#1298,
+ *  1.5.9): every source kind that reaches a person. Once a result arrives, its
+ *  `scope` block is rendered instead (`comparisonScopeSentence`) — the server's
+ *  account of what it counted and left out, never this client's guess. */
 export const COMPARISON_SCOPE_SENTENCE =
-  "Counts codings in conversations only, through each speaker's participant link. " +
-  'Documents, open-text answers and observations are not included.'
+  'Counts participants through their conversation turns, the documents linked to them and their open-text answers. ' +
+  'Observations have no participant link and are not included.'
 
 export interface RelationshipsContentProps {
   pid: number
   qa: QualitativeAnalysisState & QualitativeAnalysisActions
   codes: { id: number; is_active: boolean }[]
   filterParams: CodeAnalysisFilterParams
+  /**
+   * #1527 D84 — the co-occurrence figure's request: `filterParams` with the source lists
+   * read EXACTLY (`lib/qual-comparison.ts::cooccurrenceFilterParams`). Required, so a
+   * mount cannot hand the figure the page's "absent = all" params by default.
+   */
+  cooccurrenceParams: CodeAnalysisFilterParams
   demoFilters: DemographicFilter[]
+  /** #1545 — the page's description of the chosen filter values (`participantFilterFileScope`),
+   *  for the Comparison CSV's scope line. Required: a mount decides it. */
+  participantFilterLabel: string | undefined
   cooccurrenceN: number | null
   comparisonData: DemographicComparisonResponse | undefined
   comparisonLoading: boolean
   comparisonN: number | null
-  onCooccurrenceDataLoad: (info: { totalSegments: number; totalComments: number }) => void
+  onCooccurrenceDataLoad: (data: CooccurrenceMatrixResponse) => void
 }
 
 export function RelationshipsContent(props: RelationshipsContentProps) {
   const {
-    pid, qa, codes, filterParams, demoFilters,
+    pid, qa, codes, filterParams, cooccurrenceParams, demoFilters, participantFilterLabel,
     cooccurrenceN, comparisonData, comparisonLoading, comparisonN,
     onCooccurrenceDataLoad,
   } = props
@@ -347,18 +358,26 @@ export function RelationshipsContent(props: RelationshipsContentProps) {
 
   const handleComparisonExport = useCallback(() => {
     if (!qa.groupBy) return
-    const params: Record<string, string> = { group_by_subtype: qa.groupBy }
+    const params: QualCsvParams = { group_by_subtype: qa.groupBy }
     if (qa.selectedCodeIds.size > 0) params.code_ids = Array.from(qa.selectedCodeIds).join(',')
-    if (qa.selectedConversationIds.size > 0) params.conversation_ids = Array.from(qa.selectedConversationIds).join(',')
-    if (qa.selectedTextColumnIds.size > 0) params.text_column_ids = Array.from(qa.selectedTextColumnIds).join(',')
-    if (qa.excludeFacilitator) params.exclude_facilitator = 'true'
-    if (qa.participantIds.length > 0) params.participant_ids = qa.participantIds.join(',')
+    Object.assign(params, comparisonSourceParams(comparisonSources({
+      conversations: qa.selectedConversationIds, textColumns: qa.selectedTextColumnIds,
+      documents: qa.selectedDocumentIds, observations: qa.selectedObservationIds,
+    })))
+    // Always sent — the endpoint defaults to `true`, so omitting it when the
+    // researcher INCLUDED facilitator turns exported different numbers (#1323's review).
+    params.exclude_facilitator = String(qa.excludeFacilitator)
+    if (qa.participantIds.length > 0) {
+      params.participant_ids = qa.participantIds.join(',')
+      // #1545: the file names the chosen values on its scope line.
+      if (participantFilterLabel) params.participant_filter_label = participantFilterLabel
+    }
     // #499: carry the EFFECTIVE coder/layer scope (blind-forced — filterParams
     // already holds it) so the CSV matches the on-screen numbers.
     if (filterParams.coder_ids) params.coder_ids = filterParams.coder_ids
     if (filterParams.layer_scope) params.layer_scope = filterParams.layer_scope
     exportApi.demographicComparisonCsv(pid, params)
-  }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.excludeFacilitator, qa.participantIds, filterParams.coder_ids, filterParams.layer_scope])
+  }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, filterParams.coder_ids, filterParams.layer_scope, participantFilterLabel])
 
   return (
     <div>
@@ -382,7 +401,7 @@ export function RelationshipsContent(props: RelationshipsContentProps) {
             >
               <QualCooccurrence
                 projectId={pid}
-                filterParams={filterParams}
+                filterParams={cooccurrenceParams}
                 cooccurrenceLevel={qa.cooccurrenceLevel}
                 showProportion={qa.showProportion}
                 colorPreset={qa.cooccurrencePreset}
@@ -410,7 +429,9 @@ export function RelationshipsContent(props: RelationshipsContentProps) {
           </div>
         ) : (
           <div>
-            <p className="text-xs text-mm-text-muted mb-3">{COMPARISON_SCOPE_SENTENCE}</p>
+            <p className="text-xs text-mm-text-muted mb-3">
+              {(comparisonData && comparisonScopeSentence(comparisonData)) ?? COMPARISON_SCOPE_SENTENCE}
+            </p>
             {qa.groupBy && comparisonData && (
               <div className="flex items-center justify-end mb-4">
                 <Button variant="outline" size="sm" onClick={handleComparisonExport} className="h-7 text-xs">

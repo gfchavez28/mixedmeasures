@@ -49,14 +49,19 @@ invisible to it BY CONSTRUCTION. **Relaxing that is the one thing that must not
 happen**: it is exactly what #989 shipped to prevent, and it would put a machine
 into the headline α. This module asks its own, narrower question instead.
 
-## Not a stated-basis member, and that is a decision
+## A stated-basis member since 1.5.9 — the human table's `unit_basis`
 
 The family's rule is *the server states HOW a number was produced because the
-same data yields a different number under another reading*. Here there is ONE
-reading — Option B, shared with the human table — so a `basis` field would be a
-one-valued vocabulary: a constant wearing a vocabulary's obligations. If a second
-unit rule is ever offered, it becomes a member that day and takes the whole
-contract with it (a cross-language test, a `satisfies Record`, no re-derivation).
+same data yields a different number under another reading*. Until #1333 / #1334
+there was ONE reading here, and this section said a `basis` field would be a
+one-valued vocabulary — and that a second unit rule would make it a member that
+day. #1333 made that day: whether a facilitator's turn is a unit is now a stated
+choice (`reliability_basis.UNIT_BASIS_*`), and a group of turns counts once. This
+table takes the SAME `unit_basis` the human table does — one argument reaching
+both gathers through the same two helpers (`irr.reliability_segment_rows`,
+`irr._unit_of`) — and states it on `MachineAgreementResult.unit_basis`, which the
+client reads through `lib/reliability-basis.ts` (the contract test there covers
+both wires).
 """
 from __future__ import annotations
 
@@ -82,12 +87,20 @@ from .coding_layers import (
 )
 from .irr import (
     _cohens_kappa,
-    _distinct_comparable_values,
     _interpret_kappa,
     _n_comparable_units,
     _percent_agreement,
     _prevalence,
     _segment_source_key,
+    _unit_of,
+    _verdict,
+    binary_undefined_reason,
+    reliability_segment_rows,
+)
+from .reliability_basis import (
+    DEFAULT_RELIABILITY_UNIT_BASIS,
+    VERDICT_MIN_UNITS,
+    unit_basis_excludes_facilitator_turns,
 )
 from .text_analysis import substantive_text_clause, treat_as_empty_for_project
 from ..routers.helpers import visible_segment_filter
@@ -118,6 +131,9 @@ class CodeAgreement:
     #: matrix, not about the function.
     prevalence: float | None
     undefined_reason: str | None = None
+    #: #1505 (D43) — κ has a value and NO band word: fewer comparable units than
+    #: `reliability_basis.VERDICT_MIN_UNITS`. The human table's rule, one table over.
+    verdict_withheld_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +161,11 @@ class MachineAgreementResult:
     #: silence that reads as "still thinking" (#963 Tier 3's lesson).
     unavailable_reason: str | None = None
     pairs: list[MachinePairAgreement] = field(default_factory=list)
+    #: #1333 / #1334 — the human table's stated unit basis, which this table
+    #: shares by construction (one `unit_basis` argument reaches both gathers).
+    unit_basis: str = DEFAULT_RELIABILITY_UNIT_BASIS
+    #: #1505 (D43) — the floor below which a κ carries no band word.
+    verdict_min_units: int = VERDICT_MIN_UNITS
 
 
 #: Why the table is empty. Distinct sentences, distinct remedies.
@@ -155,7 +176,8 @@ NO_SHARED_SOURCE = "no_shared_source"
 UNAVAILABLE_REASONS = (NO_MACHINE_CODER, NO_HUMAN_CODER, NO_SHARED_SOURCE)
 
 
-def _gather(db: Session, project_id: int, coder_ids: list[int]):
+def _gather(db: Session, project_id: int, coder_ids: list[int], *,
+            include_facilitator_turns: bool):
     """`(applied, unit_source, engaged)` for an explicit coder list.
 
     Mirrors `irr.gather_coder_applications`' two passes and its unit rules —
@@ -182,20 +204,26 @@ def _gather(db: Session, project_id: int, coder_ids: list[int]):
         CodeApplication.user_id.in_(coder_ids),
     ]
 
-    for seg_id, conv_id, doc_id, obs_id, uid, code_id in (
-        consensus_scoped_segments(
-            db.query(
-                Segment.id, Segment.conversation_id, Segment.document_id,
-                Segment.observation_id, CodeApplication.user_id,
-                CodeApplication.code_id,
-            )
-            .join(CodeApplication, CodeApplication.segment_id == Segment.id)
-            .join(Code, CodeApplication.code_id == Code.id),
-            project_id,
+    # #1333 / #1334 — the human table's unit rule, through the SAME two helpers
+    # (`irr.reliability_segment_rows` / `irr._unit_of`), so "the SAME rule the
+    # human table uses" stays true by construction rather than by copy.
+    for seg_id, conv_id, doc_id, obs_id, group_id, uid, code_id in (
+        reliability_segment_rows(
+            consensus_scoped_segments(
+                db.query(
+                    Segment.id, Segment.conversation_id, Segment.document_id,
+                    Segment.observation_id, Segment.group_id, CodeApplication.user_id,
+                    CodeApplication.code_id,
+                )
+                .join(CodeApplication, CodeApplication.segment_id == Segment.id)
+                .join(Code, CodeApplication.code_id == Code.id),
+                project_id,
+            ),
+            include_facilitator_turns=include_facilitator_turns,
         ).filter(*visible_segment_filter(), *base).all()
     ):
         src = _segment_source_key(conv_id, doc_id, obs_id)
-        ukey = ("seg", seg_id)
+        ukey = _unit_of(seg_id, group_id, True)
         unit_source[ukey] = src
         engaged[src].add(uid)
         applied[ukey][uid].add(resolve_effective_code(effective, code_id))
@@ -226,7 +254,7 @@ def _gather(db: Session, project_id: int, coder_ids: list[int]):
 
 def _backfill_units(
     db: Session, project_id: int, sources: set[tuple], unit_source: dict,
-    treat_as_empty: list[str],
+    treat_as_empty: list[str], *, include_facilitator_turns: bool,
 ) -> None:
     """Every in-play unit of `sources`, including ones nobody coded.
 
@@ -241,10 +269,13 @@ def _backfill_units(
 
     if conv_ids or doc_ids or obs_ids:
         from sqlalchemy import or_
-        for seg_id, conv_id, doc_id, obs_id in (
-            db.query(
-                Segment.id, Segment.conversation_id, Segment.document_id,
-                Segment.observation_id,
+        for seg_id, conv_id, doc_id, obs_id, group_id in (
+            reliability_segment_rows(
+                db.query(
+                    Segment.id, Segment.conversation_id, Segment.document_id,
+                    Segment.observation_id, Segment.group_id,
+                ),
+                include_facilitator_turns=include_facilitator_turns,
             ).filter(
                 *visible_segment_filter(),
                 consensus_eligible_segment_clause(),
@@ -256,7 +287,7 @@ def _backfill_units(
             ).all()
         ):
             unit_source.setdefault(
-                ("seg", seg_id), _segment_source_key(conv_id, doc_id, obs_id),
+                _unit_of(seg_id, group_id, True), _segment_source_key(conv_id, doc_id, obs_id),
             )
     if col_ids:
         for val_id, col_id in (
@@ -270,6 +301,7 @@ def _backfill_units(
 
 def compute_machine_agreement(
     db: Session, project_id: int, *, human_id: int | None = None,
+    unit_basis: str = DEFAULT_RELIABILITY_UNIT_BASIS,
 ) -> MachineAgreementResult:
     """Every (person × machine) pair's per-code agreement. Never a pooled figure.
 
@@ -284,6 +316,8 @@ def compute_machine_agreement(
     hiding rows, so a colleague's figures never leave the server (the coding-progress
     `coder_id` rule). The machines are never narrowed.
     """
+    # Decided FIRST, so an unknown basis fails closed whatever the roster holds.
+    include_facilitator_turns = not unit_basis_excludes_facilitator_turns(unit_basis)
     machines = (
         db.query(User)
         .filter(User.coder_type == CODER_TYPE_MACHINE, User.archived == False)  # noqa: E712
@@ -304,7 +338,9 @@ def compute_machine_agreement(
         return MachineAgreementResult(available=False, unavailable_reason=NO_HUMAN_CODER)
 
     coder_ids = [u.id for u in humans + machines]
-    applied, unit_source, engaged, treat_as_empty = _gather(db, project_id, coder_ids)
+    applied, unit_source, engaged, treat_as_empty = _gather(
+        db, project_id, coder_ids, include_facilitator_turns=include_facilitator_turns,
+    )
 
     code_names = dict(
         db.query(Code.id, Code.name).filter(Code.project_id == project_id).all()
@@ -322,7 +358,8 @@ def compute_machine_agreement(
                 continue
             # The backfill is per PAIR, because the shared source set is.
             scoped_units = dict(unit_source)
-            _backfill_units(db, project_id, shared, scoped_units, treat_as_empty)
+            _backfill_units(db, project_id, shared, scoped_units, treat_as_empty,
+                            include_facilitator_turns=include_facilitator_turns)
             units = [u for u, src in scoped_units.items() if src in shared]
             if not units:
                 continue
@@ -347,17 +384,16 @@ def compute_machine_agreement(
                     matrix.append([h, m])
 
                 comparable = _n_comparable_units(matrix)
-                distinct = _distinct_comparable_values(matrix)
-                reason: str | None = None
-                if comparable == 0:
-                    reason = undefined_stats.INSUFFICIENT_N
-                elif len(distinct) < 2:
-                    # 🔴 #689/#828's rider: with no variance there is nothing to
-                    # agree ABOUT, and κ's `pe >= 1.0` branch would print 1.0 —
-                    # rendered "almost perfect" over a code neither of them used.
-                    reason = undefined_stats.NO_VARIANCE
+                # The human table's decision, asked of the same 0/1 matrix shape:
+                # `insufficient_n` below two comparable units (#1505 D42 — κ over
+                # one unit is 0 by construction), then `no_variance` — 🔴 #689/#828's
+                # rider: with no variance there is nothing to agree ABOUT, and κ's
+                # `pe >= 1.0` branch would print 1.0, rendered "almost perfect" over
+                # a code neither of them used.
+                reason = binary_undefined_reason(matrix)
 
                 kappa = None if reason else _cohens_kappa(matrix)
+                kappa_band, withheld = _verdict(kappa, comparable, _interpret_kappa)
                 per_code.append(CodeAgreement(
                     code_id=code_id,
                     code_name=code_names.get(code_id, f"Code {code_id}"),
@@ -365,14 +401,16 @@ def compute_machine_agreement(
                     human_applied=human_applied,
                     machine_applied=machine_applied,
                     both_applied=both,
+                    # A share over ONE unit is still a description of it (the
+                    # human table keeps it too); only no unit at all has none.
                     percent_agreement=(
-                        None if reason == undefined_stats.INSUFFICIENT_N
-                        else _percent_agreement(matrix)
+                        None if comparable == 0 else _percent_agreement(matrix)
                     ),
                     kappa=undefined_stats.finite_or_none(kappa, 4),
-                    kappa_interpretation=_interpret_kappa(kappa),
+                    kappa_interpretation=kappa_band,
                     prevalence=_prevalence(matrix),
                     undefined_reason=reason,
+                    verdict_withheld_reason=withheld,
                 ))
 
             pairs.append(MachinePairAgreement(
@@ -386,5 +424,7 @@ def compute_machine_agreement(
             ))
 
     if not pairs:
-        return MachineAgreementResult(available=False, unavailable_reason=NO_SHARED_SOURCE)
-    return MachineAgreementResult(available=True, pairs=pairs)
+        return MachineAgreementResult(
+            available=False, unavailable_reason=NO_SHARED_SOURCE, unit_basis=unit_basis,
+        )
+    return MachineAgreementResult(available=True, pairs=pairs, unit_basis=unit_basis)

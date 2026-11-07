@@ -67,6 +67,7 @@ import { metricDisplayLabel } from '@/lib/metric-label'
 import { TEST_TYPE_LABELS, savedTestLabel } from '@/lib/saved-test-label'
 import { generateMaterialAutoName } from '@/lib/material-auto-name'
 import { VALUE_NUMERIC_TYPES } from '@/lib/dataset-constants'
+import { untestedGroupsNote } from '@/lib/untested-groups'
 import {
   Dialog,
   DialogContent,
@@ -139,7 +140,9 @@ function formatTestResult(test: StatisticalTestResponse): string {
     // eta-squared. It used to trail the whole string, i.e. immediately after
     // omega-squared, which reads as describing the number it does not describe.
     const omegaStr = rd.omega_squared != null ? `, \u03C9\u00B2 = ${rd.omega_squared}` : ''
-    return `F(${rd.df_between}, ${rd.df_within}) = ${rd.f_statistic}, ${formatPValue(rd.p_value)}, \u03B7\u00B2 = ${rd.eta_squared} (${rd.effect_size_label})${omegaStr}`
+    // #1329 (D51): a group with one value is listed and left out of the F.
+    const untested = untestedGroupsNote(Array.isArray(rd.untested_groups) ? rd.untested_groups : null)
+    return `F(${rd.df_between}, ${rd.df_within}) = ${rd.f_statistic}, ${formatPValue(rd.p_value)}, \u03B7\u00B2 = ${rd.eta_squared} (${rd.effect_size_label})${omegaStr}${untested ? ` \u2014 ${untested}` : ''}`
   }
   if (test.test_type === 'split_half') {
     const negNote = rd.negative_half_correlation ? ' — negative half-correlation, scale may lack internal consistency' : ''

@@ -281,18 +281,38 @@ def locked_coder_ids(db: Session, user_ids: list[int]) -> set[int]:
     per-coder existence check would be one query per roster row. Bounded by the
     ROSTER, which is coders and never respondents, so a plain `.in_()` is safe
     here — the #842 ceiling is about collections that grow with the data.
+
+    🔴 **Asked PER CODER, through the install's CODES (#1463, D60).** For each
+    roster coder: does a coding of theirs exist on any code? The codes are bounded
+    by the codebooks, and `ix_code_applications_code_user` makes each probe one
+    seek — about 1 ms. The `SELECT DISTINCT user_id` it replaced read EVERY coding
+    on the install (1.1–1.4 s on 3.6M codings, on every page). ⚠️ The `code_id IN
+    (SELECT id FROM codes)` is not a filter — every coding has a code (NOT NULL, a
+    cascading FK) — it is what lets SQLite reach the coder through the code-first
+    index; `user_id = ?` alone has no index to use (the index is deliberately
+    CODE-first, see the migration `0a5c5d4ceb29`). Same coders, same answer.
     """
+    from sqlalchemy import exists, select
+
+    from ..models.code import Code
     from ..models.code_application import CodeApplication
+    from ..models.user import User
 
     if not user_ids:
         return set()
+    holds_a_coding = (
+        exists()
+        .where(
+            CodeApplication.user_id == User.id,
+            CodeApplication.code_id.in_(select(Code.id)),
+        )
+        .correlate(User)
+    )
     return {
         uid
-        for (uid,) in db.query(CodeApplication.user_id)
-        .filter(CodeApplication.user_id.in_(user_ids))
-        .distinct()
+        for (uid,) in db.query(User.id)
+        .filter(User.id.in_(user_ids), holds_a_coding)
         .all()
-        if uid is not None
     }
 
 

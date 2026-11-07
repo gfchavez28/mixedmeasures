@@ -33,6 +33,9 @@ from ..auth import get_current_user
 from ..services.audit import log_action
 from ..services.coding_layers import CONSENSUS_ORIGIN
 from ..services.coding_counts import coded_segment_count
+from ..services.consensus import consensus_enabled
+from ..services.consensus_staleness import mark_consensus_stale
+from ..services.participant_scores import mark_participant_scores_stale
 from ..services.segment_operations import apply_text_edit, preview_text_edit
 from .helpers import visible_segment_filter as _visible_segment_filter, _verify_conversation_ownership
 
@@ -342,6 +345,10 @@ async def update_segment_speaker_role(
         raise HTTPException(status_code=400, detail="Segment has no speaker")
 
     segment.speaker.is_facilitator = 1 if data.is_facilitator else 0
+    # #1333 — a speaker's role decides which turns are reliability units and
+    # which ratings reach a participant's score (`facilitator_turn`), so the role
+    # is an input to both. Ungated, like every score marker.
+    mark_participant_scores_stale(db, conversation.project_id)
 
     log_action(
         db,
@@ -358,6 +365,17 @@ async def update_segment_speaker_role(
     db.commit()
 
     return segment_to_response(segment)
+
+
+def _mark_regrouped_consensus_stale(db: Session, project_id: int, segment_ids) -> None:
+    """#1334 unit 3 (D34) — a group's consensus is ONE decision over its members
+    (`services/consensus.py`), so a change to WHO is in a group moves every
+    member's consensus, coded or not. Gated on `consensus_enabled`, which is
+    right for consensus (one voter decides nothing); the participant-score
+    marker beside each call is the ungated one."""
+    ids = sorted(set(segment_ids))
+    if ids and consensus_enabled(db):
+        mark_consensus_stale(db, project_id, segment_ids=ids)
 
 
 @router.post("/group", response_model=SegmentGroupResponse)
@@ -388,7 +406,9 @@ async def create_segment_group(
         if orders[i + 1] != orders[i] + 1:
             raise HTTPException(status_code=400, detail="Segments must be adjacent")
 
-    # Remove from existing groups
+    # Remove from existing groups — remembering which, because each one LOSES
+    # members here and its consensus was decided over them (D34).
+    old_group_ids = sorted({seg.group_id for seg in segments if seg.group_id})
     for seg in segments:
         seg.group_id = None
 
@@ -400,6 +420,19 @@ async def create_segment_group(
     # Assign segments to group
     for seg in segments:
         seg.group_id = group.id
+    # #1334 — a group is ONE passage of a participant's score, so grouping moves
+    # the score. (Reliability is computed on read; the client re-reads it.)
+    mark_participant_scores_stale(db, conversation.project_id)
+    # #1334 unit 3 (D34) — and one consensus decision: the new group's members,
+    # and the turns left behind in any group they came from. (No flush needed:
+    # whether the read sees the moved turns in their old group or not, they are
+    # marked anyway as new members.)
+    left_behind = [
+        sid for (sid,) in db.query(Segment.id).filter(Segment.group_id.in_(old_group_ids))
+    ] if old_group_ids else []
+    _mark_regrouped_consensus_stale(
+        db, conversation.project_id, [s.id for s in segments] + left_behind,
+    )
 
     log_action(
         db,
@@ -436,8 +469,15 @@ async def ungroup_segments(
         raise HTTPException(status_code=404, detail="Group not found")
 
     # Remove group assignment from segments
+    former_members = [seg.id for seg in group.segments]
     for seg in group.segments:
         seg.group_id = None
+    # #1334 — the members become passages of their own again.
+    mark_participant_scores_stale(db, conversation.project_id)
+    # #1334 unit 3 (D34) — and units of their own for consensus: each member's
+    # rows were the group's decision. Hidden members too (a merge leaves its
+    # originals in the group), so the recompute can clear what was written there.
+    _mark_regrouped_consensus_stale(db, conversation.project_id, former_members)
 
     log_action(
         db,

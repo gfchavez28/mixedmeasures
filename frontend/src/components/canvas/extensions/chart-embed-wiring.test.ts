@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { stripComments } from '@/lib/strip-comments'
 import { join } from 'node:path'
+import { SOURCE_SCAN_TIMEOUT_MS, sourceFiles, srcRel } from '@/test-support/source-tree'
 
 /**
  * The chart embed's integrity warnings are WIRED (#795).
@@ -62,6 +63,36 @@ describe('the chart embed renders both integrity warnings', () => {
     expect(renderer, 'isStale must not return as a prop').not.toMatch(/isStale\??:/)
     expect(renderer, 'onRefresh must not return as a prop').not.toMatch(/onRefresh\??:/)
   })
+
+  it('#1323 D12: carries the fingerprint generation in all THREE places the HTML round-trip needs', () => {
+    const node = read('components/canvas/extensions/chart-embed.ts')
+    expect(node, 'addAttributes').toMatch(/figureEpoch:\s*\{ default: null \}/)
+    expect(node, 'parseHTML').toMatch(/figureEpoch:\s*dom\.getAttribute\('data-figure-epoch'\)/)
+    expect(node, 'renderHTML').toMatch(/'data-figure-epoch': HTMLAttributes\.figureEpoch/)
+  })
+
+  it('#1323 D12: the one insertion door places every chart embed under the current generation', () => {
+    const editor = read('components/canvas/ThemeEditor.tsx')
+    expect(editor).toMatch(
+      /insertWithPendingSlash\('chart-embed', \{ \.\.\.attrs, figureEpoch: CURRENT_FIGURE_EPOCH \}\)/)
+    // A POPULATION check over every source file: nothing but ThemeEditor creates a
+    // chart-embed node. A second door that did not stamp the generation would make
+    // its new embeds say their figures changed "in an update" the moment they render.
+    // Only a file that names the node at all is comment-stripped (the whole-tree
+    // strip is what costs seconds under full-suite load, #841/#867).
+    const creates = /type:\s*['"]chart-embed['"]|nodes\[\s*['"]chart-embed['"]\s*\]|insertWithPendingSlash\(\s*['"]chart-embed['"]/
+    const files = sourceFiles({
+      ext: 'both',
+      floor: 500,
+      sentinels: ['components/canvas/ThemeEditor.tsx', 'pages/CanvasView.tsx'],
+    })
+    const doors = files
+      .filter(abs => readFileSync(abs, 'utf8').includes('chart-embed'))
+      .filter(abs => creates.test(stripComments(readFileSync(abs, 'utf8'), abs)))
+      .map(srcRel)
+    expect(doors).toEqual(['components/canvas/ThemeEditor.tsx'])
+    expect(read('pages/CanvasView.tsx'), 'the call sites go through insertChart').toMatch(/\.insertChart\(\{/)
+  }, SOURCE_SCAN_TIMEOUT_MS)
 
   it('warns only where a dataset column can actually go stale', () => {
     // A qualitative embed reads codes and sources, not dataset columns, so it

@@ -14,6 +14,7 @@ import { useChartColors } from '@/lib/theme-context'
 import { resolveGroupColors } from '@/lib/chart-data'
 import { NO_VALUE } from '@/lib/stat-format'
 import { comparisonBarRows, undefinedComparisonGroups } from '@/lib/qual-comparison'
+import { comparisonMethodNote } from '@/lib/comparison-basis'
 import { QualComparisonUndefinedNote } from './QualComparisonUndefinedNote'
 import type { DemographicComparisonResponse } from '@/lib/api'
 import type { ChartDataRow } from '@/lib/chart-types'
@@ -67,6 +68,7 @@ export default function QualComparisonBar({
 
   const chartData = useMemo(() => comparisonBarRows(entries, groups), [entries, groups])
   const undefinedGroups = useMemo(() => undefinedComparisonGroups(data), [data])
+  const methodNote = useMemo(() => comparisonMethodNote(data), [data])
 
   const yAxisWidth = useMemo(() => {
     if (chartData.length === 0) return 120
@@ -149,6 +151,9 @@ export default function QualComparisonBar({
         </BarChart>
       </ResponsiveContainer>
       <QualComparisonUndefinedNote groups={undefinedGroups} />
+      {/* #1323: the bars are counts in the result's UNIT — said inside the figure so
+          its PNG (Canvas, export) carries it. */}
+      {methodNote && <p className="pt-1 text-[11px] text-mm-text-muted">{methodNote}</p>}
     </ChartFigure>
   )
 }

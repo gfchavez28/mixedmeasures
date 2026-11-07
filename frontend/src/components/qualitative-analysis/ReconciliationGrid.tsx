@@ -26,6 +26,7 @@ import { cn, formatTimecode } from '@/lib/utils'
 import { formatMagnitude } from '@/lib/magnitude'
 import type { ListStatus } from '@/lib/list-status'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import { RECONCILIATION_UNITS_NOTE } from '@/lib/reliability-basis'
 
 const RENDER_CAP = 200 // matches the backend limit; disagreements-first keeps the set small
 
@@ -34,9 +35,41 @@ const RENDER_CAP = 200 // matches the backend limit; disagreements-first keeps t
  * or they agreed on a code and rated it more than one step apart. The two ride
  * the payload separately so the row can say which; every "needs review" gate in
  * this grid (the filter's counterpart, j/k, the badge) reads THIS predicate.
+ * #1334 unit 3 (D37) adds a coder's two ratings on one GROUP.
  */
 const needsReview = (u: ReconciliationUnit): boolean =>
   u.has_disagreement || !!u.has_rating_disagreement || !!u.has_merge_conflict
+  || !!u.has_group_rating_conflict
+
+/**
+ * #1334 unit 3 (D35) — the turn a row's link and own-cell actions address. A
+ * GROUP's row names the group, whose id is not a turn's, so it acts through its
+ * first turn (the server's remove and rate find your code on any turn of the
+ * group, and an apply fans out to all of them); with no turn to name it acts on
+ * nothing. A payload from before 1.5.9 carries no anchor, and its unit id IS
+ * the segment's.
+ */
+function anchorSegmentId(unit: ReconciliationUnit): number | null {
+  if (unit.unit_type === 'group') return unit.anchor_segment_id ?? null
+  if (unit.unit_type === 'segment') return unit.anchor_segment_id ?? unit.unit_id
+  return null
+}
+
+/** What the row calls its unit — one entry per kind, so a new kind is a compile error. */
+const UNIT_WORD = {
+  segment: () => 'Segment',
+  group: (u: ReconciliationUnit) => {
+    const n = u.member_segment_ids?.length ?? 0
+    return `Group of ${n} turn${n === 1 ? '' : 's'}`
+  },
+  dataset_value: () => 'Response',
+} satisfies Record<ReconciliationUnit['unit_type'], (u: ReconciliationUnit) => string>
+
+/** "0 and 1", "−0.5, 0 and 1" — a coder's ratings on one group, in the scale's own form. */
+function listRatings(values: number[]): string {
+  const shown = values.map(formatMagnitude)
+  return shown.length <= 1 ? shown.join('') : `${shown.slice(0, -1).join(', ')} and ${shown[shown.length - 1]}`
+}
 
 interface ReconciliationGridProps {
   projectId: number
@@ -136,12 +169,15 @@ export default function ReconciliationGrid({
     },
   })
   const routeForUnit = useCallback((unit: ReconciliationUnit): string | null => {
-    if (unit.source_type === 'conversation') return `/projects/${projectId}/conversations/${unit.source_id}?segment=${unit.unit_id}`
-    if (unit.source_type === 'document') return `/projects/${projectId}/documents/${unit.source_id}?segment=${unit.unit_id}`
+    // A group's row links to its first turn — its own id names no turn (D35).
+    const segmentId = anchorSegmentId(unit)
+    if (segmentId == null) return null
+    if (unit.source_type === 'conversation') return `/projects/${projectId}/conversations/${unit.source_id}?segment=${segmentId}`
+    if (unit.source_type === 'document') return `/projects/${projectId}/documents/${unit.source_id}?segment=${segmentId}`
     // The observation workbench's deep-link param is `?clip=`, NOT `?segment=`.
     // Without this arm a clip row's jump affordance is dead, and `fixColleague`
     // is worse than dead: it switches the active coder and then navigates nowhere.
-    if (unit.source_type === 'observation') return `/projects/${projectId}/observations/${unit.source_id}?clip=${unit.unit_id}`
+    if (unit.source_type === 'observation') return `/projects/${projectId}/observations/${unit.source_id}?clip=${segmentId}`
     return null
   }, [projectId])
   // Consensus / read-only jump: go straight to the source segment (no identity change).
@@ -390,6 +426,7 @@ export default function ReconciliationGrid({
                 : `${units.length} unit${units.length === 1 ? '' : 's'}.`}
               {' '}Arrow keys move; Enter edits your own cell; j / k jump between flagged units.
             </p>
+            <p>{RECONCILIATION_UNITS_NOTE}</p>
             <p>
               <span className="underline decoration-dotted decoration-mm-text-faint underline-offset-2">blank (reviewed)</span>
               {' '}= the coder coded this source but not this unit (a real disagreement);{' '}
@@ -442,7 +479,8 @@ const ReconciliationRow = memo(function ReconciliationRow({
   const timeRange = isClip && unit.start_time != null && unit.end_time != null
     ? `${formatTimecode(unit.start_time)} – ${formatTimecode(unit.end_time)}`
     : null
-  const unitWord = isClip ? 'Clip' : unit.unit_type === 'segment' ? 'Segment' : 'Response'
+  const isGroup = unit.unit_type === 'group'
+  const unitWord = isClip ? 'Clip' : UNIT_WORD[unit.unit_type](unit)
   // #35 — "ratings differ" is a distinct state from "codes differ": the coders
   // agreed the code applies and disagreed on how much. It gets its own words
   // (badge AND spoken label) so the reviewer knows which conversation to have.
@@ -450,14 +488,23 @@ const ReconciliationRow = memo(function ReconciliationRow({
   // And a THIRD state (#35): a merge found a different rating in a coder's own
   // copy. The project's rating was kept; rating it again settles it.
   const mergeOnly = !unit.has_disagreement && !unit.has_rating_disagreement && !!unit.has_merge_conflict
+  // And a FIFTH (#1334 unit 3, D37): ONE coder rated a code differently on two
+  // turns of this group, so that coder has no rating on it. Its own words — the
+  // merge badge would name a merged copy, a false cause. Rating again settles it.
+  const groupRatingsOnly = !unit.has_disagreement && !unit.has_rating_disagreement
+    && !unit.has_merge_conflict && !!unit.has_group_rating_conflict
   const reviewWord = unit.has_disagreement
     ? 'needs review'
     : ratingsOnly
       ? 'needs review, ratings differ'
       : mergeOnly
         ? 'needs review, a merge left a rating difference'
-        : 'agreement'
-  const rowheaderLabel = `${unitWord} · ${unit.source_label}: ${timeRange ?? unit.text.slice(0, 80)} · ${reviewWord}`
+        : groupRatingsOnly
+          ? "needs review, a coder rated the group's turns differently"
+          : 'agreement'
+  // One space-joined line for the name: a group's text holds one turn per line.
+  const nameText = (timeRange ?? unit.text.replace(/\s*\n\s*/g, ' ')).slice(0, 80)
+  const rowheaderLabel = `${unitWord} · ${unit.source_label}: ${nameText} · ${reviewWord}`
 
   return (
     <div role="row" className="grid border-b last:border-b-0 hover:bg-mm-surface-hover/40" style={{ gridTemplateColumns: 'var(--recon-cols)' }}>
@@ -488,7 +535,19 @@ const ReconciliationRow = memo(function ReconciliationRow({
                     className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-600 dark:text-amber-400"
                     title="Flagged for review: a merge found a different rating in a coder's own copy of this coding. This project's rating was kept; rating it again settles the difference."
                   ><TriangleAlert className="w-3 h-3" aria-hidden="true" />Merge difference</span>
-                : <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"><Check className="w-3 h-3" aria-hidden="true" />Agree</span>}
+                : groupRatingsOnly
+                  ? <span
+                      // The checked warning recipe, not its siblings' amber-600 (below
+                      // AA on white, #1267 — that population is not grown here).
+                      className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+                      title="Flagged for review: a coder rated a code differently on different turns of this group, so that coder has no rating on it. Rating it again sets one rating on every turn."
+                    ><TriangleAlert className="w-3 h-3" aria-hidden="true" />Turns rated differently</span>
+                  : <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"><Check className="w-3 h-3" aria-hidden="true" />Agree</span>}
+          {isGroup && (
+            // D35 — the row is ONE unit made of several turns; said on screen, not
+            // only in the name, because its text reads like one long turn otherwise.
+            <span className="text-[10px] font-medium text-mm-text-muted shrink-0">{unitWord}</span>
+          )}
           <span className="text-[10px] text-mm-text-faint truncate" title={unit.source_label}>{unit.source_label}</span>
         </div>
         {timeRange ? (
@@ -501,7 +560,10 @@ const ReconciliationRow = memo(function ReconciliationRow({
             )}
           </>
         ) : (
-          <p className="text-xs text-mm-text-secondary line-clamp-3" title={unit.text || undefined}>{unit.text || <span className="italic text-mm-text-faint">(no text)</span>}</p>
+          <p
+            className={cn('text-xs text-mm-text-secondary line-clamp-3', isGroup && 'whitespace-pre-line')}
+            title={unit.text || undefined}
+          >{unit.text || <span className="italic text-mm-text-faint">(no text)</span>}</p>
         )}
       </div>
 
@@ -524,6 +586,7 @@ const ReconciliationRow = memo(function ReconciliationRow({
             codeIds={codeIds}
             ratings={unit.ratings_by_coder?.[String(coder.id)]}
             conflicts={unit.rating_conflicts_by_coder?.[String(coder.id)]}
+            groupRatings={unit.group_rating_conflicts_by_coder?.[String(coder.id)]}
             consensusSet={consensusSet}
             legendMap={legendMap}
             // own-cell editing:
@@ -574,6 +637,8 @@ interface ReconciliationCellProps {
   ratings?: Record<string, number>
   /** #35 — `codeId → the rating a merged copy carried`; absent = no unresolved conflict. */
   conflicts?: Record<string, number>
+  /** #1334 D37 — `codeId → the ratings this coder gave it on different turns of the group`. */
+  groupRatings?: Record<string, number[]>
   consensusSet: Set<number>
   consensusContext?: ReconciliationUnit['consensus_context']
   legendMap: Map<number, ReconciliationCodeInfo>
@@ -590,7 +655,7 @@ interface ReconciliationCellProps {
 }
 
 const ReconciliationCell = memo(function ReconciliationCell(props: ReconciliationCellProps) {
-  const { rowIndex, colIndex, tabbable, onFocusCell, kind, coderName, reviewed, codeIds, ratings, conflicts, consensusSet, consensusContext, legendMap } = props
+  const { rowIndex, colIndex, tabbable, onFocusCell, kind, coderName, reviewed, codeIds, ratings, conflicts, groupRatings, consensusSet, consensusContext, legendMap } = props
 
   const codeName = (id: number) => legendMap.get(id)?.name ?? `#${id}`
   // #35 — `!= null`, never truthiness: a rating of 0 is a rating.
@@ -602,12 +667,36 @@ const ReconciliationCell = memo(function ReconciliationCell(props: Reconciliatio
     const v = conflicts?.[String(id)]
     return v != null ? v : null
   }
+  // D37 — the ratings this coder gave one code on different turns of a group
+  // (the server sends a code here only when there are two or more).
+  const groupRatingsOf = (id: number): number[] | null => groupRatings?.[String(id)] ?? null
   const withRating = (id: number): string => {
     const v = ratingOf(id)
     const c = conflictOf(id)
-    const base = v != null ? `${codeName(id)} rated ${formatMagnitude(v)}` : codeName(id)
+    const g = groupRatingsOf(id)
+    const base = g != null
+      ? `${codeName(id)} rated ${listRatings(g)} on different turns of the group`
+      : v != null ? `${codeName(id)} rated ${formatMagnitude(v)}` : codeName(id)
     return c != null ? `${base}, a merged copy rated it ${formatMagnitude(c)}` : base
   }
+  // The codes this coder rated differently across the group, for the visible note.
+  const splitRatings = kind === 'consensus'
+    ? []
+    : codeIds.flatMap(id => {
+      const g = groupRatingsOf(id)
+      return g ? [{ id, values: g }] : []
+    })
+  // What the own cell's actions write to: a response by its own id, any segment
+  // unit through its anchor — a group's first turn (D35/D36: the server finds your
+  // code on any turn of the group, and an apply fans out to every turn).
+  const ownItem: { type: 'segment' | 'text'; id: number } | null = !props.unit
+    ? null
+    : props.unit.unit_type === 'dataset_value'
+      ? { type: 'text', id: props.unit.unit_id }
+      : (() => {
+        const id = anchorSegmentId(props.unit)
+        return id != null ? { type: 'segment' as const, id } : null
+      })()
 
   // #471(b): a chip jumps to where its coding lives. Consensus → read-only jump; a
   // colleague's cell → confirm-switch to them then jump (the #471(d) fix-a-colleague
@@ -662,11 +751,11 @@ const ReconciliationCell = memo(function ReconciliationCell(props: Reconciliatio
         ),
       )}
     >
-      {kind === 'own' && props.projectId != null && props.unit && props.codeMap && props.allCodes && props.codesStatus && props.onCodeChange ? (
+      {kind === 'own' && props.projectId != null && ownItem && props.codeMap && props.allCodes && props.codesStatus && props.onCodeChange ? (
         <InlineCodeActions
           projectId={props.projectId}
-          itemType={props.unit.unit_type === 'segment' ? 'segment' : 'text'}
-          itemId={props.unit.unit_id}
+          itemType={ownItem.type}
+          itemId={ownItem.id}
           appliedCodeIds={codeIds}
           // #35 — per-application details so the own cell's chips show YOUR
           // ratings. Bare ids take the "unknown, not unrated" branch, which
@@ -750,6 +839,23 @@ const ReconciliationCell = memo(function ReconciliationCell(props: Reconciliatio
         >
           — not reviewed
         </span>
+      )}
+      {splitRatings.length > 0 && (
+        // D37 — the chip shows NO rating for such a code (the coder has none on the
+        // group), so the two numbers are said here, icon + words, never colour alone.
+        // In the cell's name already (`withRating`), so this is for the eye.
+        <div className="mt-1 flex flex-col gap-0.5">
+          {splitRatings.map(({ id, values }) => (
+            <span
+              key={id}
+              className="inline-flex items-start gap-1 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+              title="Rated differently on different turns of this group, so this coder has no rating on it and it is left out of the consensus rating. Rating it again sets one rating on every turn."
+            >
+              <TriangleAlert className="w-3 h-3 shrink-0 mt-px" aria-hidden="true" />
+              <span className="min-w-0">{codeName(id)}: rated {listRatings(values)} on different turns</span>
+            </span>
+          ))}
+        </div>
       )}
     </div>
   )

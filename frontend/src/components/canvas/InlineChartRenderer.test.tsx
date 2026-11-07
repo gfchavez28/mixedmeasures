@@ -143,8 +143,7 @@ function cooccurrence() {
     ],
     matrix: [[4, 1], [1, 2]],
     max_cooccurrence: 4,
-    total_coded_segments: 6,
-    total_coded_texts: 1,
+    n_units: 11,   // #1527 D83: the matrix's own count (passages, paragraphs, clips, answers)
     source: 'all',
   }
 }
@@ -378,6 +377,33 @@ describe('the slab-2 kinds (saturation · co-occurrence · comparisons)', () => 
     expect(codeAnalysisApi.sourceFrequencies).not.toHaveBeenCalled()
   })
 
+  it('a co-occurrence embed prints the matrix’s own N (#1527 D83)', async () => {
+    renderEmbed(qualConfig({ tab: 'relationships', rel_view: 'cooccurrence', show_chart_n: true }))
+    expect(await screen.findByText(/N = 11/)).toBeInTheDocument()
+  })
+
+  it('a co-occurrence embed counts exactly what it saved: an unselected kind is none (#1527 D84)', async () => {
+    // qualConfig saves one observation selected and nothing else.
+    renderEmbed(qualConfig({ tab: 'relationships', rel_view: 'cooccurrence' }))
+    await waitFor(() => expect(codeAnalysisApi.cooccurrence).toHaveBeenCalled())
+    const sent = vi.mocked(codeAnalysisApi.cooccurrence).mock.calls[0][1] as Record<string, unknown>
+    expect(sent).toMatchObject({
+      observation_ids: '1', conversation_ids: '', document_ids: '', text_column_ids: '',
+    })
+  })
+
+  it('reports a figure for a co-occurrence embed, Chart N or not (#1527 D90)', async () => {
+    const onFigure = vi.fn()
+    renderEmbed(qualConfig({ tab: 'relationships', rel_view: 'cooccurrence' }), { onFigure })
+    expect((await screen.findAllByText('Isolation')).length).toBeGreaterThan(0)
+    await waitFor(() => {
+      expect(onFigure).toHaveBeenLastCalledWith(expect.objectContaining({
+        hash: expect.stringMatching(/^[0-9a-f]{8}$/), headline: 'N = 11', epoch: 2,
+      }))
+    })
+    expect(onFigure.mock.calls[0][0]).toBeNull()   // control: nothing before the data resolves
+  })
+
   it('draws the comparison table and its bar variant off comparison_chart_mode', async () => {
     const relationships = (over: Record<string, unknown>) =>
       qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: 'role', ...over })
@@ -391,6 +417,18 @@ describe('the slab-2 kinds (saturation · co-occurrence · comparisons)', () => 
     await waitFor(() => {
       expect(bar.container.querySelector('.recharts-responsive-container')).not.toBeNull()
     })
+  })
+
+  it('reports a figure for a qualitative comparison, so the Canvas can tell when it moves (#1323 D12)', async () => {
+    // Before D12 this branch reported null forever: the comparison draws from its
+    // own query, and the figure memo only read the source-frequency payload.
+    const onFigure = vi.fn()
+    renderEmbed(qualConfig({ tab: 'relationships', rel_view: 'comparisons', group_by: 'role' }), { onFigure })
+    expect(await screen.findByText('Trust in mission control')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(onFigure).toHaveBeenLastCalledWith(expect.objectContaining({ hash: expect.stringMatching(/^[0-9a-f]{8}$/) }))
+    })
+    expect(onFigure.mock.calls[0][0]).toBeNull()   // control: nothing before the data resolves
   })
 
   it('never fires a comparison request without a grouping variable', async () => {

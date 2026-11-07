@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useState, useMemo, useCallback, useEffect, useId, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useParams, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle, useDefaultLayout } from 'react-resizable-panels'
@@ -28,6 +28,7 @@ import {
   canvasApi,
   retryUnanswered,
   type CodeAnalysisFilterParams,
+  type CooccurrenceMatrixResponse,
   type TextColumnInfo,
   type DocumentListItem,
   type SourceFrequenciesRequest,
@@ -36,6 +37,20 @@ import {
 } from '@/lib/api'
 import type { DataLabelPosition } from '@/lib/chart-data'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
+import {
+  codeFrequenciesFileRequest, codedSegmentsFileRequest, comparisonSourceParams, comparisonSources,
+  cooccurrenceFilterParams, SEGMENTS_FILE_ANSWERS_NOTE, SEGMENTS_FILE_NO_PASSAGE_REASON, sourceDataCsvParams,
+  type QualCsvParams,
+} from '@/lib/qual-comparison'
+import { MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
+import {
+  NO_PARTICIPANT_MATCHES_HINT, describeFilterValues, noParticipantMatchesNotice, participantFilterFileScope,
+  participantFilterState, resolveFilterValues,
+} from '@/lib/participant-filter'
+import { exportCodeFrequenciesCsv } from '@/lib/code-frequencies-export'
+import { quotedExcerptsQueryKey } from '@/lib/quoted-excerpts-key'
+import { onlyCoders, type CoderLens } from '@/lib/coder-color'
+import { frequencyFileScope } from '@/components/qualitative-analysis/qual-summary-columns'
 import type { QualTab, QualContentMode } from '@/lib/qual-analysis-types'
 import { useQualitativeAnalysis } from '@/hooks/useQualitativeAnalysis'
 import { Button } from '@/components/ui/button'
@@ -116,7 +131,19 @@ export default function QualitativeAnalysisView() {
   const queryClient = useQueryClient()
 
   const qa = useQualitativeAnalysis()
-  const { openCodebook } = useProjectLayout()
+  // #1537/#1538 (D122–D125, 1.6.0) — what the participant filter IS, decided once for every
+  // surface on this page: no filter · chosen values and the list they select · a list with no
+  // values behind it (a link, a saved analysis) · values that match no one.
+  const participantFilter = useMemo(
+    () => participantFilterState(qa.filterChoice, pid, qa.participantIds),
+    // Memoised on purpose: computed inline, the React Compiler skipped this component
+    // (`preserve-manual-memoization` at `handleFocusCode`, measured 2026-11-06b).
+    [qa.filterChoice, pid, qa.participantIds],
+  )
+  // D125 — values no participant holds together: no request carries the filter (the wire has
+  // no form for "no one" — every reader takes a missing list as no filter), one notice says why.
+  const nobodyMatches = participantFilter.kind === 'nobody'
+  const { openCodebook, project } = useProjectLayout()
   // #961 — where focus lands when a Retry on the coding counts succeeds.
   const activeTabRef = useRef<HTMLButtonElement>(null)
   const { coders, coderMap, multiCoder, multiHumanCoder, selectableCoders, query: codersQuery } = useCoders()
@@ -130,6 +157,16 @@ export default function QualitativeAnalysisView() {
   // app reads the claim, and removing a gate cannot turn this one fail-open.
   const { blind, withholding, settled: blindSettled, toggleReveal } = useBlindMode(pid)
   const self = user?.id ?? null
+  // #1541 — the *By Source* chips while withholding: the viewer's OWN, an allow-list, as every
+  // other surface on this page (DEC-G's self-only scope; *By Code* asks the server for
+  // `coder_ids=[self]`). Not `useBlindMode().blindLens`: once the roster answers that is a hide
+  // set of the ACTIVE roster's colleagues, and `useCoders` leaves archived coders out (#451/#503
+  // keep their coding in the workbench GAUGES), so an archived colleague's chips showed here.
+  // A missing self id fails closed: the allow-list is empty and hides every attributed coding.
+  const bySourceLens = useMemo<CoderLens | null>(
+    () => (withholding ? onlyCoders(self != null ? [self] : []) : null),
+    [withholding, self],
+  )
   const [srAnnouncement, setSrAnnouncement] = useState('')
 
   // Track J · J1 item 4 — hook stores the INCLUDE list (empty = all); the popover
@@ -455,27 +492,42 @@ export default function QualitativeAnalysisView() {
     layer_scope: qa.layerScope,
   }), [qa.excludeFacilitator, qa.selectedConversationIds, qa.participantIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.source, qa.tab, qa.cooccurrenceLevel, effectiveCoderIncludeCsv, qa.layerScope])
 
+  // #1527 D84 — the co-occurrence figure (and its CSV) counts EXACTLY the selection, by the
+  // comparison's rule; `filterParams` above keep "absent = all" for `/frequencies` (#749).
+  const cooccurrenceParams: CodeAnalysisFilterParams = useMemo(() => cooccurrenceFilterParams(filterParams, {
+    conversations: qa.selectedConversationIds, textColumns: qa.selectedTextColumnIds,
+    documents: qa.selectedDocumentIds, observations: qa.selectedObservationIds,
+  }), [filterParams, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds])
+
   const quoteFilterParams = useMemo(() => ({
     participant_ids: qa.participantIds.length > 0 ? qa.participantIds.join(',') : undefined,
-  }), [qa.participantIds])
+    // #1531 D99 (1.5.9): while blind mode withholds, a quote's codes are the viewer's own, so a
+    // quote only a colleague coded sits under *Uncoded excerpts* (every quote stays — an
+    // excerpt has no author). Blind only: the page's coder FILTER never reached the board and
+    // still does not.
+    coder_ids: withholding && self != null ? String(self) : undefined,
+  }), [qa.participantIds, withholding, self])
 
-  // Lift quote query so sidebar can filter sources to only those with quotes
+  // Lift quote query so sidebar can filter sources to only those with quotes. Server-scoped
+  // by the blind state, so it waits for `settled` (#964); the key names the scope (#454).
   const { data: quoteData } = useQuery({
-    queryKey: ['excerpts-quoted', pid, ...Object.values(quoteFilterParams).filter(Boolean)],
+    queryKey: quotedExcerptsQueryKey(pid, quoteFilterParams),
     queryFn: () => excerptsApi.listQuoted(pid, quoteFilterParams),
-    enabled: !!pid && qa.tab === 'quoteboard',
+    enabled: !!pid && qa.tab === 'quoteboard' && blindSettled && !nobodyMatches,
   })
 
   const freqQuery = useQuery({
     queryKey: ['code-frequencies', pid, qa.excludeFacilitator, Array.from(qa.selectedConversationIds).join(','), qa.participantIds.join(','), qa.source, Array.from(qa.selectedTextColumnIds).join(','), Array.from(qa.selectedDocumentIds).join(','), Array.from(qa.selectedObservationIds).join(','), effectiveCoderIncludeCsv ?? '', qa.layerScope],
     queryFn: () => codeAnalysisApi.frequencies(pid, filterParams),
-    enabled: !!pid && blindSettled,
+    enabled: !!pid && blindSettled && !nobodyMatches,
     // #961 — a failed count now says so and offers Retry, so the client
     // default's silent second ask only doubles a wait the server already
     // answered (8.4 s filtered on a large survey; #956/#957's rule).
     retry: retryUnanswered,
   })
-  const freqData = freqQuery.data
+  // #1538 D125 — not the cached answer while no one matches (the sidebar's code counts read it):
+  // the key is the unfiltered one, so the cache holds the whole project's counts.
+  const freqData = nobodyMatches ? undefined : freqQuery.data
   /** #961 — `hasCoding` below is read off this count. Undefined used to mean
    * "no coding", so every tab said "No segments or text has been coded yet."
    * for as long as the count took (~5.7 s measured) — and again on every
@@ -512,7 +564,7 @@ export default function QualitativeAnalysisView() {
       qa.layerScope,
     ],
     queryFn: () => codeAnalysisApi.sourceFrequencies(pid, sourceFreqRequest),
-    enabled: !!pid && blindSettled && qa.tab === 'descriptives' && qa.chartType !== 'saturation'
+    enabled: !!pid && blindSettled && !nobodyMatches && qa.tab === 'descriptives' && qa.chartType !== 'saturation'
       && qa.selectedCodeIds.size > 0
       && (qa.selectedConversationIds.size > 0 || qa.selectedTextColumnIds.size > 0 || qa.selectedDocumentIds.size > 0 || qa.selectedObservationIds.size > 0),
   })
@@ -546,6 +598,47 @@ export default function QualitativeAnalysisView() {
   })
 
   const demoFilters = demoFiltersData?.filters ?? []
+  // #1545 — what every file written under the filter says it is: the panel's own description of
+  // the chosen values (none for a list from a link or a saved analysis, D124) and the count. The
+  // client's files put it on their scope line (`frequencyFileScope`); the server's take the label
+  // as `participant_filter_label` and count the ids themselves.
+  const filterFileScope = useMemo(
+    () => participantFilterFileScope(participantFilter, demoFiltersData?.filters ?? [], qa.participantIds),
+    [participantFilter, demoFiltersData, qa.participantIds],
+  )
+  const participantFilterLabel = filterFileScope?.label ?? undefined
+
+  // #1537 D123 — chosen values still define the filter when the people they select change (a
+  // participant linked, the options refetched), so they are re-applied. An effect that writes
+  // writes only when something is invalid (url-state.md §1): here, when the list the values select
+  // now differs from the list they produced — compared with the CHOICE, never the URL, which
+  // renders a transition later. No values held, no write.
+  const { filterChoice, chooseFilterValues } = qa
+  useEffect(() => {
+    if (!filterChoice || filterChoice.projectId !== pid || !demoFiltersData) return
+    const resolved = resolveFilterValues(filterChoice.values, demoFiltersData.filters)
+    const ids = resolved.kind === 'ids' ? resolved.ids : []
+    const produced = filterChoice.producedIds
+    if (ids.length === produced.length && ids.every((id, i) => id === produced[i])) return
+    chooseFilterValues(filterChoice.values, demoFiltersData.filters, pid)
+  }, [demoFiltersData, filterChoice, chooseFilterValues, pid])
+
+  // #1538 D125 — the notice's words, and every door the state blocks. A blocked door is
+  // `aria-disabled`, described by the notice, and refuses its click (#754: the guard is the
+  // load-bearing half). Its handler is never reached, so none of them guards again (#941).
+  const nobodyNoticeId = useId()
+  const nobodyNotice = participantFilter.kind === 'nobody'
+    ? noParticipantMatchesNotice(describeFilterValues(participantFilter.values, demoFilters))
+    : null
+  const nobodyBlocked = nobodyNotice === null ? null : {
+    'aria-disabled': true as const,
+    'aria-describedby': nobodyNoticeId,
+    title: nobodyNotice,
+    onClick: (event: { preventDefault: () => void; stopPropagation: () => void }) => {
+      event.preventDefault()
+      event.stopPropagation()
+    },
+  }
 
   // Demographic comparison query
   const comparisonRequest: DemographicComparisonRequest | null = useMemo(() => {
@@ -553,14 +646,18 @@ export default function QualitativeAnalysisView() {
     return {
       group_by_subtype: qa.groupBy,
       code_ids: qa.selectedCodeIds.size > 0 ? Array.from(qa.selectedCodeIds) : undefined,
-      conversation_ids: qa.selectedConversationIds.size > 0 ? Array.from(qa.selectedConversationIds) : undefined,
-      text_column_ids: qa.selectedTextColumnIds.size > 0 ? Array.from(qa.selectedTextColumnIds) : undefined,
+      // #1297/#1298: the selection decides, through the one builder the CSV and the
+      // Canvas also use.
+      ...comparisonSources({
+        conversations: qa.selectedConversationIds, textColumns: qa.selectedTextColumnIds,
+        documents: qa.selectedDocumentIds, observations: qa.selectedObservationIds,
+      }),
       exclude_facilitator: qa.excludeFacilitator,
       participant_ids: qa.participantIds.length > 0 ? qa.participantIds : undefined,
       coder_ids: effectiveCoderInclude.length ? effectiveCoderInclude : null,
       layer_scope: qa.layerScope,
     }
-  }, [qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderInclude, qa.layerScope])
+  }, [qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderInclude, qa.layerScope])
 
   const { data: comparisonData, isLoading: comparisonLoading } = useQuery({
     queryKey: [
@@ -569,13 +666,15 @@ export default function QualitativeAnalysisView() {
       Array.from(qa.selectedCodeIds).sort().join(','),
       Array.from(qa.selectedConversationIds).sort().join(','),
       Array.from(qa.selectedTextColumnIds).sort().join(','),
+      Array.from(qa.selectedDocumentIds).sort().join(','),
+      Array.from(qa.selectedObservationIds).sort().join(','),
       qa.excludeFacilitator,
       qa.participantIds.join(','),
       effectiveCoderIncludeCsv ?? '',
       qa.layerScope,
     ],
     queryFn: () => codeAnalysisApi.demographicComparison(pid, comparisonRequest!),
-    enabled: !!pid && blindSettled && qa.tab === 'relationships' && qa.relView === 'comparisons' && !!comparisonRequest,
+    enabled: !!pid && blindSettled && !nobodyMatches && qa.tab === 'relationships' && qa.relView === 'comparisons' && !!comparisonRequest,
   })
 
   // Co-occurrence N (reported by QualCooccurrence via onDataLoad callback)
@@ -941,21 +1040,66 @@ export default function QualitativeAnalysisView() {
     // longer reaches into `qa` at all — it consumes the memoized config above.
   }, [ensureCollectionId, pendingMaterialConfig, addToMaterialsMutation, getMaterialType, generateAutoName, getSourceTab])
 
+  // #1528 D88: the Source Data CSV counts the selection exactly and honours *include
+  // interviewer turns* — #1297's two rules, through `sourceDataCsvParams`.
   const handleDescriptivesExport = useCallback(() => {
-    const params: Record<string, string> = {}
-    if (qa.selectedCodeIds.size > 0) params.code_ids = Array.from(qa.selectedCodeIds).join(',')
-    if (qa.selectedConversationIds.size > 0) params.conversation_ids = Array.from(qa.selectedConversationIds).join(',')
-    if (qa.selectedTextColumnIds.size > 0) params.text_column_ids = Array.from(qa.selectedTextColumnIds).join(',')
-    if (qa.selectedDocumentIds.size > 0) params.document_ids = Array.from(qa.selectedDocumentIds).join(',')
-    if (qa.selectedObservationIds.size > 0) params.observation_ids = Array.from(qa.selectedObservationIds).join(',')
-    if (qa.excludeFacilitator) params.exclude_facilitator = 'true'
-    if (qa.participantIds.length > 0) params.participant_ids = qa.participantIds.join(',')
-    // #499: carry the EFFECTIVE (blind-forced) coder/layer scope so the CSV
-    // matches the on-screen numbers.
-    if (effectiveCoderIncludeCsv) params.coder_ids = effectiveCoderIncludeCsv
-    if (qa.layerScope) params.layer_scope = qa.layerScope
-    exportApi.sourceFrequenciesCsv(pid, params)
-  }, [pid, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderIncludeCsv, qa.layerScope])
+    exportApi.sourceFrequenciesCsv(pid, sourceDataCsvParams(qa.selectedCodeIds, {
+      conversations: qa.selectedConversationIds, textColumns: qa.selectedTextColumnIds,
+      documents: qa.selectedDocumentIds, observations: qa.selectedObservationIds,
+    }, {
+      excludeFacilitator: qa.excludeFacilitator,
+      participantIds: qa.participantIds,
+      participantFilterLabel,
+      // #499: the EFFECTIVE (blind-forced) coder/layer scope, so the CSV matches the screen.
+      coderIdsCsv: effectiveCoderIncludeCsv,
+      layerScope: qa.layerScope,
+    }))
+  }, [pid, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, participantFilterLabel, effectiveCoderIncludeCsv, qa.layerScope])
+
+  // #1535 (D111–D114): the Segments CSV holds exactly the passages the page selected — its
+  // request and its door's state decided together by `codedSegmentsFileRequest`. It used to
+  // take `filterParams` (shaped for `/frequencies`, #749), so one selected document exported
+  // every coded passage in the project.
+  const segmentsFile = useMemo(() => codedSegmentsFileRequest(qa.selectedCodeIds, {
+    conversations: qa.selectedConversationIds, textColumns: qa.selectedTextColumnIds,
+    documents: qa.selectedDocumentIds, observations: qa.selectedObservationIds,
+  }, qa.source, {
+    excludeFacilitator: qa.excludeFacilitator,
+    participantIds: qa.participantIds,
+    // #499 / #1530 D98: the EFFECTIVE (blind-forced) coder scope, as the page counts it.
+    coderIdsCsv: effectiveCoderIncludeCsv,
+  }), [qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.source, qa.excludeFacilitator, qa.participantIds, effectiveCoderIncludeCsv])
+  const segmentsNoteId = useId()
+  const handleSegmentsExport = useCallback(() => {
+    // D114: `aria-disabled` says it; this refusal is what it does (#754 — the guard is the
+    // load-bearing half of an aria-disabled control).
+    if (!segmentsFile.passages) return
+    void exportApi.codedSegments(pid, segmentsFile.params)
+  }, [pid, segmentsFile])
+
+  // #1528 D87: the Frequencies CSV is the Descriptives summary table's rows — written in the
+  // browser from the table's own read, under the selection (nothing selected → every code and
+  // every source the sidebar's mode offers), in the table's Per Code / Per Category mode, with
+  // the EFFECTIVE coder scope (#499, blind-forced) and a line saying so.
+  const handleFrequenciesExport = useCallback(() => {
+    const categoryMode = qa.codeMode === 'categories'
+    const request = codeFrequenciesFileRequest(qa.selectedCodeIds, {
+      conversations: qa.selectedConversationIds, textColumns: qa.selectedTextColumnIds,
+      documents: qa.selectedDocumentIds, observations: qa.selectedObservationIds,
+    }, qa.source, {
+      exclude_facilitator: qa.excludeFacilitator,
+      participant_ids: qa.participantIds.length > 0 ? qa.participantIds : undefined,
+      aggregation: categoryMode ? 'category' : undefined,
+      coder_ids: effectiveCoderInclude.length ? effectiveCoderInclude : null,
+      layer_scope: qa.layerScope,
+    })
+    const coderNames = effectiveCoderInclude.map(id =>
+      coderMap.get(id)?.username ?? (id === user?.id ? user.username : `coder ${id}`))
+    void exportCodeFrequenciesCsv(pid, {
+      request, categoryMode, projectName: project?.name,
+      scope: frequencyFileScope(qa.layerScope, coderNames, filterFileScope),
+    })
+  }, [pid, project?.name, qa.codeMode, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.source, qa.excludeFacilitator, qa.participantIds, effectiveCoderInclude, qa.layerScope, coderMap, user, filterFileScope])
 
   const conversationSourceCount = useMemo(
     () => conversations.filter(c => qa.selectedConversationIds.size === 0 || qa.selectedConversationIds.has(c.id)).length,
@@ -964,14 +1108,17 @@ export default function QualitativeAnalysisView() {
 
   // N values for Chart N display
   const descriptivesN = sourceFreqData?.totals?.coded_segments ?? null
+  // #1323: N in the result's unit (participants by default), never the passages.
   const comparisonN = useMemo(() => {
     if (!comparisonData?.group_totals) return null
     return Object.values(comparisonData.group_totals)
-      .reduce((sum, g) => sum + g.total_segments, 0)
+      .reduce((sum, g) => sum + g.n, 0)
   }, [comparisonData])
 
-  const handleCooccurrenceDataLoad = useCallback((info: { totalSegments: number; totalComments: number }) => {
-    setCooccurrenceN(info.totalSegments + info.totalComments)
+  // #1527 D83: the N is the count the matrix was taken over. It was the conversation total
+  // plus the text total, which left every document passage and clip out.
+  const handleCooccurrenceDataLoad = useCallback((data: CooccurrenceMatrixResponse) => {
+    setCooccurrenceN(data.n_units)
   }, [])
 
   // #1337 — this page's readers (frequencies, the Content lists, the read-only source
@@ -1060,18 +1207,26 @@ export default function QualitativeAnalysisView() {
 
   const handleComparisonExport = useCallback(() => {
     if (!qa.groupBy) return
-    const params: Record<string, string> = { group_by_subtype: qa.groupBy }
+    const params: QualCsvParams = { group_by_subtype: qa.groupBy }
     if (qa.selectedCodeIds.size > 0) params.code_ids = Array.from(qa.selectedCodeIds).join(',')
-    if (qa.selectedConversationIds.size > 0) params.conversation_ids = Array.from(qa.selectedConversationIds).join(',')
-    if (qa.selectedTextColumnIds.size > 0) params.text_column_ids = Array.from(qa.selectedTextColumnIds).join(',')
-    if (qa.excludeFacilitator) params.exclude_facilitator = 'true'
-    if (qa.participantIds.length > 0) params.participant_ids = qa.participantIds.join(',')
+    Object.assign(params, comparisonSourceParams(comparisonSources({
+      conversations: qa.selectedConversationIds, textColumns: qa.selectedTextColumnIds,
+      documents: qa.selectedDocumentIds, observations: qa.selectedObservationIds,
+    })))
+    // Always sent: the endpoint's default is `true`, so omitting it when the
+    // researcher INCLUDED facilitator turns exported different numbers (#1323's review).
+    params.exclude_facilitator = String(qa.excludeFacilitator)
+    if (qa.participantIds.length > 0) {
+      params.participant_ids = qa.participantIds.join(',')
+      // #1545: the file names the chosen values on its scope line.
+      if (participantFilterLabel) params.participant_filter_label = participantFilterLabel
+    }
     // #499: carry the EFFECTIVE (blind-forced) coder/layer scope so the CSV
     // matches the on-screen numbers.
     if (effectiveCoderIncludeCsv) params.coder_ids = effectiveCoderIncludeCsv
     if (qa.layerScope) params.layer_scope = qa.layerScope
     exportApi.demographicComparisonCsv(pid, params)
-  }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderIncludeCsv, qa.layerScope])
+  }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderIncludeCsv, qa.layerScope, participantFilterLabel])
 
   // Content mode keyboard nav
   // qa.contentMode/qa.setContentMode are stable but compiler infers full qa object
@@ -1240,7 +1395,11 @@ export default function QualitativeAnalysisView() {
           Codebook
         </Button>
         {qa.tab !== 'quoteboard' && !selectionFreeTab && (
-          <Button variant="outline" size="sm" onClick={() => exportApi.codeFrequencies(pid, filterParams)} title="Export code frequencies as CSV">
+          <Button
+            variant="outline" size="sm" onClick={handleFrequenciesExport} title="Export code frequencies as CSV"
+            className={nobodyBlocked ? MODE_DISABLED_CLASS : undefined}
+            {...nobodyBlocked}
+          >
             <Download className="w-3 h-3 mr-1" /> Export CSV
           </Button>
         )}
@@ -1248,8 +1407,12 @@ export default function QualitativeAnalysisView() {
           <Button
             size="sm"
             onClick={handleAddToMaterials}
-            disabled={addToMaterialsMutation.isPending || !canAddToMaterials}
+            // #1538 D125: blocked by the filter — a saved analysis cannot carry "no one" (it
+            // would store no list, the value every unfiltered analysis stores).
+            disabled={!nobodyBlocked && (addToMaterialsMutation.isPending || !canAddToMaterials)}
             title={canAddToMaterials ? undefined : 'Select codes and a source first — there is nothing to draw yet'}
+            className={nobodyBlocked ? MODE_DISABLED_CLASS : undefined}
+            {...nobodyBlocked}
           >
             <SwatchBook className="w-3 h-3 mr-1" />
             Add to Materials
@@ -1551,10 +1714,13 @@ export default function QualitativeAnalysisView() {
               </button>
               {filtersOpen && (
                 <div className="p-2 overflow-visible">
+                  {/* #1537 D122 — controlled: the values live in the page, so collapsing
+                      this section (which unmounts the panel) keeps them. */}
                   <QualFilterBar
-                    projectId={pid}
-                    participantIds={qa.participantIds}
-                    onParticipantIdsChange={qa.setParticipantIds}
+                    options={demoFilters}
+                    state={participantFilter}
+                    onChooseValues={values => chooseFilterValues(values, demoFilters, pid)}
+                    onClear={qa.clearParticipantFilter}
                   />
                 </div>
               )}
@@ -1617,19 +1783,52 @@ export default function QualitativeAnalysisView() {
               </button>
               {exportsOpen && (
                 <div className="p-2 space-y-0.5">
-                  <button className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-mm-text-secondary hover:bg-mm-surface-hover rounded transition-colors" onClick={() => exportApi.codeFrequencies(pid, filterParams)}>
+                  {/* #1538 D125 — while the filter matches no one every file here waits: a
+                      file cannot say "no one" (it would hold the whole project). The spread
+                      comes LAST, so its refusal replaces each button's own click. */}
+                  <button
+                    className={`w-full flex items-center gap-2 px-2 py-1.5 text-xs text-mm-text-secondary hover:bg-mm-surface-hover rounded transition-colors ${nobodyBlocked ? MODE_DISABLED_CLASS : ''}`}
+                    onClick={handleFrequenciesExport}
+                    {...nobodyBlocked}
+                  >
                     <Download className="w-3 h-3 text-mm-text-faint" /> Frequencies CSV
                   </button>
-                  <button className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-mm-text-secondary hover:bg-mm-surface-hover rounded transition-colors" onClick={() => exportApi.codedSegments(pid, filterParams)}>
+                  {/* #1535 D114: no passage in the selection → aria-disabled with its reason
+                      (D103's shape); questions beside passages → one line saying they are left out. */}
+                  <button
+                    className={`w-full flex items-center gap-2 px-2 py-1.5 text-xs text-mm-text-secondary hover:bg-mm-surface-hover rounded transition-colors ${segmentsFile.passages && !nobodyBlocked ? '' : MODE_DISABLED_CLASS}`}
+                    aria-disabled={segmentsFile.passages ? undefined : true}
+                    aria-describedby={!segmentsFile.passages || segmentsFile.answersLeftOut ? segmentsNoteId : undefined}
+                    onClick={handleSegmentsExport}
+                    {...nobodyBlocked}
+                  >
                     <Download className="w-3 h-3 text-mm-text-faint" /> Segments CSV
                   </button>
-                  <button className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-mm-text-secondary hover:bg-mm-surface-hover rounded transition-colors" onClick={() => exportApi.codeCooccurrence(pid, filterParams)}>
+                  {(!segmentsFile.passages || segmentsFile.answersLeftOut) && (
+                    <p id={segmentsNoteId} className="px-2 pb-1 text-xs text-mm-text-muted min-w-0">
+                      {segmentsFile.passages ? SEGMENTS_FILE_ANSWERS_NOTE : SEGMENTS_FILE_NO_PASSAGE_REASON}
+                    </p>
+                  )}
+                  <button
+                    className={`w-full flex items-center gap-2 px-2 py-1.5 text-xs text-mm-text-secondary hover:bg-mm-surface-hover rounded transition-colors ${nobodyBlocked ? MODE_DISABLED_CLASS : ''}`}
+                    onClick={() => exportApi.codeCooccurrence(pid, { ...cooccurrenceParams, level: qa.cooccurrenceLevel }, participantFilterLabel)}
+                    {...nobodyBlocked}
+                  >
                     <Download className="w-3 h-3 text-mm-text-faint" /> Co-occurrence CSV
                   </button>
-                  <button className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-mm-text-secondary hover:bg-mm-surface-hover rounded transition-colors" onClick={handleDescriptivesExport}>
+                  <button
+                    className={`w-full flex items-center gap-2 px-2 py-1.5 text-xs text-mm-text-secondary hover:bg-mm-surface-hover rounded transition-colors ${nobodyBlocked ? MODE_DISABLED_CLASS : ''}`}
+                    onClick={handleDescriptivesExport}
+                    {...nobodyBlocked}
+                  >
                     <Download className="w-3 h-3 text-mm-text-faint" /> Source Data CSV
                   </button>
-                  <button className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-mm-text-secondary hover:bg-mm-surface-hover rounded transition-colors" onClick={handleComparisonExport} disabled={!qa.groupBy}>
+                  <button
+                    className={`w-full flex items-center gap-2 px-2 py-1.5 text-xs text-mm-text-secondary hover:bg-mm-surface-hover rounded transition-colors ${nobodyBlocked ? MODE_DISABLED_CLASS : ''}`}
+                    onClick={handleComparisonExport}
+                    disabled={!nobodyBlocked && !qa.groupBy}
+                    {...nobodyBlocked}
+                  >
                     <Download className="w-3 h-3 text-mm-text-faint" /> Comparison CSV
                   </button>
                 </div>
@@ -1657,7 +1856,15 @@ export default function QualitativeAnalysisView() {
               {/* #961 — "has been coded yet" is a claim about the count, so it
                   waits for the count to ANSWER. The landing is the active tab:
                   a Retry that succeeds unmounts its own focused button. */}
-              {freqLoad.status !== 'ready' ? (
+              {/* #1538 D125 — FIRST: while no one matches, the coding counts are not asked
+                  (their query is disabled, so its load would read "loading" forever —
+                  list-load-state.md §1), and nothing below can be drawn. */}
+              {nobodyNotice !== null ? (
+                <div className="text-center py-16 max-w-xl mx-auto">
+                  <p id={nobodyNoticeId} className="text-mm-text-muted">{nobodyNotice}</p>
+                  <p className="text-sm text-mm-text-faint mt-1">{NO_PARTICIPANT_MATCHES_HINT}</p>
+                </div>
+              ) : freqLoad.status !== 'ready' ? (
                 <LoadState
                   load={freqLoad}
                   loadingLabel="Counting coded segments and texts…"
@@ -1794,6 +2001,9 @@ export default function QualitativeAnalysisView() {
                           onCodeChange={handleCodeChange}
                           blind={blind && multiCoder && qa.layerScope !== 'consensus'}
                           onReveal={toggleReveal}
+                          // #1531 D102: the ACT, not the claim — while withholding, each
+                          // passage's chips follow the scope that chose the passages.
+                          chipsFollowCoderIds={withholding}
                         />
                       ) : (
                         <ContentBySource
@@ -1814,6 +2024,12 @@ export default function QualitativeAnalysisView() {
                           focusedCodeId={focusedCodeId}
                           onFocusCode={handleFocusCode}
                           onCodeChange={handleCodeChange}
+                          // #1531 D102: the act, as the By Code lists — its payloads name each
+                          // code's coder, so a client lens narrows the chips here. #1541: the
+                          // viewer's own (`bySourceLens`), never the roster hide set.
+                          coderLens={bySourceLens}
+                          blind={blind}
+                          onReveal={toggleReveal}
                         />
                       )}
                     </div>
@@ -1849,6 +2065,15 @@ export default function QualitativeAnalysisView() {
                       focusedCodeId={focusedCodeId}
                       onSendToCanvas={handleSendExcerptToCanvas}
                       onSendToNewCanvas={handleSendExcerptToNewCanvas}
+                      blind={blind}
+                      onReveal={toggleReveal}
+                      blindSettled={blindSettled}
+                      fileScope={frequencyFileScope(
+                        null,
+                        quoteFilterParams.coder_ids ? [user?.username ?? `coder ${self}`] : [],
+                        // #1545: the board's read takes the filter, so its file says it too.
+                        filterFileScope,
+                      )}
                     />
                   )}
 
@@ -1859,7 +2084,9 @@ export default function QualitativeAnalysisView() {
                       qa={qa}
                       codes={codes}
                       filterParams={filterParams}
+                      cooccurrenceParams={cooccurrenceParams}
                       demoFilters={demoFilters}
+                      participantFilterLabel={participantFilterLabel}
                       cooccurrenceN={cooccurrenceN}
                       comparisonData={comparisonData}
                       comparisonLoading={comparisonLoading}

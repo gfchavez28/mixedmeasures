@@ -1,5 +1,7 @@
 import type { ComparisonRow } from '@/lib/api'
 import { formatPValue, getSignificanceStars } from '@/lib/chart-data'
+import { pMethodShort } from '@/lib/p-method'
+import { untestedGroupsNote } from '@/lib/untested-groups'
 import AssumptionNote from './AssumptionNote'
 
 interface ComparisonTestStripProps {
@@ -51,6 +53,10 @@ export default function ComparisonTestStrip({ rows, sigLevels, nonparametric }: 
           : ''
 
         const labelStr = esWord ? ` (${esWord})` : ''
+        // #1326 STAT-12 (D58): the data chose this p's method.
+        const method = pMethodShort(t.p_method)
+        // #1329 (D51): a group shown in the chart and left out of this test.
+        const untested = untestedGroupsNote(row.untested_groups)
 
         // Post-hoc summary for significant ANOVA.
         //
@@ -86,11 +92,12 @@ export default function ComparisonTestStrip({ rows, sigLevels, nonparametric }: 
             </span>
             <span>{statLabel} = {t.statistic.toFixed(2)}</span>
             <span className={t.p < 0.05 ? 'text-emerald-600 dark:text-emerald-400 font-medium' : ''}>
-              {formatPValue(t.p)}{stars}
+              {formatPValue(t.p)}{stars}{method && <span className="font-sans text-mm-text-faint"> ({method})</span>}
             </span>
             <span>{esLabel} = {esValue}{ciStr}{labelStr}</span>
             {postHocNote && <span className="text-mm-text-faint">{postHocNote}</span>}
           </div>
+          {untested && <p className="px-2 text-[11px] text-mm-text-muted font-sans">{untested}</p>}
           {/* #525 — the panel offers "use the non-parametric test"; this is the
               answer to "do I need to?", beside the test it qualifies. */}
           <AssumptionNote row={row} />

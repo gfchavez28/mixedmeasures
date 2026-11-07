@@ -90,12 +90,31 @@ class TestGroupsInTheComparisonButNotInTheTest:
         assert r["excluded_groups"] == ["East"]
         assert r["undefined_reason"] is None
 
-    def test_a_SINGLETON_group_is_named_because_its_deviation_is_zero_by_construction(self):
-        # MEASURED: levene([1.0], [1,2,3,4], center="median") returns a
-        # confident-looking p = 0.219 resting entirely on that structural zero.
+    def test_a_SINGLETON_group_is_named_AND_left_out_of_the_test(self):
+        """#1329 (D51, 1.5.9) reversed #525b's keep-it: the panel's model leaves a
+        one-value group out of the F, Tukey and the Welch t, so Levene does too.
+
+        MEASURED under the old rule: levene([1.0], [1,2,3,4], center="median")
+        returned a confident p = 0.219 resting entirely on that structural zero.
+        Now the test runs over the OTHER groups — exactly scipy's Levene on them —
+        and the singleton is still named.
+        """
+        from scipy.stats import levene
+
+        a, b = [1, 2, 3, 4], [2, 4, 6, 9, 12]
+        r = variance_homogeneity_check([[7.0], a, b], names=["Solo", "A", "B"])
+        assert r["singleton_groups"] == ["Solo"]
+        expected = levene(a, b, center="median")
+        assert r["p"] == pytest.approx(round(float(expected.pvalue), 4), abs=1e-9)
+        with_it = levene([7.0], a, b, center="median")
+        assert round(float(with_it.pvalue), 4) != r["p"], (
+            "the fixture must tell the two models apart, or this test proves nothing"
+        )
+
+    def test_a_singleton_beside_ONE_other_group_leaves_nothing_to_test(self):
         r = variance_homogeneity_check([[1.0], [1, 2, 3, 4]], names=["Solo", "Rest"])
         assert r["singleton_groups"] == ["Solo"]
-        assert r["p"] is not None, "it still computes — naming is not refusing"
+        assert r["p"] is None and r["undefined_reason"] == INSUFFICIENT_N
 
     def test_the_two_cases_are_DISTINCT_not_one_bucket(self):
         # A fixture carrying only one of them cannot tell the arms apart, so a

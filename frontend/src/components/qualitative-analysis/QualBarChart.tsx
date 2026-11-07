@@ -18,7 +18,8 @@ import type { QualValueMode, QualDenominatorMode, QualSortOrder } from '@/lib/qu
 import type { DataLabelPosition } from '@/lib/chart-data'
 import { compareValueLabels } from '@/lib/chart-data'
 import type { ChartDataRow } from '@/lib/chart-types'
-import { shapeQualBarData, computeCellValue, QUAL_GROUP_COLORS } from './qual-chart-data'
+import { shapeQualBarData, computeCellValue, codedShareAxis, QUAL_GROUP_COLORS } from './qual-chart-data'
+import { UniversalChartNote } from './UniversalChartNote'
 import { ChartFigure } from '@/components/charts/ChartFigure'
 import { barClickRow, barRowLabel } from '@/components/charts/bar-row-label'
 
@@ -88,6 +89,12 @@ export default function QualBarChart({
   const chartTheme = useChartColors()
   const isPercent = valueMode !== 'count'
 
+  // #1529 D92 — the rows this mode can draw (both arms), and the universal rows it names instead.
+  const axis = useMemo(
+    () => codedShareAxis(data.codes, valueMode, denominatorMode),
+    [data.codes, valueMode, denominatorMode],
+  )
+
   // ── Grouped mode data ──
   const groupedResult = useMemo(() => {
     if (!groupBy || !data.group_by) return null
@@ -103,7 +110,7 @@ export default function QualBarChart({
     const groupNames = Array.from(groupNameSet).sort(compareValueLabels)
     if (groupNames.length === 0) return null
 
-    const chartData = data.codes.map(code => {
+    const chartData = axis.drawn.map(code => {
       const entry: ChartDataRow = {
         label: code.name.length > 28 ? code.name.slice(0, 25) + '\u2026' : code.name,
         _fullLabel: code.name,
@@ -136,7 +143,7 @@ export default function QualBarChart({
     })
 
     return { chartData, groupNames }
-  }, [data, groupBy, valueMode, denominatorMode, isPercent])
+  }, [data, axis, groupBy, valueMode, denominatorMode, isPercent])
 
   // ── Simple mode data ──
   const simpleChartData = useMemo(() => {
@@ -162,7 +169,12 @@ export default function QualBarChart({
   }, [chartData])
 
   if (chartData.length === 0) {
-    return <div className="text-center py-16 text-mm-text-muted">No data available.</div>
+    return (
+      <div className="text-center py-16 text-mm-text-muted">
+        No data available.
+        <UniversalChartNote leftOut={axis.leftOut} />
+      </div>
+    )
   }
 
   const groupCount = isGrouped ? groupedResult.groupNames.length : 1
@@ -325,6 +337,7 @@ export default function QualBarChart({
           )}
         </BarChart>
       </ResponsiveContainer>
+      <UniversalChartNote leftOut={axis.leftOut} />
     </ChartFigure>
   )
 }

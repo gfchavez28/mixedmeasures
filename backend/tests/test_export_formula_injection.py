@@ -383,11 +383,12 @@ def test_export_coded_segments_csv_defangs_user_strings(polluted_session):
 def test_export_code_cooccurrence_csv_defangs_code_names(polluted_session):
     from app.routers.export import export_code_cooccurrence_csv
     user = polluted_session.get(User, 1)
-    response = _run(export_code_cooccurrence_csv(
+    # `def` since #1527 D89 — called directly, not through `_run`.
+    response = export_code_cooccurrence_csv(
         project_id=1, code_ids=None, exclude_facilitator=False,
         conversation_ids=None, participant_ids=None,
         user=user, db=polluted_session,
-    ))
+    )
     text = _stream_to_text(response)
     _assert_no_raw_formula_prefix(text, label="code_cooccurrence_csv")
 

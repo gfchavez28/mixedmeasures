@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { codingApi } from '@/lib/api'
 import { invalidateAfterRating } from '@/lib/coding-cache'
-import type { RatingQueueCodeCount, RatingQueueEntry } from '@/lib/api/coding'
+import type { RatingQueueCodeCount, RatingQueueEntry, RatingQueueResponse } from '@/lib/api/coding'
 import { serverDetailMessage } from '@/lib/api/error-utils'
 import { describeMagnitude, isUnrated } from '@/lib/magnitude'
 import { commitRating, entryKey } from '@/lib/rating-commit'
@@ -120,6 +120,33 @@ export default function RatingSweep() {
   const current: RatingQueueEntry | undefined = entries[cursor]
 
   /**
+   * 🔴 **#1467 (D132) — the chip row reads the last ANSWERED queue, not the
+   * current key's.** Choosing a code changes the query key, and the new key has
+   * no answer yet; read from it, the row held only *All codes 0*, so the chip
+   * the coder had just pressed UNMOUNTED and keyboard focus fell to `<body>`
+   * for as long as the request took.
+   *
+   * ⚠️ **This is not `list-load-state.md` §1's "previous key as if current".**
+   * `per_code` is the payload's UNFILTERED quantity (#979) — every key's answer
+   * counts the same buckets — so the last answer is an answer to the question
+   * the chips ask. The unseen-rating tally is taken against that same answer's
+   * entries, so the chips read exactly what they read a moment ago. Only the
+   * chips read it: the walk, the header and *Loading the queue…* still wait for
+   * the new key. ⚠️ **Not `placeholderData` on the query** — that would hand the
+   * old filter's passages to the walk.
+   *
+   * With the chip still mounted, focus stays on it while the queue loads; the
+   * strip takes focus when the new walk's passage mounts (D133, `walkGeneration`).
+   *
+   * ⚠️ Held per PROJECT: another project's codes are never this one's chips.
+   */
+  const [heldAnswer, setHeldAnswer] = useState<{ projectId: number; answer: RatingQueueResponse } | null>(null)
+  if (data && (heldAnswer?.answer !== data || heldAnswer.projectId !== projectId)) {
+    setHeldAnswer({ projectId, answer: data })
+  }
+  const chipAnswer = data ?? (heldAnswer?.projectId === projectId ? heldAnswer.answer : undefined)
+
+  /**
    * Changing the filter restarts the walk — the old cursor addressed a
    * different list, and carrying it over lands on an unrelated passage.
    *
@@ -140,6 +167,18 @@ export default function RatingSweep() {
    * lint refuses).
    */
   const filterRef = useRef<number | null>(null)
+  /**
+   * 🔴 #1467 (D133) — after choosing a code, keyboard focus goes to the STRIP,
+   * every time. The strip takes focus when it mounts (`MagnitudeStrip`'s
+   * `autoFocus`), and the passage is keyed on its entry, so focus moved only
+   * when the new walk began on a DIFFERENT passage or after a loading window
+   * (which unmounts the passage). From a CACHED answer whose walk began on the
+   * same passage, nothing re-mounted: focus stayed on the chip, where digits and
+   * Escape do nothing (the 2026-10-29d `/ux-audit` finding). The passage's key
+   * now carries this count, which only a filter CHANGE advances — the chip
+   * already selected returns early above it, so it does not move focus.
+   */
+  const [walkGeneration, setWalkGeneration] = useState(0)
   const changeCodeFilter = useCallback((next: number | null) => {
     // The chip already selected changes nothing — it must not restart the walk
     // on a passage this pass has already rated.
@@ -153,6 +192,8 @@ export default function RatingSweep() {
     // answer, or waits for a stale one's re-read (D8).
     setWalk(null)
     setCursor(0)
+    // #1467 (D133) — a new walk re-mounts the passage, so the strip takes focus.
+    setWalkGeneration(g => g + 1)
   }, [])
 
   const advance = useCallback(() => {
@@ -263,13 +304,13 @@ export default function RatingSweep() {
    * this is also #979's rule kept by construction.
    */
   const unseenByCode = useMemo(() => {
-    const listed = new Set((data?.entries ?? []).map(entryKey))
+    const listed = new Set((chipAnswer?.entries ?? []).map(entryKey))
     const counts = new Map<number, number>()
     for (const [key, o] of Object.entries(outcomes)) {
       if (o && listed.has(key)) counts.set(o.codeId, (counts.get(o.codeId) ?? 0) + 1)
     }
     return counts
-  }, [data, outcomes])
+  }, [chipAnswer, outcomes])
   const unseen = [...unseenByCode.values()].reduce((a, b) => a + b, 0)
   const total = Math.max(0, (data?.total ?? 0) - unseen)
   // No walk yet = loading: the first answer, or a stale one being re-read (above).
@@ -281,13 +322,13 @@ export default function RatingSweep() {
   // same reason `total` is; a chip reading 2 beside a queue of 1 is the same
   // contradiction one level down.
   const perCode = useMemo(
-    () => (data?.per_code ?? [])
+    () => (chipAnswer?.per_code ?? [])
       .map(c => ({ ...c, outstanding: Math.max(0, c.outstanding - (unseenByCode.get(c.code_id) ?? 0)) }))
       // ⚠️ The SELECTED code keeps its chip at zero — it is what shows which
       // filter is active, and "0" here is a measured count rather than the
       // unanswered-list placeholder the count rule forbids.
       .filter(c => c.outstanding > 0 || c.code_id === codeFilter),
-    [data, unseenByCode, codeFilter],
+    [chipAnswer, unseenByCode, codeFilter],
   )
 
   /**
@@ -368,7 +409,9 @@ export default function RatingSweep() {
 
       {current && (
         <Passage
-          key={entryKey(current)}
+          // #1467 (D133): the walk's generation too, so a new walk re-mounts the
+          // strip — and focus goes to it — even on the same first passage.
+          key={`${walkGeneration}:${entryKey(current)}`}
           entry={current}
           recorded={outcomes[entryKey(current)]}
           position={cursor + 1}

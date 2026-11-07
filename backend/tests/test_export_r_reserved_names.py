@@ -188,7 +188,7 @@ emit("aov_score", summary(aov_function_score_by_if_)[[1]][["F value"]][1])
 emit("aov_next", summary(aov_next__by_if_)[[1]][["F value"]][1])
 emit("in_mean", {mean_line})
 emit("alpha", suppressWarnings(psych::alpha(function__items, check.keys = FALSE))$total$raw_alpha)
-emit("valid_n", length(function__valid))
+emit("valid_n", sum(function__valid_ok))
 emit("nlev_else", nlevels(data$else_))
 '''
 
@@ -201,7 +201,13 @@ emit("nlev_else", nlevels(data$else_))
     # Every bare-name site class was emitted with the suffixed name.
     for pattern in (r"^domains <- list\($", r"^  function_ = c\(", r"^  in_ = c\(",
                     r"group_by\(if_\) %>% count\(else_\)", r"filter\(!is\.na\(next_\)\)",
-                    r"~ data\$if_\)", r"^function__valid <- ", r"^function__items <- ",
+                    # The comparison's grouping column, inside its `.mm_testable`
+                    # frame since #1329 (D52) — it read `~ data$if_)` before.
+                    r"\.mm_testable\(\.mm_num\(data\$\w+, \"\w+\"\), data\$if_\)$",
+                    # The pooled proportion's objects, over the items frame since
+                    # #1330 (D55) — it was one flat `function__valid` vector.
+                    r"^function__valid_items <- ", r"^function__valid_ok <- ",
+                    r"^function__items <- ",
                     r'attr\(data\$next_, "label"\)'):
         assert re.search(pattern, script, re.M), pattern
 

@@ -6,10 +6,12 @@ import type { QualValueMode, QualDenominatorMode, QualOrientation, QualSortOrder
 import { getValueModeLabel } from './qual-chart-data'
 import {
   shapeQualHeatmapData,
+  codedShareAxis,
   formatCellValue,
   getHeatmapCellStyle,
   type QualHeatmapData,
 } from './qual-chart-data'
+import { UniversalChartNote } from './UniversalChartNote'
 
 interface QualHeatmapProps {
   data: SourceFrequenciesResponse
@@ -50,6 +52,12 @@ export default function QualHeatmap({
 
   const { rows, columnLabels, columnIds, maxValue } = heatmapData
 
+  // #1529 D92 — the universal rows a *Coded only* proportion leaves off, named under the chart.
+  const leftOut = useMemo(
+    () => codedShareAxis(data.codes, valueMode, denominatorMode).leftOut,
+    [data.codes, valueMode, denominatorMode],
+  )
+
   // Pre-compute code colors for row headers
   const codeColorMap = useMemo(() => {
     const map = new Map<number, string>()
@@ -89,6 +97,7 @@ export default function QualHeatmap({
     return (
       <div className="text-center py-16 text-mm-text-muted">
         No data available for the current selection.
+        <UniversalChartNote leftOut={leftOut} />
       </div>
     )
   }
@@ -211,6 +220,7 @@ export default function QualHeatmap({
           ))}
         </div>
       )}
+      <UniversalChartNote leftOut={leftOut} />
     </div>
   )
 }

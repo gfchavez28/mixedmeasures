@@ -179,6 +179,17 @@ describe('ReconciliationGrid', () => {
     expect(screen.getByText(/excluded from reliability/i)).toBeInTheDocument()
   })
 
+  it('#1333 / #1334 D16: says its count is not the Reliability tab’s Units — and, since unit 3, why', async () => {
+    renderGrid()
+    await waitFor(() => screen.getByRole('grid', { name: /reconciliation/i }))
+    const note = screen.getByText(/so its count is not the Reliability tab's Units/)
+    // D35 — a group is one row on both tabs now, so interviewer turns are the
+    // only difference left; the sentence must not still say each turn of a group.
+    expect(note).toHaveTextContent(/interviewer's turns/)
+    expect(note).toHaveTextContent(/a group of turns is one row/)
+    expect(note).not.toHaveTextContent(/each turn of a group/)
+  })
+
   it('makes ONLY the current coder cell editable (InlineCodeActions add button)', async () => {
     renderGrid(1) // Alice is the active coder
     await waitFor(() => screen.getByRole('grid', { name: /reconciliation/i }))
@@ -460,6 +471,119 @@ describe('#35 — ratings in the grid', () => {
     expect(screen.queryByTitle(/more than one step/)).toBeNull()
     expect(screen.queryByText(/^differ by \d/)).toBeNull()
     expect(screen.getByRole('gridcell', { name: 'Bob: Negative · differs from consensus' })).toBeInTheDocument()
+  })
+})
+
+/**
+ * #1334 unit 3 session B — a segment GROUP is ONE row (D35), acting through its
+ * first turn, and a coder's two ratings on one group are said (D37). The group's
+ * id (900) is not a turn's, and it is deliberately EQUAL to no segment id here,
+ * so a link or an action that used `unit_id` would address a turn that does not
+ * exist — the anchor (102) is the only right answer.
+ */
+describe('#1334 unit 3 — a group of turns is one row', () => {
+  const SCALE = { min: 0, max: 10, step: 1, anchors: [] }
+  const GROUP = {
+    unit_type: 'group', unit_id: 900, anchor_segment_id: 102, member_segment_ids: [102, 103, 104],
+    source_type: 'conversation', source_id: 5, source_label: 'Interview 1',
+    text: 'First turn.\nSecond turn.\nThird turn.',
+    by_coder: { '1': [10], '2': [10] }, engaged: [1, 2],
+    // Bob rated the code 0 on one turn and 7 on another: no rating on the group.
+    ratings_by_coder: { '1': { '10': 5 } },
+    group_rating_conflicts_by_coder: { '2': { '10': [0, 7] } },
+    consensus: [10],
+    consensus_context: {
+      '10': {
+        rule: 'unanimous', agree: 2, voters: 2,
+        magnitude: { rule: 'median', median: 5, n_rated: 1, spread: 0, step: 1, flag: false },
+      },
+    },
+    has_disagreement: false, has_rating_disagreement: false, has_merge_conflict: false,
+    has_group_rating_conflict: true,
+  }
+  const QUIET = {
+    unit_type: 'segment', unit_id: 101, anchor_segment_id: 101, member_segment_ids: [],
+    source_type: 'conversation', source_id: 5, source_label: 'Interview 1', text: 'Before the group.',
+    by_coder: { '1': [10], '2': [10] }, engaged: [1, 2],
+    consensus: [10], consensus_context: { '10': { rule: 'unanimous', agree: 2, voters: 2 } },
+    has_disagreement: false,
+  }
+  const PAYLOAD = {
+    available: true, reason: null, n_coders: 2,
+    coders: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }],
+    codes: [{ id: 10, name: 'Positive', color: null, scale: SCALE }],
+    units: [QUIET, GROUP],
+    total: 2, has_more: false,
+  }
+
+  async function renderGroup(payload: object = PAYLOAD) {
+    const { codeAnalysisApi } = await import('@/lib/api')
+    ;(codeAnalysisApi.reconciliation as ReturnType<typeof vi.fn>).mockResolvedValueOnce(payload)
+    renderGrid(1) // Alice is the active coder
+    await waitFor(() => screen.getByRole('grid', { name: /reconciliation/i }))
+  }
+
+  it('names the row as a group of N turns, on screen and in its name', async () => {
+    await renderGroup()
+    expect(screen.getByText('Group of 3 turns')).toBeInTheDocument()
+    expect(screen.getAllByRole('rowheader')[1]).toHaveAttribute(
+      'aria-label',
+      "Group of 3 turns · Interview 1: First turn. Second turn. Third turn. · needs review, a coder rated the group's turns differently",
+    )
+  })
+
+  it('a coder’s two ratings on one group are a review fact of their own words', async () => {
+    await renderGroup()
+    expect(screen.getByText('Turns rated differently')).toBeInTheDocument()
+    expect(screen.getByTitle(/rated a code differently on different turns of this group/)).toBeInTheDocument()
+    // Never the merge badge — its words would name a merged copy.
+    expect(screen.queryByText('Merge difference')).toBeNull()
+  })
+
+  it('says the two numbers in the coder’s cell, and gives the chip no rating', async () => {
+    await renderGroup()
+    const bob = screen.getByRole('gridcell', { name: 'Bob: Positive rated 0 and 7 on different turns of the group' })
+    expect(within(bob).getByText('Positive: rated 0 and 7 on different turns')).toBeInTheDocument()
+    // The consensus rating rests on Alice's alone, and says so.
+    expect(screen.getByRole('gridcell', { name: /Consensus: Positive \(unanimous, 2 of 2, rated 5 by 1\)/ }))
+      .toBeInTheDocument()
+  })
+
+  it('links to the group’s FIRST turn, never to the group’s own id', async () => {
+    await renderGroup()
+    const consensus = screen.getByRole('gridcell', { name: /Consensus: Positive \(unanimous, 2 of 2, rated 5 by 1\)/ })
+    fireEvent.click(within(consensus).getByRole('button'))
+    expect(navigateMock).toHaveBeenCalledWith('/projects/42/conversations/5?segment=102')
+  })
+
+  it('the own cell acts on the group through its first turn', async () => {
+    const { codingApi } = await import('@/lib/api')
+    const removeCode = codingApi.removeCode as ReturnType<typeof vi.fn>
+    removeCode.mockClear()
+    await renderGroup()
+    const alice = screen.getAllByRole('gridcell', { name: /^Alice: Positive/ })[1]
+    fireEvent.click(within(alice).getByLabelText('Remove code Positive'))
+    await waitFor(() => expect(removeCode).toHaveBeenCalledWith(102, 10))
+  })
+
+  it('j reaches a group that needs review for its split ratings alone', async () => {
+    await renderGroup()
+    const headers = screen.getAllByRole('rowheader')
+    expect(headers[0]).toHaveAttribute('tabindex', '0')
+    fireEvent.keyDown(headers[0], { key: 'j' })
+    expect(headers[1]).toHaveAttribute('tabindex', '0')
+  })
+
+  it('a group with no turn to name offers no action and no link', async () => {
+    await renderGroup({
+      ...PAYLOAD,
+      units: [{ ...GROUP, anchor_segment_id: null, member_segment_ids: [], text: '' }],
+      total: 1,
+    })
+    expect(screen.queryByRole('button', { name: 'Add code' })).toBeNull()
+    const consensus = screen.getByRole('gridcell', { name: /^Consensus:/ })
+    fireEvent.click(within(consensus).getByRole('button'))
+    expect(navigateMock).not.toHaveBeenCalled()
   })
 })
 

@@ -311,19 +311,18 @@ jobs:
           cache-dependency-path: electron/package-lock.json
 
       # Note: `electron/.npmrc` sets `ignore-scripts=true` (#562a, 2026-07-11), so
-      # npm ci runs NO lifecycle scripts here. That is a no-op today rather than a
-      # behaviour change — the tree declares zero install scripts (no
-      # `hasInstallScript` entry in electron/package-lock.json, and electron@42's
-      # own package.json declares no `scripts` at all; its binary is fetched by
-      # electron-builder/@electron/get at BUILD time, not by a postinstall). The
-      # headless unit tests are pure modules (backend-process / key-manager / zoom /
-      # fatal-error / updater) and never `require('electron')`, so no runtime
-      # download is needed for them.
+      # npm ci runs NO lifecycle scripts here (`ignore-scripts=true` in
+      # electron/.npmrc). One locked dev package declares an install script —
+      # `electron-winstaller`, pulled in by electron-builder 26 — and it is skipped,
+      # harmlessly, because only the `nsis` Windows target is built (electron/.npmrc
+      # says why). Electron's binary is fetched by electron-builder/@electron/get at
+      # BUILD time, not by a postinstall. The headless unit tests never
+      # `require('electron')`, so no runtime download is needed for them.
       - name: Install dependencies
         run: npm ci
 
       - name: Unit tests
-        run: npm test                     # = node --test (106 headless cases)
+        run: npm test                     # = node --test (every *.test.js under electron/)
 
       # Added 2026-08-09. electron/ had NO dependency audit in ci.yml at all, and it
       # is the job where that gap actually bit: #720 was a red PRODUCTION gate here

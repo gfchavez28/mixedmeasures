@@ -33,7 +33,7 @@ NAME = "non_consensus_filter"
 ALLOWED: dict[str, tuple[int, str]] = {
     "services/coding_layers.py": (2, "the definition — the human and machine arms are built on it"),
     "services/consensus.py": (2, "the voter gather — machines are kept out at the roster (reliability_coder_clause)"),
-    "services/irr.py": (1, "the rater gather — machines are kept out at the roster (reliability_coder_clause)"),
+    "services/irr.py": (2, "the rater gather and #1333's facilitator-turn disclosure — both keep machines out with reliability_coder_clause()"),
     "services/open_cut_reliability.py": (1, "the rater gather — machines are kept out at the roster"),
     "services/reconciliation.py": (1, "the grid's gather — machines are kept out at the roster"),
     "services/machine_agreement.py": (1, "names its coder set explicitly; the machine is the point"),

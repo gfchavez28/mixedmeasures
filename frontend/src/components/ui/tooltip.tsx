@@ -5,6 +5,11 @@ import { cn } from "@/lib/utils"
 const TooltipProvider = TooltipPrimitive.Provider
 const Tooltip = TooltipPrimitive.Root
 const TooltipTrigger = TooltipPrimitive.Trigger
+// `TooltipContent` renders IN PLACE (no portal), which is right for most triggers. A
+// tooltip whose trigger sits inside text the app READS BACK from the DOM must be
+// portalled, or its words join that text while it is open (#1324:
+// `SegmentRow`'s quote highlights, read by `charOffsetInElement`).
+const TooltipPortal = TooltipPrimitive.Portal
 
 function TooltipContent({
   className,
@@ -25,4 +30,4 @@ function TooltipContent({
   )
 }
 
-export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider }
+export { Tooltip, TooltipTrigger, TooltipContent, TooltipPortal, TooltipProvider }

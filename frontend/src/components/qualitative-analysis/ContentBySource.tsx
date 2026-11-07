@@ -35,6 +35,25 @@ import { LoadState } from '@/components/LoadStatus'
 import { useListLoad } from '@/hooks/useListLoad'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { highlightText } from './highlight-text'
+import BlindScopeNotice from './BlindScopeNotice'
+import { distinctVisibleCodeIds, type CodeApplicationIdentity } from '@/lib/coding-progress'
+import type { CoderLens } from '@/lib/coder-color'
+
+/**
+ * #1531 D102 (1.5.9) — the codes a passage shows here. While blind mode withholds, only those
+ * its lens shows — the page passes the viewer's OWN, an allow-list (#1541; a coding with no
+ * coder id at all also shows, `isCoderVisible`'s rule); otherwise `asBefore`, the list exactly
+ * as it was. Every reader's chips AND its focus dimming go
+ * through it: a colleague's code must not light a passage up either. Measured before (the review
+ * kit, 2026-11-05c): blind Alice's *By Source* view drew *Bob theme* on T1 and T3, each with a
+ * "Remove code Bob theme" button. Unlike the *By Code* lists (D102's server flag), every payload
+ * here names each application's coder, so the client lens can narrow it.
+ */
+function shownCodeIds(
+  details: readonly CodeApplicationIdentity[], lens: CoderLens | null, asBefore: number[],
+): number[] {
+  return lens ? distinctVisibleCodeIds(details, lens) : asBefore
+}
 
 interface ContentBySourceProps {
   projectId: number
@@ -61,6 +80,17 @@ interface ContentBySourceProps {
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
+  /**
+   * #1531 D102 — blind mode's lens while it WITHHOLDS (the act — never keyed on the claim
+   * `blind`), else `null`: every coder's chips, as before. REQUIRED, so a new mount has to
+   * decide. #1541: pass the viewer's own (`onlyCoders([self])`), never `useBlindMode().blindLens`
+   * — that hide set names only the ACTIVE roster, so an archived colleague's chips showed.
+   */
+  coderLens: CoderLens | null
+  /** The claim (`useBlindMode().blind`): drives the one notice. */
+  blind: boolean
+  /** Reveal colleagues' work (confirmed + logged by `BlindModeToggle`). */
+  onReveal?: (surface?: string) => void
 }
 
 function parseSourceId(raw: string | null): { type: 'conversation' | 'comment_column' | 'document' | 'observation'; id: number } | null {
@@ -90,6 +120,9 @@ export default function ContentBySource({
   focusedCodeId,
   onFocusCode,
   onCodeChange,
+  coderLens,
+  blind,
+  onReveal,
 }: ContentBySourceProps) {
   const [search, setSearch] = useState('')
   const parsedSource = useMemo(() => parseSourceId(selectedSourceId), [selectedSourceId])
@@ -262,6 +295,12 @@ export default function ContentBySource({
         </div>
       </div>
 
+      {/* #517's rule: a blind-scoped surface says so. The chips are the viewer's own; the
+          readers' "N coded" counts are source counts, which include every coder (#454). */}
+      <BlindScopeNotice blind={blind} onReveal={onReveal}>
+        Blind mode is on — each passage shows only your own codes. The coded counts include every coder.
+      </BlindScopeNotice>
+
       {parsedSource.type === 'conversation' ? (
         <ConversationReader
           projectId={projectId}
@@ -276,6 +315,7 @@ export default function ContentBySource({
           focusedCodeId={focusedCodeId}
           onFocusCode={onFocusCode}
           onCodeChange={onCodeChange}
+          coderLens={coderLens}
         />
       ) : parsedSource.type === 'document' ? (
         <DocumentReader
@@ -290,6 +330,7 @@ export default function ContentBySource({
           focusedCodeId={focusedCodeId}
           onFocusCode={onFocusCode}
           onCodeChange={onCodeChange}
+          coderLens={coderLens}
         />
       ) : parsedSource.type === 'observation' ? (
         <ObservationReader
@@ -304,6 +345,7 @@ export default function ContentBySource({
           focusedCodeId={focusedCodeId}
           onFocusCode={onFocusCode}
           onCodeChange={onCodeChange}
+          coderLens={coderLens}
         />
       ) : (
         <CommentColumnReader
@@ -318,6 +360,7 @@ export default function ContentBySource({
           focusedCodeId={focusedCodeId}
           onFocusCode={onFocusCode}
           onCodeChange={onCodeChange}
+          coderLens={coderLens}
         />
       )}
     </div>
@@ -340,6 +383,7 @@ function ConversationReader({
   focusedCodeId,
   onFocusCode,
   onCodeChange,
+  coderLens,
 }: {
   projectId: number
   conversationId: number
@@ -353,6 +397,7 @@ function ConversationReader({
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
+  coderLens: CoderLens | null
 }) {
   const segmentsQuery = useQuery({
     queryKey: ['conversation-segments-readonly', projectId, conversationId],
@@ -406,7 +451,8 @@ function ConversationReader({
 
       <div className="border rounded-lg overflow-hidden divide-y divide-mm-border-subtle bg-mm-surface">
         {segments.map((seg, idx) => {
-          const isFocused = focusedCodeId == null || seg.applied_codes.includes(focusedCodeId)
+          const shown = shownCodeIds(seg.applied_code_details, coderLens, seg.applied_codes)
+          const isFocused = focusedCodeId == null || shown.includes(focusedCodeId)
           return (
           <div
             key={seg.id}
@@ -445,14 +491,14 @@ function ConversationReader({
               <p className={`text-sm ${seg.is_facilitator ? 'text-mm-text-muted' : 'text-mm-text'}`}>
                 {searchLower ? highlightText(seg.text, search ?? '') : seg.text}
               </p>
-              {(seg.applied_codes.length > 0 || onCodeChange) && (
+              {(shown.length > 0 || onCodeChange) && (
                 <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
                   {onCodeChange ? (
                     <InlineCodeActions
                       projectId={projectId}
                       itemType="segment"
                       itemId={seg.id}
-                      appliedCodeIds={seg.applied_codes}
+                      appliedCodeIds={shown}
                       codeMap={codeMap}
                       allCodes={allCodes}
                       codesStatus={codesStatus}
@@ -462,7 +508,7 @@ function ConversationReader({
                   ) : (
                     // Distinct codes only (read-only, no attribution): the bare
                     // array is per-coder, so dedupe to avoid duplicate keys/chips (#441).
-                    [...new Set(seg.applied_codes)].map(cid => {
+                    [...new Set(shown)].map(cid => {
                       const code = codeMap.get(cid)
                       if (!code) return null
                       return (
@@ -508,6 +554,7 @@ function DocumentReader({
   focusedCodeId,
   onFocusCode,
   onCodeChange,
+  coderLens,
 }: {
   projectId: number
   documentId: number
@@ -520,6 +567,7 @@ function DocumentReader({
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
+  coderLens: CoderLens | null
 }) {
   const documentQuery = useQuery({
     queryKey: ['document-segments-readonly', projectId, documentId],
@@ -574,7 +622,10 @@ function DocumentReader({
       <div className="border rounded-lg overflow-hidden divide-y divide-mm-border-subtle bg-mm-surface">
         {segments.map((seg) => {
           // Distinct codes (per-coder rows collapse): one chip per code (#441).
-          const appliedCodeIds = [...new Set(seg.codes.map(c => c.id))]
+          const appliedCodeIds = shownCodeIds(
+            seg.codes.map(c => ({ code_id: c.id, user_id: c.user_id })), coderLens,
+            [...new Set(seg.codes.map(c => c.id))],
+          )
           const isFocused = focusedCodeId == null || appliedCodeIds.includes(focusedCodeId)
           return (
             <div
@@ -650,6 +701,7 @@ function CommentColumnReader({
   focusedCodeId,
   onFocusCode,
   onCodeChange,
+  coderLens,
 }: {
   projectId: number
   columnId: number
@@ -662,6 +714,7 @@ function CommentColumnReader({
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
+  coderLens: CoderLens | null
 }) {
   /**
    * #844 — the second caller of the texts endpoint, and it had TWO problems
@@ -747,7 +800,8 @@ function CommentColumnReader({
           </div>
         ) : (
           comments.map(comment => {
-            const isFocused = focusedCodeId == null || (comment.applied_code_ids ?? []).includes(focusedCodeId)
+            const shown = shownCodeIds(comment.applied_code_details ?? [], coderLens, comment.applied_code_ids ?? [])
+            const isFocused = focusedCodeId == null || shown.includes(focusedCodeId)
             return (
             <div
               key={comment.dataset_value_id}
@@ -769,14 +823,14 @@ function CommentColumnReader({
                   <p className="text-sm text-mm-text">
                     {searchLower && comment.value_text ? highlightText(comment.value_text, search ?? '') : (comment.value_text || '\u2013')}
                   </p>
-                  {(comment.applied_code_ids?.length > 0 || onCodeChange) && (
+                  {(shown.length > 0 || onCodeChange) && (
                     <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
                       {onCodeChange ? (
                         <InlineCodeActions
                           projectId={projectId}
                           itemType="text"
                           itemId={comment.dataset_value_id}
-                          appliedCodeIds={comment.applied_code_ids ?? []}
+                          appliedCodeIds={shown}
                           codeMap={codeMap}
                           allCodes={allCodes}
                           codesStatus={codesStatus}
@@ -784,7 +838,7 @@ function CommentColumnReader({
                           onFocusCode={onFocusCode ?? onCodeClick}
                         />
                       ) : (
-                        comment.applied_code_ids.map((cid: number) => {
+                        shown.map((cid: number) => {
                           const code = codeMap.get(cid)
                           if (!code) return null
                           return (
@@ -850,6 +904,7 @@ function ObservationReader({
   focusedCodeId,
   onFocusCode,
   onCodeChange,
+  coderLens,
 }: {
   projectId: number
   observationId: number
@@ -862,6 +917,7 @@ function ObservationReader({
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
+  coderLens: CoderLens | null
 }) {
   const clipsQuery = useQuery({
     queryKey: ['observation-segments', projectId, observationId],
@@ -907,7 +963,7 @@ function ObservationReader({
       <div className="border rounded-lg overflow-hidden divide-y divide-mm-border-subtle bg-mm-surface">
         {clips.map((clip) => {
           // Distinct codes (per-coder rows collapse): one chip per code (#441).
-          const appliedCodeIds = [...new Set(clip.applied_codes)]
+          const appliedCodeIds = shownCodeIds(clip.applied_code_details, coderLens, [...new Set(clip.applied_codes)])
           const isFocused = focusedCodeId == null || appliedCodeIds.includes(focusedCodeId)
           const timecode = clip.start_time === clip.end_time
             ? formatTimecode(clip.start_time)

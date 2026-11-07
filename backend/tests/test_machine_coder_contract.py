@@ -107,7 +107,9 @@ class TestTheAgreementCopy:
         """One coefficient per (person × machine × code) — the grain the claim is
         about. A pooled number would be read as "our agreement"."""
         assert set(MachineAgreementResponse.model_fields) == {
-            "available", "unavailable_reason", "pairs",
+            # `unit_basis` (#1333 / #1334) says what a unit is; it is not a figure.
+            # `verdict_min_units` (#1505, D43) is a reporting threshold; nor is it.
+            "available", "unavailable_reason", "pairs", "unit_basis", "verdict_min_units",
         }
         pair = set(MachinePairAgreementResponse.model_fields)
         assert not {f for f in pair if "overall" in f or f in {"alpha", "kappa"}}

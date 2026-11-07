@@ -23,6 +23,7 @@ import TimedAnalytics, {
 import type { TimedLens } from '@/lib/timed-analytics'
 import type { ListLoad } from '@/lib/list-status'
 import type { QualValueMode, QualDenominatorMode } from '@/lib/qual-analysis-types'
+import { filterNotAppliedNote } from '@/lib/participant-filter'
 
 function getMetricDescription(
   valueMode: QualValueMode,
@@ -159,6 +160,7 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
     projectId, timedObservations, observationsLoad, timedCodes, timedCategories,
     timedLens, multiCoder, coderMap,
   } = props
+  const notApplied = filterNotAppliedNote(qa.chartType, qa.participantIds.length > 0)
 
   return (
     <div className="space-y-3">
@@ -293,6 +295,13 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
         ) : null}
         </ChartExportWrapper>
         </div>
+        {/* #1536 (D120): the two charts the participant filter does not reach say so — outside
+            the export wrapper, because the figure itself is true of every source. */}
+        {notApplied && (
+          <p className="text-xs text-mm-text-muted px-1 mt-2" data-testid="filter-not-applied">
+            {notApplied}
+          </p>
+        )}
       </div>
       </>
       )}

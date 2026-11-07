@@ -350,6 +350,7 @@ export default function ProjectLayout() {
         open={isExportOpen}
         onOpenChange={setIsExportOpen}
         projectId={projectId}
+        projectName={project?.name}
       />
 
       <KeyboardHelpDialog

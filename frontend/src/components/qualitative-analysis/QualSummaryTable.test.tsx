@@ -299,6 +299,20 @@ describe('sorting is operable without a mouse', () => {
     expect(countHeader).toHaveAttribute('aria-sort', 'ascending')
   })
 
+  it('#1465 D129 — only the sorted column states aria-sort, the info arm included, and a button is named without its arrow', () => {
+    renderTable(['conversation'])
+    const stated = () => screen.getAllByRole('columnheader').filter(th => th.hasAttribute('aria-sort'))
+    expect(stated()).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'Count' })).toBeInTheDocument() // never "Count ↓"
+
+    // A column with an info trigger beside its button (the hand-written arm).
+    const pctHeader = screen.getByRole('columnheader', { name: /% of Coded/ })
+    fireEvent.click(within(pctHeader).getByRole('button'))
+    expect(pctHeader).toHaveAttribute('aria-sort', 'descending')
+    expect(stated()).toEqual([pctHeader])
+    expect(within(pctHeader).getByRole('button')).toHaveAccessibleName('% of Coded')
+  })
+
   it('leaves the info tooltip outside the sort button, so reading it does not re-sort', () => {
     renderTable(['conversation'])
     const pctHeader = screen.getByRole('columnheader', { name: /% of Coded/ })

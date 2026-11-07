@@ -109,7 +109,9 @@ def test_export_emits_irr_csv_and_r_block(db_session):
 
     # The R block reads the CSV, pulls in `irr`, and runs the three calls.
     assert 'read_csv("IRR_Export_irr.csv"' in setup or "_irr.csv" in setup
-    assert "kripp.alpha(t(m)" in setup
+    # #1325 (D39) — irr through its missing-data branch, never the bare matrix.
+    assert "kripp.alpha(cbind(t(m), NA)" in setup
+    assert "kripp.alpha(t(m)" not in setup
     assert "kappa2(dc)" in setup and "agree(dc)" in setup
     assert '"irr"' in setup and "required_packages <- c(" in setup
     assert "Inter-rater reliability" in setup  # TOC + section header
@@ -117,56 +119,27 @@ def test_export_emits_irr_csv_and_r_block(db_session):
 
 @pytest.mark.skipif(not _HAS_IRR, reason="Rscript + irr package not available")
 def test_exported_irr_reproduces_tool_numbers(db_session):
-    """#402: run the emitted IRR R calls on the exported CSV; assert R ≈ the tool's
-    own compute_irr per-code κ/α/% at abs=1e-6 (the test_irr.py tolerance)."""
+    """#402: run the EMITTED IRR section on the exported CSV; assert R ≈ the tool's
+    own compute_irr per-code κ/α/% at abs=1e-6 (the test_irr.py tolerance).
+
+    ⚠️ It ran a hand-written restatement of the block until #1325 — the shape
+    #1039 (h) had already shown cannot see the block drift."""
     db = db_session
     user = _seed(db)
     expected = {c["code_id"]: c for c in compute_irr(db, PID)["per_code"]}
     assert expected, "fixture must produce per-code IRR"
 
-    raw = asyncio.run(_export_zip_bytes(db, user))
-    with tempfile.TemporaryDirectory() as d:
-        workdir = Path(d)
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            zf.extractall(workdir)
-            irr_csv = next(p for p in workdir.iterdir() if p.name.endswith("_irr.csv"))
-        # Run the SAME irr calls the emitted block uses, against the exported CSV.
-        runner = workdir / "runner.R"
-        runner.write_text(f"""
-suppressMessages(library(irr)); suppressMessages(library(readr))
-d <- read_csv("{irr_csv.name}", na = c("", "NA"), show_col_types = FALSE)
-coder_cols <- grep("^coder_", names(d), value = TRUE)
-for (cid in unique(d$code_id)) {{
-  m <- as.matrix(d[d$code_id == cid, coder_cols, drop = FALSE]); storage.mode(m) <- "numeric"
-  a <- kripp.alpha(t(m), method = "nominal")$value
-  k <- NA; ag <- NA
-  if (ncol(m) == 2) {{
-    dc <- m[stats::complete.cases(m), , drop = FALSE]
-    if (nrow(dc) > 0) {{ k <- kappa2(dc)$value; ag <- agree(dc)$value / 100 }}
-  }}
-  cat(sprintf("RES %s %.8f %s %s\\n", cid, a,
-              ifelse(is.na(k), "NA", sprintf("%.8f", k)),
-              ifelse(is.na(ag), "NA", sprintf("%.8f", ag))))
-}}
-""", encoding="utf-8")
-        proc = subprocess.run([_RSCRIPT, runner.name], cwd=str(workdir),
-                              capture_output=True, text=True, timeout=120)
-        assert proc.returncode == 0, f"R failed:\n{proc.stderr}"
-
-    got = {}
-    for m in re.finditer(r"^RES (\d+) ([-\d.eE+]+) (NA|[-\d.eE+]+) (NA|[-\d.eE+]+)\s*$",
-                         proc.stdout, re.MULTILINE):
-        got[int(m.group(1))] = (float(m.group(2)),
-                                None if m.group(3) == "NA" else float(m.group(3)),
-                                None if m.group(4) == "NA" else float(m.group(4)))
-    assert set(got) == set(expected), f"R codes {set(got)} != tool codes {set(expected)}"
+    got = _emitted_results(db, user, IRR_SECTION, "IRR")
+    assert set(got) == {str(c) for c in expected}, f"R codes {set(got)} != tool codes {set(expected)}"
 
     for cid, exp in expected.items():
-        r_alpha, r_kappa, r_agree = got[cid]
-        assert r_alpha == pytest.approx(exp["krippendorff_alpha"], abs=1e-6)
+        fields = got[str(cid)]
+        assert fields["reason"] == "", "the app reports a coefficient, so the script does"
+        assert float(fields["alpha"]) == pytest.approx(exp["krippendorff_alpha"], abs=1e-6)
+        assert float(fields["irr_value"]) == pytest.approx(exp["krippendorff_alpha"], abs=1e-6)
         # 2-coder fixture → κ + % agreement also round-trip.
-        assert r_kappa == pytest.approx(exp["cohens_kappa"], abs=1e-6)
-        assert r_agree == pytest.approx(exp["percent_agreement"], abs=1e-6)
+        assert float(fields["kappa"]) == pytest.approx(exp["cohens_kappa"], abs=1e-6)
+        assert float(fields["agree"]) == pytest.approx(exp["percent_agreement"], abs=1e-6)
 
 
 # ── #35 — rating agreement (magnitude coding) ─────────────────────────────────
@@ -220,10 +193,10 @@ def test_export_emits_a_rating_csv_and_its_own_r_block(db_session):
     assert f"{RATED_CODE},District support,-1.0,1.0,0.0,-0.5" in body
 
     assert "_irr_magnitude.csv" in setup
-    assert 'kripp.alpha(t(m), method = "interval")' in setup
+    assert 'kripp.alpha(cbind(t(m), NA), method = "interval")' in _section(setup, MAG_SECTION)
     assert "Rating agreement (magnitude coding)" in setup  # TOC + section header
     # The categorical block still scores nominally, in its own loop.
-    assert 'kripp.alpha(t(m), method = "nominal")' in setup
+    assert 'kripp.alpha(cbind(t(m), NA), method = "nominal")' in _section(setup, IRR_SECTION)
 
     # `_irr.csv` carries BOTH codes' presence/absence rows now (the rated code
     # is also an applied code) — but no rating value leaks into it.
@@ -253,31 +226,10 @@ def test_exported_rating_alpha_reproduces_tool_number(db_session):
     row = next(r for r in res["magnitude_per_code"] if r["code_id"] == RATED_CODE)
     assert row["krippendorff_alpha"] is not None, "fixture must produce a defined rating α"
 
-    raw = asyncio.run(_export_zip_bytes(db, user))
-    with tempfile.TemporaryDirectory() as d:
-        workdir = Path(d)
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            zf.extractall(workdir)
-            mag_csv = next(p for p in workdir.iterdir() if p.name.endswith("_irr_magnitude.csv"))
-        runner = workdir / "runner.R"
-        runner.write_text(f"""
-suppressMessages(library(irr)); suppressMessages(library(readr))
-d <- read_csv("{mag_csv.name}", na = c("", "NA"), show_col_types = FALSE)
-coder_cols <- grep("^coder_", names(d), value = TRUE)
-for (cid in unique(d$code_id)) {{
-  m <- as.matrix(d[d$code_id == cid, coder_cols, drop = FALSE]); storage.mode(m) <- "numeric"
-  a <- kripp.alpha(t(m), method = "interval")$value
-  cat(sprintf("RES %s %.8f\\n", cid, a))
-}}
-""", encoding="utf-8")
-        proc = subprocess.run([_RSCRIPT, runner.name], cwd=str(workdir),
-                              capture_output=True, text=True, timeout=120)
-        assert proc.returncode == 0, f"R failed:\n{proc.stderr}"
-
-    got = {int(m.group(1)): float(m.group(2))
-           for m in re.finditer(r"^RES (\d+) ([-\d.eE+]+)\s*$", proc.stdout, re.MULTILINE)}
-    assert set(got) == {RATED_CODE}
-    assert got[RATED_CODE] == pytest.approx(row["krippendorff_alpha"], abs=1e-6)
+    got = _emitted_results(db, user, MAG_SECTION, "IRR_MAGNITUDE")
+    assert set(got) == {str(RATED_CODE)}
+    assert got[str(RATED_CODE)]["reason"] == ""
+    assert float(got[str(RATED_CODE)]["alpha"]) == pytest.approx(row["krippendorff_alpha"], abs=1e-6)
 
 
 # ── Row 48 / #995 — code-set agreement (one variable, k values) ───────────────
@@ -466,41 +418,13 @@ def test_exported_code_set_alpha_reproduces_tool_numbers(db_session):
     user = _seed_with_code_set(db)
     row = next(r for r in compute_irr(db, PID)["set_agreement"] if r["set_id"] == SET_ID)
 
-    raw = asyncio.run(_export_zip_bytes(db, user))
-    with tempfile.TemporaryDirectory() as d:
-        workdir = Path(d)
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            zf.extractall(workdir)
-            set_csv = next(p for p in workdir.iterdir() if p.name.endswith("_irr_code_sets.csv"))
-        runner = workdir / "runner.R"
-        runner.write_text(f"""
-suppressMessages(library(irr)); suppressMessages(library(readr))
-d <- read_csv("{set_csv.name}", na = c("", "NA"), show_col_types = FALSE)
-coder_cols <- grep("^coder_", names(d), value = TRUE)
-for (sid in unique(d$set_id)) {{
-  m <- as.matrix(d[d$set_id == sid, coder_cols, drop = FALSE]); storage.mode(m) <- "numeric"
-  a <- kripp.alpha(t(m), method = "nominal")$value
-  k <- NA; ag <- NA
-  if (ncol(m) == 2) {{
-    dc <- m[stats::complete.cases(m), , drop = FALSE]
-    if (nrow(dc) > 0) {{ k <- kappa2(dc)$value; ag <- agree(dc)$value / 100 }}
-  }}
-  cat(sprintf("RES %s %.8f %s %s\\n", sid, a,
-              ifelse(is.na(k), "NA", sprintf("%.8f", k)),
-              ifelse(is.na(ag), "NA", sprintf("%.8f", ag))))
-}}
-""", encoding="utf-8")
-        proc = subprocess.run([_RSCRIPT, runner.name], cwd=str(workdir),
-                              capture_output=True, text=True, timeout=120)
-        assert proc.returncode == 0, f"R failed:\n{proc.stderr}"
-
-    m = re.search(r"^RES (\d+) ([-\d.eE+]+) (NA|[-\d.eE+]+) (NA|[-\d.eE+]+)\s*$",
-                  proc.stdout, re.MULTILINE)
-    assert m, f"R printed no set result:\n{proc.stdout}"
-    assert int(m.group(1)) == SET_ID
-    assert float(m.group(2)) == pytest.approx(row["krippendorff_alpha"], abs=1e-6)
-    assert float(m.group(3)) == pytest.approx(row["cohens_kappa"], abs=1e-6)
-    assert float(m.group(4)) == pytest.approx(row["percent_agreement"], abs=1e-6)
+    got = _emitted_results(db, user, SET_SECTION, "IRR_CODE_SET")
+    assert set(got) == {str(SET_ID)}, f"R printed no set result: {got}"
+    fields = got[str(SET_ID)]
+    assert fields["reason"] == ""
+    assert float(fields["alpha"]) == pytest.approx(row["krippendorff_alpha"], abs=1e-6)
+    assert float(fields["kappa"]) == pytest.approx(row["cohens_kappa"], abs=1e-6)
+    assert float(fields["agree"]) == pytest.approx(row["percent_agreement"], abs=1e-6)
 
 
 # ── #1039 (h) — the columns are the coders who WORKED the scope ───────────────
@@ -564,6 +488,27 @@ def _run_emitted_section(workdir: Path, setup: str, header: str) -> str:
     return proc.stdout
 
 
+MAG_SECTION = "# ---- Rating agreement (magnitude coding) ----"
+
+
+def _emitted_results(db, user, header: str, tag: str) -> dict[str, dict[str, str]]:
+    """Export, then run the EMITTED section under ``header``; ``{id: fields}`` for
+    every output line tagged ``tag`` (``IRR`` · ``IRR_MAGNITUDE`` · ``IRR_CODE_SET``)."""
+    raw = asyncio.run(_export_zip_bytes(db, user))
+    with tempfile.TemporaryDirectory() as d:
+        workdir = Path(d)
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            zf.extractall(workdir)
+            setup = zf.read(next(n for n in zf.namelist() if n.endswith(".R"))).decode("utf-8")
+        out = _run_emitted_section(workdir, setup, header)
+    results: dict[str, dict[str, str]] = {}
+    for line in out.splitlines():
+        if line.startswith(tag + "\t"):
+            fields = dict(f.split("=", 1) for f in line.split("\t")[1:])
+            results[fields.get("code") or fields["set"]] = fields
+    return results
+
+
 @pytest.mark.skipif(not _HAS_IRR, reason="Rscript + irr package not available")
 def test_the_EMITTED_script_prints_kappa_where_the_app_does(db_session):
     """With a bystander on the install the app still shows κ and % agreement (its
@@ -594,3 +539,412 @@ def test_the_EMITTED_script_prints_kappa_where_the_app_does(db_session):
     fields = dict(f.split("=", 1) for f in line.split("\t")[1:])
     assert float(fields["kappa"]) == pytest.approx(set_row["cohens_kappa"], abs=1e-6)
     assert float(fields["agree"]) == pytest.approx(set_row["percent_agreement"], abs=1e-6)
+
+
+# ── #1333 / #1334 — the units the script reproduces are the app's units ──────
+
+
+def _seed_with_prompts_and_a_group(db):
+    """`_seed`'s four participant turns, plus three interviewer prompts both
+    coders left blank (#1333) and a three-turn GROUP both coded as a group, the
+    apply fanned out to every member (#1334). Under the old reading those are
+    six more units; under the stated basis, one."""
+    from app.models.segment_group import SegmentGroup
+    from app.models.speaker import Speaker
+
+    user = _seed(db)
+    interviewer = Speaker(project_id=PID, name="Interviewer", is_facilitator=1)
+    db.add(interviewer)
+    db.add(SegmentGroup(id=PID, conversation_id=PID))
+    db.flush()
+    for i, sid in enumerate((95004, 95005, 95006)):
+        db.add(Segment(id=sid, conversation_id=PID, sequence_order=4 + i,
+                       text=f"prompt {i}", speaker_id=interviewer.id))
+    for i, sid in enumerate((95007, 95008, 95009)):
+        db.add(Segment(id=sid, conversation_id=PID, sequence_order=7 + i,
+                       text=f"grouped {i}", group_id=PID))
+    db.flush()
+    for sid in (95007, 95008, 95009):
+        db.add(CodeApplication(code_id=9590, user_id=1, segment_id=sid))
+        db.add(CodeApplication(code_id=9590, user_id=2, segment_id=sid))
+    db.flush()
+    return user
+
+
+def test_the_unit_fixture_could_have_disagreed():
+    """#707a — the old and the new unit sets give different α AND κ here."""
+    from app.services.irr import _cohens_kappa, _krippendorff_alpha
+
+    new = [[1, 1], [1, 0], [0, 1], [0, 0], [1, 1]]
+    old = [[1, 1], [1, 0], [0, 1], [0, 0]] + [[0, 0]] * 3 + [[1, 1]] * 3
+    assert _krippendorff_alpha(new) != pytest.approx(_krippendorff_alpha(old), abs=1e-3)
+    assert _cohens_kappa(new) != pytest.approx(_cohens_kappa(old), abs=1e-3)
+
+
+@pytest.mark.skipif(not _HAS_IRR, reason="Rscript + irr package not available")
+def test_the_EMITTED_script_reproduces_the_stated_units(db_session):
+    """Real R over the EMITTED block (#1039 h's rule): the script reproduces the
+    app's α/κ/% on the stated-basis units, and says which units they are — and,
+    D18, whose turns it left out as a facilitator's."""
+    from app.services.irr import _krippendorff_alpha
+
+    db = db_session
+    user = _seed_with_prompts_and_a_group(db)
+    res = compute_irr(db, PID)
+    row = next(c for c in res["per_code"] if c["code_id"] == 9590)
+    assert row["n_units"] == 5, "four participant turns and the group, once"
+    assert row["krippendorff_alpha"] == pytest.approx(
+        _krippendorff_alpha([[1, 1], [1, 0], [0, 1], [0, 0], [1, 1]])
+    )
+
+    raw = asyncio.run(_export_zip_bytes(db, user))
+    with tempfile.TemporaryDirectory() as d:
+        workdir = Path(d)
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            zf.extractall(workdir)
+            setup = zf.read(next(n for n in zf.namelist() if n.endswith(".R"))).decode("utf-8")
+        section = _section(setup, IRR_SECTION)
+        assert f"unit_basis = {res['unit_basis']}" in section
+        assert "Turns left out as a facilitator's: Interviewer." in section
+        out = _run_emitted_section(workdir, setup, IRR_SECTION)
+
+    line = next(ln for ln in out.splitlines() if ln.startswith("IRR\tcode=9590\t"))
+    fields = dict(f.split("=", 1) for f in line.split("\t")[1:])
+    assert float(fields["alpha"]) == pytest.approx(row["krippendorff_alpha"], abs=1e-6)
+    assert float(fields["kappa"]) == pytest.approx(row["cohens_kappa"], abs=1e-6)
+    assert float(fields["agree"]) == pytest.approx(row["percent_agreement"], abs=1e-6)
+
+
+# ── #1325 — complete data from three coders, and the app's reasons (D39–D41) ──
+#
+# irr's `kripp.alpha` weights every pair of values 1, not 1/(m−1), whenever the
+# matrix has NO missing cell (its `mc <- rep(1, …)` branch, irr 0.84.1 and 0.85):
+# exact for two coders, wrong for three or more. The script calls it through
+# `cbind(t(m), NA)`, which forces the missing-data branch (Krippendorff's own
+# computation). Where the app reports NO coefficient the script prints its
+# reason beside irr's raw value (D40). Record:
+# the internal design notes.
+
+ALL_OF_IT = 9592      # applied by every coder on every passage → no_variance
+ONE_PASSAGE = 9593    # rated by all three on ONE passage → insufficient_n (D42)
+UNUSED_SET = 9610     # a non-exhaustive set nobody chose from: every cell is
+UNUSED_MEMBERS = (9611, 9612)  # "none of these" → no_variance
+
+
+def _seed_three_coders(db, *, gap: bool = False):
+    """`_seed` widened to THREE coders who each coded every passage of the
+    conversation — so no cell of the per-code, rating or set matrix is blank,
+    which is the only shape irr's complete-data branch is taken on.
+
+    With ``gap`` a second conversation is coded by coders 1 and 2 only, so every
+    matrix has missing cells: there the workaround must change nothing.
+    """
+    from app.models.code_set import CodeSet
+
+    user = _seed(db)  # coders 1, 2; Theme A on S0–S3
+    db.add(User(id=3, username="Reviewer C", password_hash=None, coder_type="human"))
+    for i in range(4, 8):
+        db.add(Segment(id=95000 + i, conversation_id=PID, sequence_order=i, text=f"s{i}"))
+    db.add(Code(id=ALL_OF_IT, project_id=PID, name="Everywhere", numeric_id=4,
+                is_active=True, is_universal=False))
+    db.add(Code(id=RATED_CODE, project_id=PID, name="District support", numeric_id=3,
+                is_active=True, is_universal=False,
+                magnitude_min=1.0, magnitude_max=5.0, magnitude_step=1.0))
+    db.add(Code(id=ONE_PASSAGE, project_id=PID, name="Once", numeric_id=5,
+                is_active=True, is_universal=False,
+                magnitude_min=1.0, magnitude_max=5.0, magnitude_step=1.0))
+    db.add(CodeSet(id=SET_ID, project_id=PID, label="Teacher stance", exhaustive=False))
+    db.add(CodeSet(id=UNUSED_SET, project_id=PID, label="Unused", exhaustive=False))
+    db.flush()
+    for i, (cid, name) in enumerate(zip(SET_MEMBERS, ("Supportive", "Neutral", "Critical"))):
+        db.add(Code(id=cid, project_id=PID, name=name, numeric_id=10 + i,
+                    is_active=True, is_universal=False, code_set_id=SET_ID))
+    for i, cid in enumerate(UNUSED_MEMBERS):
+        db.add(Code(id=cid, project_id=PID, name=f"Unused {i}", numeric_id=20 + i,
+                    is_active=True, is_universal=False, code_set_id=UNUSED_SET))
+    db.flush()
+
+    segs = [95000 + i for i in range(8)]
+    # Theme A for coder 3 (and more for 1 and 2 on the new passages).
+    for uid, sids in ((3, (95000, 95002, 95004, 95007)), (1, (95005,)), (2, (95005, 95006))):
+        for sid in sids:
+            db.add(CodeApplication(code_id=9590, user_id=uid, segment_id=sid))
+    for uid in (1, 2, 3):
+        for sid in segs:
+            db.add(CodeApplication(code_id=ALL_OF_IT, user_id=uid, segment_id=sid))
+    ratings = {  # (coder 1, coder 2, coder 3) on the 1–5 scale
+        95000: (1, 1, 2), 95001: (2, 3, 2), 95002: (3, 3, 3), 95003: (4, 5, 4),
+        95004: (5, 5, 4), 95005: (2, 1, 1), 95006: (3, 4, 5), 95007: (1, 2, 1),
+    }
+    for sid, values in ratings.items():
+        for uid, value in zip((1, 2, 3), values):
+            db.add(CodeApplication(code_id=RATED_CODE, user_id=uid, segment_id=sid, magnitude=value))
+    for uid, value in zip((1, 2, 3), (2, 3, 4)):
+        db.add(CodeApplication(code_id=ONE_PASSAGE, user_id=uid, segment_id=95000, magnitude=value))
+    A, B, C = SET_MEMBERS
+    choices = {  # None = chose no member → "none of these", a VALUE on this set
+        95000: (A, A, A), 95001: (A, B, A), 95002: (B, B, B), 95003: (C, A, C),
+        95004: (None, None, B), 95005: (B, C, B), 95006: (C, C, C), 95007: (A, None, A),
+    }
+    for sid, picks in choices.items():
+        for uid, member in zip((1, 2, 3), picks):
+            if member is not None:
+                db.add(CodeApplication(code_id=member, user_id=uid, segment_id=sid))
+
+    if gap:
+        db.add(Conversation(id=PID + 1, project_id=PID, name="Second interview"))
+        db.flush()
+        for i in range(3):
+            db.add(Segment(id=95100 + i, conversation_id=PID + 1, sequence_order=i, text=f"t{i}"))
+        db.flush()
+        for uid, sid in ((1, 95100), (2, 95100), (1, 95101), (2, 95102)):
+            db.add(CodeApplication(code_id=9590, user_id=uid, segment_id=sid))
+        for uid, sid, value in ((1, 95100, 2), (2, 95100, 3), (1, 95101, 5), (2, 95101, 4)):
+            db.add(CodeApplication(code_id=RATED_CODE, user_id=uid, segment_id=sid, magnitude=value))
+        for uid, sid, member in ((1, 95100, A), (2, 95100, B), (1, 95101, C), (2, 95101, C)):
+            db.add(CodeApplication(code_id=member, user_id=uid, segment_id=sid))
+    db.flush()
+    return user
+
+
+def _old_call_values(db, user) -> dict[str, float]:
+    """kripp.alpha over each exported matrix the way the script called it BEFORE
+    #1325 — `kripp.alpha(t(m))` — for the discrimination assertion only (this is
+    a check on the FIXTURE, not a restatement of the block under test)."""
+    raw = asyncio.run(_export_zip_bytes(db, user))
+    with tempfile.TemporaryDirectory() as d:
+        workdir = Path(d)
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            zf.extractall(workdir)
+        files = {p.name: p for p in workdir.iterdir()}
+        per_code = next(n for n in files if n.endswith("_irr.csv"))
+        mag = next(n for n in files if n.endswith("_irr_magnitude.csv"))
+        sets = next(n for n in files if n.endswith("_irr_code_sets.csv"))
+        runner = workdir / "old.R"
+        runner.write_text(f"""
+suppressMessages(library(irr)); suppressMessages(library(readr))
+one <- function(file, key, method, tag) {{
+  d <- read_csv(file, na = "", show_col_types = FALSE)
+  cols <- grep("^coder_", names(d), value = TRUE)
+  for (k in unique(d[[key]])) {{
+    m <- as.matrix(d[d[[key]] == k, cols, drop = FALSE]); storage.mode(m) <- "numeric"
+    cat(sprintf("%s %.0f %.8f\\n", tag, k, kripp.alpha(t(m), method = method)$value))
+  }}
+}}
+one("{per_code}", "code_id", "nominal", "code")
+one("{mag}", "code_id", "interval", "rating")
+one("{sets}", "set_id", "nominal", "set")
+""", encoding="utf-8")
+        proc = subprocess.run([_RSCRIPT, runner.name], cwd=str(workdir),
+                              capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, f"R failed:\n{proc.stderr}"
+    out = {}
+    for line in proc.stdout.splitlines():
+        tag, key, value = line.split()
+        out[f"{tag}:{key}"] = float(value)
+    return out
+
+
+def _app_figures(db):
+    res = compute_irr(db, PID)
+    return (
+        {c["code_id"]: c for c in res["per_code"]},
+        {c["code_id"]: c for c in res["magnitude_per_code"]},
+        {c["set_id"]: c for c in res["set_agreement"]},
+    )
+
+
+def test_the_three_coder_fixture_is_complete(db_session):
+    """Always-on: the matrices the script reads really have no blank cell — the
+    shape irr's complete-data branch needs. (Not the one-passage rating, which is
+    blank wherever nobody rated it, and is there for its reason, not its α.)"""
+    import csv as _csv
+
+    user = _seed_three_coders(db_session)
+    raw = asyncio.run(_export_zip_bytes(db_session, user))
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        texts = {n: zf.read(n).decode("utf-8-sig") for n in zf.namelist() if n.endswith(".csv")}
+    for suffix, key, wanted in (("_irr.csv", "code_id", "9590"),
+                                ("_irr_magnitude.csv", "code_id", str(RATED_CODE)),
+                                ("_irr_code_sets.csv", "set_id", str(SET_ID))):
+        text = next(t for n, t in texts.items() if n.endswith(suffix))
+        rows = [r for r in _csv.DictReader(io.StringIO(text)) if r[key] == wanted]
+        assert len(rows) == 8, f"{suffix}: eight passages"
+        coder_cols = [c for c in rows[0] if c.startswith("coder_")]
+        assert coder_cols == ["coder_1", "coder_2", "coder_3"]
+        assert all(r[c] != "" for r in rows for c in coder_cols), f"{suffix} has a blank cell"
+
+
+@pytest.mark.skipif(not _HAS_IRR, reason="Rscript + irr package not available")
+def test_the_fixture_could_have_disagreed_with_the_old_call(db_session):
+    """#707a's DISCRIMINATION rule: on this fixture the pre-#1325 call prints a
+    DIFFERENT α from the app for the code, the rating and the set — so the
+    round trip below can tell the fixed call from the broken one."""
+    user = _seed_three_coders(db_session)
+    per_code, mag, sets = _app_figures(db_session)
+    old = _old_call_values(db_session, user)
+    for key, app_alpha in (("code:9590", per_code[9590]["krippendorff_alpha"]),
+                           (f"rating:{RATED_CODE}", mag[RATED_CODE]["krippendorff_alpha"]),
+                           (f"set:{SET_ID}", sets[SET_ID]["krippendorff_alpha"])):
+        assert app_alpha is not None
+        assert abs(old[key] - app_alpha) > 1e-3, (
+            f"{key}: the old call agrees with the app here ({old[key]} vs {app_alpha}), "
+            "so this fixture cannot show the workaround matters"
+        )
+
+
+@pytest.mark.skipif(not _HAS_IRR, reason="Rscript + irr package not available")
+@pytest.mark.parametrize("gap", [False, True], ids=["complete", "with-a-gap"])
+def test_the_EMITTED_script_reproduces_three_coders(db_session, gap):
+    """#1325: the emitted per-code, rating and set sections reproduce the app's α
+    on complete three-coder data — and, with a gap (missing cells), still do."""
+    user = _seed_three_coders(db_session, gap=gap)
+    per_code, mag, sets = _app_figures(db_session)
+
+    got = _emitted_results(db_session, user, IRR_SECTION, "IRR")
+    for cid in (9590, *SET_MEMBERS):
+        assert got[str(cid)]["reason"] == ""
+        assert float(got[str(cid)]["alpha"]) == pytest.approx(per_code.get(cid, {}).get(
+            "krippendorff_alpha") or _member_alpha(sets, cid), abs=1e-6)
+
+    got_m = _emitted_results(db_session, user, MAG_SECTION, "IRR_MAGNITUDE")
+    assert float(got_m[str(RATED_CODE)]["alpha"]) == pytest.approx(
+        mag[RATED_CODE]["krippendorff_alpha"], abs=1e-6)
+
+    got_s = _emitted_results(db_session, user, SET_SECTION, "IRR_CODE_SET")
+    assert float(got_s[str(SET_ID)]["alpha"]) == pytest.approx(
+        sets[SET_ID]["krippendorff_alpha"], abs=1e-6)
+
+
+def _member_alpha(sets, code_id):
+    """A set member's binary α lives in its set's breakdown, not the per-code table."""
+    for s in sets.values():
+        for m in s["members"]:
+            if m["code_id"] == code_id:
+                return m["krippendorff_alpha"]
+    raise KeyError(code_id)
+
+
+@pytest.mark.skipif(not _HAS_IRR, reason="Rscript + irr package not available")
+def test_the_EMITTED_script_says_why_where_the_app_reports_nothing(db_session):
+    """D40: a code everybody applied everywhere (`no_variance`) and a rating over
+    ONE passage (`insufficient_n`, D42) print alpha=NA with the APP's reason, and
+    irr's own value beside it — 1 for no variance, 0 for the one passage."""
+    user = _seed_three_coders(db_session)
+    per_code, mag, sets = _app_figures(db_session)
+    assert per_code[ALL_OF_IT]["undefined_reason"] == "no_variance"
+    assert mag[ONE_PASSAGE]["undefined_reason"] == "insufficient_n"
+    assert sets[UNUSED_SET]["undefined_reason"] == "no_variance"
+
+    unused = _emitted_results(db_session, user, SET_SECTION, "IRR_CODE_SET")[str(UNUSED_SET)]
+    assert unused["alpha"] == "NA" and unused["reason"] == "no_variance"
+    assert float(unused["irr_value"]) == pytest.approx(1.0)
+
+    everywhere = _emitted_results(db_session, user, IRR_SECTION, "IRR")[str(ALL_OF_IT)]
+    assert everywhere["alpha"] == "NA" and everywhere["kappa"] == "NA"
+    assert everywhere["reason"] == "no_variance"
+    assert float(everywhere["irr_value"]) == pytest.approx(1.0)
+
+    once = _emitted_results(db_session, user, MAG_SECTION, "IRR_MAGNITUDE")[str(ONE_PASSAGE)]
+    assert once["alpha"] == "NA"
+    assert once["reason"] == "insufficient_n"
+    assert float(once["irr_value"]) == pytest.approx(0.0)
+
+
+@pytest.mark.skipif(not _HAS_IRR, reason="Rscript + irr package not available")
+def test_two_coders_get_no_kappa_where_the_app_reports_none(db_session):
+    """D40 with TWO coders, where the script also prints κ: a code both applied on
+    every passage has no κ in the app (`no_variance`), so none in the script —
+    while % agreement, which the app keeps, is still printed."""
+    user = _seed(db_session)
+    db_session.add(Code(id=ALL_OF_IT, project_id=PID, name="Everywhere", numeric_id=4,
+                        is_active=True, is_universal=False))
+    db_session.flush()
+    for uid in (1, 2):
+        for sid in range(95000, 95004):
+            db_session.add(CodeApplication(code_id=ALL_OF_IT, user_id=uid, segment_id=sid))
+    db_session.flush()
+    app_row = next(c for c in compute_irr(db_session, PID)["per_code"] if c["code_id"] == ALL_OF_IT)
+    assert app_row["cohens_kappa"] is None and app_row["undefined_reason"] == "no_variance"
+
+    fields = _emitted_results(db_session, user, IRR_SECTION, "IRR")[str(ALL_OF_IT)]
+    assert fields["kappa"] == "NA"
+    assert fields["alpha"] == "NA" and fields["reason"] == "no_variance"
+    assert float(fields["agree"]) == pytest.approx(app_row["percent_agreement"], abs=1e-6)
+
+
+def _seed_one_passage(db):
+    """Two coders, ONE passage, disagreeing on a code and on a set's value — the
+    case where irr's `kappa2` returns a NUMBER (0) while the app reports no κ
+    (`insufficient_n`, #1505 D42). On a no-variance code `kappa2` is NaN, which the
+    script prints as NA anyway, so only this shape can show the guard matters (a
+    surviving mutant said so)."""
+    from app.models.code_set import CodeSet
+
+    db.add(Project(id=PID, name="IRR Export", user_id=1))
+    db.flush()
+    db.add(Dataset(id=DSID, project_id=PID, name="ds"))
+    db.flush()
+    db.add(DatasetColumn(id=9501, dataset_id=DSID, column_code="x", column_name="x",
+                         column_text="x", column_type="numeric", sequence_order=0, display_order=0))
+    db.flush()
+    for i in range(2):
+        db.add(DatasetRow(id=95100 + i, dataset_id=DSID))
+    db.flush()
+    db.add_all([
+        DatasetValue(id=95200, row_id=95100, column_id=9501, value_text="1", value_numeric=1),
+        DatasetValue(id=95201, row_id=95101, column_id=9501, value_text="2", value_numeric=2),
+    ])
+    db.add(User(id=2, username="Reviewer B", password_hash=None, coder_type="human"))
+    db.add(Conversation(id=PID, project_id=PID, name="Interview"))
+    db.add(CodeSet(id=SET_ID, project_id=PID, label="Teacher stance", exhaustive=True))
+    db.flush()
+    db.add(Segment(id=95000, conversation_id=PID, sequence_order=0, text="s0"))
+    db.add(Code(id=9590, project_id=PID, name="Theme A", numeric_id=2, is_active=True, is_universal=False))
+    for i, (cid, name) in enumerate(zip(SET_MEMBERS, ("Supportive", "Neutral", "Critical"))):
+        db.add(Code(id=cid, project_id=PID, name=name, numeric_id=10 + i,
+                    is_active=True, is_universal=False, code_set_id=SET_ID))
+    db.flush()
+    db.add(CodeApplication(code_id=9590, user_id=1, segment_id=95000))
+    db.add(CodeApplication(code_id=SET_MEMBERS[0], user_id=1, segment_id=95000))
+    db.add(CodeApplication(code_id=SET_MEMBERS[1], user_id=2, segment_id=95000))
+    db.flush()
+    return db.get(User, 1)
+
+
+@pytest.mark.skipif(not _HAS_IRR, reason="Rscript + irr package not available")
+def test_one_passage_prints_no_kappa_although_kappa2_would_give_one(db_session):
+    """D40 + D42: over one passage the app has no κ or α (`insufficient_n`) and the
+    script prints none — while `kappa2` there returns 0, so the guard is what
+    stops a number the app declines. irr_value is the identity (0)."""
+    user = _seed_one_passage(db_session)
+    res = compute_irr(db_session, PID)
+    code = next(c for c in res["per_code"] if c["code_id"] == 9590)
+    the_set = next(s for s in res["set_agreement"] if s["set_id"] == SET_ID)
+    assert code["undefined_reason"] == "insufficient_n" and code["cohens_kappa"] is None
+    assert the_set["undefined_reason"] == "insufficient_n" and the_set["cohens_kappa"] is None
+
+    fields = _emitted_results(db_session, user, IRR_SECTION, "IRR")["9590"]
+    assert (fields["alpha"], fields["kappa"], fields["reason"]) == ("NA", "NA", "insufficient_n")
+    assert float(fields["irr_value"]) == pytest.approx(0.0)
+    assert float(fields["agree"]) == pytest.approx(code["percent_agreement"], abs=1e-6)
+
+    set_fields = _emitted_results(db_session, user, SET_SECTION, "IRR_CODE_SET")[str(SET_ID)]
+    assert (set_fields["alpha"], set_fields["kappa"], set_fields["reason"]) == ("NA", "NA", "insufficient_n")
+
+
+def test_the_reason_vector_takes_only_ids_and_the_vocabulary():
+    """#1468's census rule for the one new interpolation: an int key and a known
+    reason, each refused otherwise; empty is R's `character(0)`."""
+    from app.routers.export_r import _r_reason_vector
+
+    assert _r_reason_vector({}) == "character(0)"
+    assert _r_reason_vector({12: "no_variance", 3: "insufficient_n"}) == (
+        'c("3" = "insufficient_n", "12" = "no_variance")'
+    )
+    with pytest.raises(ValueError):
+        _r_reason_vector({"12": "no_variance"})
+    with pytest.raises(ValueError):
+        _r_reason_vector({True: "no_variance"})
+    with pytest.raises(ValueError):
+        _r_reason_vector({12: 'x"); system("echo'})

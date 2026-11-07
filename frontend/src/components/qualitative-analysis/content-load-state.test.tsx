@@ -95,6 +95,7 @@ function renderByCode(over: Record<string, unknown> = {}) {
       hasCommentColumns
       hasDocuments
       hasObservations
+      chipsFollowCoderIds={false}
       {...over}
     />,
   )
@@ -114,6 +115,8 @@ function renderBySource(selectedSourceId: string, over: Record<string, unknown> 
       selectedSourceId={selectedSourceId}
       onSourceSelect={() => {}}
       source="all"
+      coderLens={null}
+      blind={false}
       {...over}
     />,
   )

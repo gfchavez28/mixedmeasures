@@ -33,9 +33,9 @@ export interface AssumptionCheck {
   /** Levene only. STATED because the mean-centred variant gives a different number. */
   center?: string | null
   undefined_reason: string | null
-  /** #525b — Levene only. Groups in the COMPARISON but not in the TEST: empty
-   *  ones are dropped, and a singleton contributes a structural zero deviation
-   *  that reads as perfect homogeneity. Named, not silently absorbed. */
+  /** #525b — Levene only. Groups in the COMPARISON but not in the TEST, named
+   *  rather than silently absorbed: empty ones, and (since #1329, D51) ones
+   *  holding a single value, which every test of the row leaves out. */
   excluded_groups?: string[]
   singleton_groups?: string[]
 }
@@ -104,6 +104,10 @@ export interface TestResult {
   post_hoc: { post_hoc_method: string; comparisons: { group_a: string; group_b: string; mean_diff: number; p: number; ci_lower: number; ci_upper: number }[] } | null
   effect_size_ci_lower: number | null
   effect_size_ci_upper: number | null
+  /** #1326 STAT-12 (D58) — how THIS p was computed when the data chose the
+   *  method (Mann–Whitney: exact or normal approximation). Read only through
+   *  `lib/p-method.ts`; `null` or absent for a test whose p has one method. */
+  p_method?: string | null
 }
 
 export interface ComparisonRow {
@@ -116,6 +120,10 @@ export interface ComparisonRow {
   /** #566 — why no test was run, when `test` is null. A blank row that cannot
    *  explain itself is indistinguishable from a broken tool. */
   test_omitted_reason: string | null
+  /** #1329 (D51) — groups this row shows that every test of it leaves out (too
+   *  few values for the test). Said through `lib/untested-groups.ts`, never
+   *  re-derived from the sizes. Absent from a server that predates it. */
+  untested_groups?: string[]
   /** #525 — Levene across this row's groups. A property of the comparison. */
   variance_homogeneity?: AssumptionCheck | null
   /** #525b — the QQ diagnostic, per ROW because normality is a property of the

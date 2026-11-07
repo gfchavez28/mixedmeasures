@@ -137,7 +137,7 @@ def _refuse_duplicate_code_name(
 
 
 @router.get("", response_model=CodeListResponse)
-async def list_codes(
+def list_codes(  # def, not async: #1463 D67 — test_endpoint_event_loop.py::MUST_BE_SYNC
     project_id: int,
     include_inactive: bool = Query(False),
     category_id: int | None = Query(None),
@@ -331,6 +331,13 @@ async def update_code(
     # Handle category change
     if "category_id" in update_data:
         new_cat_id = update_data["category_id"]
+        # #1529 D93 (1.5.9) — the bulk move's refusal (`bulk_move_codes` below), at the one-code
+        # door too: no screen offers it, and a universal code inside a category would count a
+        # passage marked only "Unclear" in a theme (the analysis now folds it out regardless —
+        # `code_analysis._EFFECTIVE_CAT_ID`). Clearing one (`null`) stays allowed, so a project
+        # that took this before can be put right.
+        if new_cat_id is not None and code.is_universal:
+            raise HTTPException(status_code=400, detail="Cannot move universal codes")
         if new_cat_id is not None:
             cat = db.query(CodeCategory).filter(
                 CodeCategory.id == new_cat_id,
@@ -733,7 +740,7 @@ category_router = APIRouter(prefix="/api/projects/{project_id}/categories", tags
 
 
 @category_router.get("")
-async def list_categories(
+def list_categories(  # def, not async: #1463 D67 — test_endpoint_event_loop.py::MUST_BE_SYNC
     project_id: int,
     include_codes: bool = Query(False),
     layer_scope: str | None = Query(None, pattern=LAYER_SCOPE_PATTERN, description="Coder layer (J2 Slab 7 + #989): 'human' (default), 'consensus' or 'machine' — applies to embedded code usage counts"),

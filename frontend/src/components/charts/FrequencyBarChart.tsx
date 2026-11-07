@@ -31,6 +31,7 @@ import {
 } from '@/lib/chart-data'
 import { useChartColors } from '@/lib/theme-context'
 import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
+import { pooledNLabel } from '@/lib/aggregate-basis'
 import type { LabelProps } from 'recharts'
 import type { BarDatum, ChartFormatting, VariableNMode, GroupedFrequencySection, SortOrder } from '@/lib/chart-data'
 import type { RechartsTooltipProps, RechartsPayloadEntry, ChartDataRow } from '@/lib/chart-types'
@@ -175,6 +176,14 @@ function SingleFrequencyChart({
   const n = metric.results[0]?.valid_n
   const showN = showVariableN === 'all' ||
     (showVariableN === 'differing' && n != null && n !== chartN)
+  // #1330 (D54): a variable group's pooled frequency counts ANSWERS, several per
+  // record — say so from the payload's `record_count` (absent before 1.5.9).
+  const recordCount = (metric.results[0]?.result_data as { record_count?: unknown } | undefined)
+    ?.record_count
+  const nText = n != null && metric.input_source_type === 'dataset_domain'
+    && typeof recordCount === 'number'
+    ? pooledNLabel(n, recordCount)
+    : n
   // #1412 — nobody answered: say so beside the name, in text (the PNG and a
   // reader both get it), rather than drawing a 0% per option. An undeclared
   // variable has no options at all then, and used to VANISH from the chart.
@@ -193,7 +202,7 @@ function SingleFrequencyChart({
         </span>
         {showN && n != null && (
           <span className="text-xs" style={{ color: colors.textMuted }}>
-            (n={n})
+            (n={nText})
           </span>
         )}
         {undefinedNote && (

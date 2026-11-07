@@ -139,7 +139,7 @@ describe('QualComparisonTable — a group with no segments (#1421)', () => {
     expect(cells[5]).toBe('—')              // HEAD: "0.0%"
     expect(cells[5]).not.toBe('0.0%')
     expect(cells[6]).toBe('—')
-    expect(screen.getByText(/No participant turns from this group in the conversations compared/))
+    expect(screen.getByText(/Nobody in this group has material in the sources compared/))
       .toBeInTheDocument()
     expect(screen.getByText('Survey only:')).toBeInTheDocument()
   })
@@ -154,7 +154,8 @@ describe('QualComparisonTable — a group with no segments (#1421)', () => {
       },
       { Interviewed: 4, Phone: 2, 'Survey only': 0 },
     )} />)
-    // [code, category, I n, I %, P n, P %, S n, S %, χ², p, sig, effect]
+    // [code, category, I n, I %, P n, P %, S n, S %, p, sig, effect] — no χ² column:
+    // no result here carries a statistic (#1323 D8).
     const cells = cellsOf('Cost')
     expect(cells[3]).toBe('25.0%')
     expect(cells[5]).toBe('0.0%')           // falsy-zero control: a measured 0 is not "—"
@@ -172,7 +173,7 @@ describe('QualComparisonTable — a group with no segments (#1421)', () => {
       },
       { Interviewed: 4, Phone: 2 },
     )} />)
-    expect(screen.queryByText(/No participant turns/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Nobody in this group has material/)).not.toBeInTheDocument()
     expect(cellsOf('Cost')[5]).toBe('0.0%')
   })
 })

@@ -40,6 +40,9 @@ import { Input } from '@/components/ui/input'
 import { formatTimecode, getCodeColor } from '@/lib/utils'
 import { excerptRestorePayload } from '@/lib/excerpt-shape'
 import { escapeCsvField, UTF8_BOM } from '@/lib/csv'
+import { quotedExcerptsQueryKey } from '@/lib/quoted-excerpts-key'
+import { mergeVisibleOrder } from '@/lib/quote-board-order'
+import BlindScopeNotice from '@/components/qualitative-analysis/BlindScopeNotice'
 import QuoteCard, { formatAttribution } from '@/components/qualitative-analysis/QuoteCard'
 import FocusPill from '@/components/qualitative-analysis/FocusPill'
 
@@ -73,6 +76,17 @@ interface QuoteBoardViewProps {
   focusedCodeId?: number | null
   onSendToCanvas?: (excerptId: number, canvasId: number, canvasName: string) => void
   onSendToNewCanvas?: (excerptId: number, canvasName: string) => void
+  /** #1531 D99 — blind mode's CLAIM (`useBlindMode().blind`): drives the one notice. The SCOPE
+   *  (the act) arrives in `filterParams.coder_ids`, built by the page from `withholding`. */
+  blind: boolean
+  /** The roster has answered (or the coder revealed): the read is server-scoped by the blind
+   *  state, so the fallback query waits for it as the page's does (#964). */
+  blindSettled: boolean
+  /** Reveal colleagues' work (confirmed + logged by `BlindModeToggle`). */
+  onReveal?: (surface?: string) => void
+  /** The CSV's first line while the read is coder-scoped (`frequencyFileScope`), else `null`.
+   *  From the page, which knows the scope and the coder's name. */
+  fileScope: string | null
 }
 
 interface GroupedSection {
@@ -258,7 +272,7 @@ function deduplicateExcerpts(sections: GroupedSection[]): QuotedExcerptItem[] {
   return result
 }
 
-function exportCsv(excerpts: QuotedExcerptItem[]) {
+function exportCsv(excerpts: QuotedExcerptItem[], scope: string | null) {
   // The time columns are LOAD-BEARING, not decoration (slab 5c): source_name
   // used to carry a per-clip ` · {timecode}` suffix, which was the only thing
   // distinguishing one clip's row from another's here. Dropping the suffix
@@ -298,7 +312,10 @@ function exportCsv(excerpts: QuotedExcerptItem[]) {
   })
   // CRLF + BOM per lib/csv.ts — the two deviations this writer carried since it
   // was written (Excel needs the BOM to read UTF-8 names correctly).
-  const csv = [headers.join(','), ...rows].join('\r\n')
+  // #1531 D97: while blind the *codes* and *categories* columns are the viewer's own, and the
+  // file says so on its first line — the analysis files' convention (`frequencyFileScope`).
+  // Nothing reads this file back, so a line above the header breaks no reader.
+  const csv = [...(scope ? [escapeCsvField(scope)] : []), headers.join(','), ...rows].join('\r\n')
   const blob = new Blob([UTF8_BOM + csv], { type: 'text/csv;charset=utf-8;' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -421,6 +438,10 @@ export default function QuoteBoardView({
   focusedCodeId,
   onSendToCanvas: onSendToCanvasProp,
   onSendToNewCanvas: onSendToNewCanvasProp,
+  blind,
+  blindSettled,
+  onReveal,
+  fileScope,
 }: QuoteBoardViewProps) {
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
@@ -465,12 +486,12 @@ export default function QuoteBoardView({
   const isDragEnabled = sortMode === 'custom' && !search.trim() && !hasActiveFilters
 
   // ── Data fetching ───────────────────────────────────────────────────
-  // Fallback query when quoteData is not provided from parent
-  const queryKey = ['excerpts-quoted', projectId, ...Object.values(filterParams).filter(Boolean)]
+  // Fallback query when quoteData is not provided from parent. Same key function as the page's
+  // (`quotedExcerptsQueryKey`), so the two still share one request; it names the coder scope.
   const quotesQuery = useQuery({
-    queryKey,
+    queryKey: quotedExcerptsQueryKey(projectId, filterParams),
     queryFn: () => excerptsApi.listQuoted(projectId, filterParams),
-    enabled: !!projectId && !quoteDataProp,
+    enabled: !!projectId && !quoteDataProp && blindSettled,
   })
 
   const data = quoteDataProp ?? quotesQuery.data
@@ -592,8 +613,12 @@ export default function QuoteBoardView({
     const reordered = arrayMove(targetSection.items, oldIndex, newIndex)
     const newOrderIds = reordered.map(e => e.excerpt_id)
 
-    // Save to server
-    const updatedOrders = { ...customOrders, [targetSection.key]: newOrderIds }
+    // Save to server. #1531 D99: the order is SHARED, so the visible reorder is merged into the
+    // saved one — a quote hidden now (the participant filter narrows the read) keeps its slot.
+    const updatedOrders = {
+      ...customOrders,
+      [targetSection.key]: mergeVisibleOrder(customOrders[targetSection.key] ?? [], newOrderIds),
+    }
     saveConfigMutation.mutate(updatedOrders)
 
     // Undo toast with pre-drag order
@@ -707,9 +732,9 @@ export default function QuoteBoardView({
   // CSV export (deduplicated)
   const handleExportCsv = useCallback(() => {
     const deduped = deduplicateExcerpts(sections)
-    exportCsv(deduped)
+    exportCsv(deduped, fileScope)
     toast(`Exported ${deduped.length} excerpts.`)
-  }, [sections])
+  }, [sections, fileScope])
 
   // Stable callback refs for memoized cards
   const handleUnquote = useCallback((id: number) => unquoteMutation.mutate(id), [unquoteMutation])
@@ -832,6 +857,13 @@ export default function QuoteBoardView({
               : `Showing ${filtered.length} of ${totalCount} quoted`}
         </span>
       </div>
+
+      {/* #1531 D99 — once, under the toolbar: the codes on each quote are the viewer's own.
+        * The quotes themselves all stay (an excerpt has no author). */}
+      <BlindScopeNotice blind={blind} onReveal={onReveal} surface="quote_board" className="mb-3">
+        Blind mode is on — each quote shows only your own codes, so a quote only a colleague
+        coded is grouped as Uncoded.
+      </BlindScopeNotice>
 
       {/* Search empty state */}
       {search && filtered.length === 0 && (

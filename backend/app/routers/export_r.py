@@ -39,18 +39,28 @@ from ..services.scale_scores import scale_score_metrics  # #1177
 from ..services.statistical_tests import _order_columns_by_domain_sequence  # #1244
 from ..services.grouping import load_grouping_values, order_value_labels
 from ..services.missing_values import column_missing_rules, is_missing
+from ..services.value_labels import answer_label_resolver  # #1332, D56
 from ..services.recode import (
     _parse_exclude_values,
     effective_reverse_offset,
     mapping_numeric_values,
 )
-from ..services.reliability_basis import ALPHA_METRIC_NOMINAL, MAGNITUDE_ALPHA_METRIC
+from ..services.reliability_basis import (
+    ALPHA_METRIC_NOMINAL,
+    DEFAULT_RELIABILITY_UNIT_BASIS,
+    MAGNITUDE_ALPHA_METRIC,
+    UNIT_BASIS_SENTENCE,
+    unit_basis_excludes_facilitator_turns,
+)
 from ..services.code_sets import (
     SET_BASIS_EXHAUSTIVE_WITH_MISSING,
     SET_BASIS_INCLUSIVE_WITH_NONE,
 )
+from ..services.undefined_stats import UNDEFINED_REASONS
 from ..auth import get_current_user
-from .helpers import _get_project_or_404
+from .helpers import (
+    _get_project_or_404, coder_scope_filename_suffix, coder_scope_names, parse_int_list,
+)
 from .export_helpers import _build_category_tree_and_chains, csv_safe
 
 router = APIRouter(tags=["export"])
@@ -110,6 +120,32 @@ def _r_number(value, default: float | None = None) -> str | None:
             continue
         return str(int(f)) if f.is_integer() and abs(f) < 1e15 else repr(f)
     return None
+
+
+def _r_reason_vector(reasons: dict[int, str]) -> str:
+    """The APP's reasons for reporting no coefficient, as an R named character
+    vector keyed by id (#1325, D40) — `c("12" = "no_variance")`.
+
+    🔴 The vocabulary is decided ONCE, by `irr.binary_undefined_reason` and its
+    two siblings, and the script READS that decision rather than re-deriving it
+    (#995's rule: a second implementation of the vocabulary is the drift). The
+    arithmetic is still R's — the script prints irr's own value beside the NA.
+
+    Two of #1468's safe shapes, each CHECKED rather than trusted: a key is an int
+    (a database id; never a bool), a value is a member of
+    `undefined_stats.UNDEFINED_REASONS`. Empty is `character(0)`, which R indexes
+    to NA, so a lookup needs no special case.
+    """
+    if not reasons:
+        return "character(0)"
+    parts = []
+    for key, reason in sorted(reasons.items()):
+        if isinstance(key, bool) or not isinstance(key, int):
+            raise ValueError(f"a reason vector key must be an int id, got {key!r}")
+        if reason not in UNDEFINED_REASONS:
+            raise ValueError(f"not an undefined-statistic reason: {reason!r}")
+        parts.append(f'"{key}" = "{reason}"')
+    return f"c({', '.join(parts)})"
 
 
 # The app's proportion operators (`metrics.VALID_OPERATORS`) in R. `=` is the
@@ -411,8 +447,13 @@ def _get_observed_values(db: Session, column: DatasetColumn) -> list[str]:
     the old alphabetical sort gave R factor levels the #406 ordering) and with
     missing values dropped (#495b: they export as missing, so they must not be
     factor levels either; #592: column-aware — the column's declared rules win
-    over the recognized-N/A defaults)."""
+    over the recognized-N/A defaults).
+
+    #1332 (D56): each answer as the CSV writes it — under the declared label it
+    matches without case (`answer_label_resolver`) — so a case variant is no
+    level of its own, exactly as it is no category of its own in the app."""
     rules = column_missing_rules(column)
+    as_label = answer_label_resolver(column)
     results = (
         db.query(DatasetValue.value_text)
         .filter(
@@ -423,7 +464,9 @@ def _get_observed_values(db: Session, column: DatasetColumn) -> list[str]:
         .distinct()
         .all()
     )
-    return order_value_labels([r[0] for r in results if not is_missing(r[0], rules)])
+    return order_value_labels(
+        {as_label(r[0]) for r in results if not is_missing(r[0], rules)}
+    )
 
 
 # Qualifying column types for R export
@@ -520,6 +563,27 @@ def _text_vector_r(r_name: str) -> str:
             " use.names = FALSE)"
         )
     return f"data${r_name}"
+
+
+def _exclusion_vector_r(exclude_values) -> str | None:
+    """An analysis's exclusion list as an R `c(...)` literal, or None if empty.
+
+    #1326 STAT-07 (D57): the emitted `.mm_is_excluded` compares an answer
+    trimmed and lower-cased against this list lower-cased — the app's rule
+    (`metrics._parse_exclude_values`: `str(v).lower()`; the answer:
+    `value_text.strip().lower()`). Every value is user text, so it goes through
+    `_escape_r_string` (#1468); a stored value that is not a string is the app's
+    `str(v)` of it. A list holding no usable value is no list.
+    """
+    if not isinstance(exclude_values, (list, tuple)):  # a list, never a set: the order is emitted
+        return None
+    vals = [
+        str(v) for v in exclude_values
+        if v is not None and not isinstance(v, (dict, list, tuple, set, bool))
+    ]
+    if not vals:
+        return None
+    return "c(" + ", ".join(f'"{_escape_r_string(v)}"' for v in vals) + ")"
 
 
 def _emit_domain_aggregate_r_lines(
@@ -620,10 +684,18 @@ def _build_r_script(
     irr_code_names: dict | None = None,
     irr_magnitude: dict | None = None,
     irr_code_sets: dict | None = None,
+    irr_unit_basis: str = DEFAULT_RELIABILITY_UNIT_BASIS,
+    irr_facilitator_speakers: list[str] | None = None,
     na_blanked_count: int = 0,
     identifier_cols: list[dict] | None = None,
+    irr_reasons: dict | None = None,
+    agreement_left_out_for: list[str] | None = None,
 ) -> str:
-    """Build the R script content. Returns the full script string with UTF-8 BOM."""
+    """Build the R script content. Returns the full script string with UTF-8 BOM.
+
+    ``agreement_left_out_for`` — the coders a blind export was scoped to (#1530
+    D97): the intercoder agreement sections are not emitted, and a comment stands
+    where they would, naming why and how to include them."""
     now_utc = datetime.now(timezone.utc)
     dataset_names = ", ".join(ds.name for ds, _ in qualifying_datasets)
 
@@ -750,6 +822,115 @@ def _build_r_script(
     r_lines.append("             pct = as.numeric(tab) / n * 100,")
     r_lines.append("             ci_lower = ci[, 1], ci_upper = ci[, 2],")
     r_lines.append("             row.names = NULL)")
+    r_lines.append("}")
+    # #1326 STAT-07 (1.5.9, D57): the app leaves out an answer whose text,
+    # trimmed and lower-cased, is in the analysis's exclusion list
+    # (`metrics.py`: `val_text.strip().lower() in excludes`). The script's
+    # descriptives never read that list, so a mean could print 3.25 over 12
+    # where the app showed 3.375 over 8; the charts filtered by EXACT label.
+    # A labelled factor is compared by its label — `as.character`.
+    r_lines.append("# Answers left out of an analysis, by Mixed Measures' rule: an answer whose")
+    r_lines.append("# text, trimmed and lower-cased, is in the analysis's exclusion list.")
+    r_lines.append(".mm_is_excluded <- function(x, excl) {")
+    r_lines.append("  tolower(trimws(as.character(x))) %in% tolower(excl)")
+    r_lines.append("}")
+    r_lines.append(".mm_drop_excluded <- function(x, excl, by = x) x[!.mm_is_excluded(by, excl)]")
+    # #1330 (1.5.9, D54/D55): a variable group's pooled answers come several to
+    # a record, and the app's interval over them counts each RECORD once — a
+    # Wilson interval on a Korn–Graubard effective n (`metrics.effective_n`).
+    # The pooled `prop.test` / `.mm_freq` printed the interval that treats every
+    # answer as a different person, which the app no longer shows. Base R only:
+    # the items frame's rows ARE the records, so each row's count and hits give
+    # the CR1 variance (`metrics.record_cluster_variance`).
+    r_lines.append("# Intervals over a variable group's POOLED answers count each record once:")
+    r_lines.append("# a Wilson interval on an effective sample size,")
+    r_lines.append("#   n* = p(1 - p) / v * (qnorm(.975) / qt(.975, G - 1))^2, capped at n,")
+    r_lines.append("# where v is the variance of the pooled proportion with the G records as")
+    r_lines.append("# clusters (CR1). `hit` and `ok` are record x item logical matrices: the")
+    r_lines.append("# answer meets the rule / the answer counts.")
+    r_lines.append(".mm_wilson <- function(p, n) {")
+    r_lines.append("  z <- qnorm(0.975)")
+    r_lines.append("  den <- 1 + z^2 / n")
+    r_lines.append("  ctr <- (p + z^2 / (2 * n)) / den")
+    r_lines.append("  hw <- z / den * sqrt(p * (1 - p) / n + z^2 / (4 * n^2))")
+    r_lines.append("  c(max(0, ctr - hw), min(1, ctr + hw)) * 100")
+    r_lines.append("}")
+    r_lines.append(".mm_record_prop <- function(hit, ok) {")
+    r_lines.append("  hit <- !is.na(hit) & hit & ok")
+    r_lines.append("  m <- rowSums(ok)")
+    r_lines.append("  k <- rowSums(hit)[m > 0]")
+    r_lines.append("  m <- m[m > 0]")
+    r_lines.append("  G <- length(m)")
+    r_lines.append("  n <- sum(m)")
+    r_lines.append("  p <- if (n > 0) sum(k) / n else NA_real_")
+    r_lines.append("  ci <- c(NA_real_, NA_real_)")
+    r_lines.append("  if (n >= 2 && G >= 2) {")
+    r_lines.append("    v <- G / (G - 1) * sum((k - p * m)^2) / n^2")
+    r_lines.append("    ne <- if (p <= 0 || p >= 1 || v <= 0) n else")
+    r_lines.append("      min(n, p * (1 - p) / v * (qnorm(0.975) / qt(0.975, G - 1))^2)")
+    r_lines.append("    ci <- .mm_wilson(p, ne)")
+    r_lines.append("  }")
+    r_lines.append("  data.frame(count = sum(k), n = n, records = G, pct = p * 100,")
+    r_lines.append("             ci_lower = ci[1], ci_upper = ci[2])")
+    r_lines.append("}")
+    r_lines.append("# The same, per answer category, over a group's items frame.")
+    r_lines.append(".mm_record_freq <- function(items, excl = NULL) {")
+    r_lines.append("  tx <- as.matrix(as.data.frame(lapply(items, as.character),")
+    r_lines.append("                                stringsAsFactors = FALSE))")
+    r_lines.append("  ok <- !is.na(tx) & !matrix(.mm_is_excluded(tx, excl), nrow = nrow(tx))")
+    r_lines.append("  lv <- names(table(tx[ok]))")
+    r_lines.append("  if (length(lv) == 0) return(data.frame(level = character(), count = integer()))")
+    r_lines.append("  out <- do.call(rbind, lapply(lv, function(l) .mm_record_prop(tx == l, ok)))")
+    r_lines.append("  data.frame(level = lv, out, row.names = NULL)")
+    r_lines.append("}")
+    # #1329 (1.5.9, D51/D52): the app leaves a group with too few values out
+    # of every test of its row (`services/testable_groups.py`), and the script
+    # applies the same rule at RUN time — it cannot know the group sizes at
+    # export without recomputing every comparison. No emitted test may halt the
+    # script: `t.test` RAISES on a one-person group (executed, R 4.3.3), and
+    # everything after a halting line never runs (#821a's class).
+    # #1540 (1.6.0): a SAVED t-test or ANOVA also asks the app's own group-count rule
+    # (`statistical_tests.compute_independent_t_test` / `compute_one_way_anova`) over
+    # the groups that hold a value. A saved test keeps its stored result when its data
+    # changes (it is marked stale), so the script meets a grouping that has since
+    # gained a group: `t.test` halted on three, and an ANOVA left with two printed an
+    # F the app refuses.
+    r_lines.append("# Which groups a test may use, by Mixed Measures' rule: a group with fewer")
+    r_lines.append("# values than the test needs (2 for a t-test or an ANOVA, 1 for a rank test)")
+    r_lines.append("# is left out and named. With fewer than two groups left the reason is printed")
+    r_lines.append("# and NULL returned, so the script carries on. `groups` is the app's group")
+    r_lines.append("# order, for the one test that takes \"the first two\". A saved test passes")
+    r_lines.append("# `have_groups` (the fewest and most groups holding a value that it accepts)")
+    r_lines.append("# and its name, and outside that range prints the app's refusal.")
+    r_lines.append(".mm_testable <- function(y, g, min_n = 2, groups = NULL, take = NULL,")
+    r_lines.append("                         have_groups = NULL, test_name = NULL) {")
+    r_lines.append("  ok <- !is.na(y) & !is.na(g)")
+    r_lines.append("  lv <- if (is.null(groups)) levels(factor(g[ok])) else groups")
+    r_lines.append("  y <- y[ok]")
+    r_lines.append("  g <- as.character(g[ok])")
+    r_lines.append("  n <- table(factor(g, levels = lv))")
+    r_lines.append("  if (!is.null(have_groups)) {")
+    r_lines.append("    have <- lv[n > 0]")
+    r_lines.append("    if (length(have) < have_groups[1] || length(have) > have_groups[2]) {")
+    r_lines.append("      want <- if (have_groups[1] == have_groups[2]) \"exactly\" else \"at least\"")
+    r_lines.append("      cat(\"Not computed:\", test_name, \"requires\", want, have_groups[1],")
+    r_lines.append("          \"groups, got\", length(have), paste0(\"(\", paste(have, collapse = \", \"), \"),\"),")
+    r_lines.append("          \"as in Mixed Measures.\\n\")")
+    r_lines.append("      return(invisible(NULL))")
+    r_lines.append("    }")
+    r_lines.append("  }")
+    r_lines.append("  keep <- lv[n >= min_n]")
+    r_lines.append("  out <- lv[n > 0 & n < min_n]")
+    r_lines.append("  if (length(out) > 0) cat(\"Left out of this test (fewer than\", min_n,")
+    r_lines.append("                           \"values):\", paste(out, collapse = \", \"), \"\\n\")")
+    r_lines.append("  if (!is.null(take)) keep <- head(keep, take)")
+    r_lines.append("  if (length(keep) < 2) {")
+    r_lines.append("    cat(\"Not computed: fewer than two groups have\", min_n,")
+    r_lines.append("        \"or more values, as in Mixed Measures.\\n\")")
+    r_lines.append("    return(invisible(NULL))")
+    r_lines.append("  }")
+    r_lines.append("  sel <- g %in% keep")
+    r_lines.append("  data.frame(y = y[sel], g = factor(g[sel], levels = keep))")
     r_lines.append("}")
     r_lines.append("")
 
@@ -1268,6 +1449,11 @@ def _build_r_script(
         if not target_r_names and not dom_ids:
             continue
 
+        # #1326 STAT-07 (D57): the answers this analysis left out, by the app's
+        # rule (`.mm_drop_excluded`). `None` when it excluded nothing, so an
+        # analysis without exclusions emits exactly what it always did.
+        excl_r = _exclusion_vector_r(pe_cfg.get("exclude_values"))
+
         try:
             metric_lines.append(f"# {_escape_r_string(pe_name)}")
             if skipped_ids:
@@ -1283,20 +1469,30 @@ def _build_r_script(
                     continue
                 emitted_analyses.add(dedup_key)
 
+                if excl_r and mt in ("frequency_distribution", "mean", "proportion"):
+                    metric_lines.append(
+                        f"# Leaves out the answers this analysis excluded: {excl_r}"
+                    )
+                # dplyr's filter for the grouped shapes; empty without exclusions.
+                excl_filter = (
+                    f"filter(!.mm_is_excluded({r_name}, {excl_r})) %>% " if excl_r else ""
+                )
+
                 if mt == "frequency_distribution":
                     if has_grouping and not is_domain_ref:
                         needs_dplyr = True
                         if grp_mode == "dataset":
                             metric_lines.append(
-                                f"data %>% group_by(dataset) %>% count({r_name})"
+                                f"data %>% {excl_filter}group_by(dataset) %>% count({r_name})"
                             )
                         elif grp2_r:
                             metric_lines.append(
-                                f"data %>% group_by({grp_r}, {grp2_r}) %>% count({r_name})"
+                                f"data %>% {excl_filter}group_by({grp_r}, {grp2_r})"
+                                f" %>% count({r_name})"
                             )
                         else:
                             metric_lines.append(
-                                f"data %>% group_by({grp_r}) %>% count({r_name})"
+                                f"data %>% {excl_filter}group_by({grp_r}) %>% count({r_name})"
                             )
                     else:
                         # queue #42: `.mm_freq` carries count, pct AND the
@@ -1305,9 +1501,24 @@ def _build_r_script(
                         # the raw view — dropping them would remove the shape R
                         # users expect for a quick eyeball.
                         freq_src = _text_vector_r(r_name)
+                        if excl_r:
+                            freq_src = f".mm_drop_excluded({freq_src}, {excl_r})"
                         metric_lines.append(f"table({freq_src})")
                         metric_lines.append(f"prop.table(table({freq_src}))")
-                        metric_lines.append(f".mm_freq({freq_src})")
+                        if is_domain_ref:
+                            # #1330 (D55): a variable group pools several answers
+                            # per record; the app's per-category interval counts
+                            # each record once, and so does this one.
+                            metric_lines.append(
+                                "# Per-category 95% CI counting each record once"
+                                " (a Wilson interval on an effective n):"
+                            )
+                            metric_lines.append(
+                                f".mm_record_freq(data[, {r_name}, drop = FALSE]"
+                                + (f", {excl_r})" if excl_r else ")")
+                            )
+                        else:
+                            metric_lines.append(f".mm_freq({freq_src})")
 
                 elif mt == "mean":
                     if has_grouping and not is_domain_ref:
@@ -1317,6 +1528,8 @@ def _build_r_script(
                             grp_expr = f"{grp_r}, {grp2_r}"
                         metric_lines.append(f"data %>%")
                         metric_lines.append(f"  filter(!is.na({r_name})) %>%")
+                        if excl_r:
+                            metric_lines.append(f"  filter(!.mm_is_excluded({r_name}, {excl_r})) %>%")
                         metric_lines.append(f"  group_by({grp_expr}) %>%")
                         metric_lines.append(f"  summarise(")
                         metric_lines.append(f'    mean = mean(.mm_num({r_name}, "{r_name}"), na.rm = TRUE),')
@@ -1339,6 +1552,13 @@ def _build_r_script(
                                 " the pooled (ungrouped) mean is emitted here."
                             )
                         mean_src = _numeric_vector_r(r_name)
+                        if excl_r:
+                            # Judged by the answer's TEXT (a factor's label),
+                            # then the numbers kept in the same order.
+                            mean_src = (
+                                f".mm_drop_excluded({mean_src}, {excl_r},"
+                                f" by = {_text_vector_r(r_name)})"
+                            )
                         metric_lines.append(f"mean({mean_src}, na.rm = TRUE)")
                         metric_lines.append(f"sd({mean_src}, na.rm = TRUE)")
 
@@ -1354,6 +1574,11 @@ def _build_r_script(
                         _numeric_vector_r(r_name) if p_mode == "numeric"
                         else _text_vector_r(r_name)
                     )
+                    if excl_r:
+                        prop_src = (
+                            f".mm_drop_excluded({prop_src}, {excl_r},"
+                            f" by = {_text_vector_r(r_name)})"
+                        )
                     valid_obj = (
                         f"{_make_r_identifier(r_name.split('$', 1)[1])}_valid"
                         if _is_domain_ref(r_name) else f"{r_name}_valid"
@@ -1374,6 +1599,45 @@ def _build_r_script(
                     else:
                         vals = prop_cfg.get("threshold_values", [])
                         vals_str = ", ".join(f'"{_escape_r_string(v)}"' for v in vals)
+                    if is_domain_ref:
+                        # #1330 (D55): a variable group pools several answers per
+                        # record, so the interval the app shows counts each
+                        # record once (`.mm_record_prop`) — the pooled
+                        # `prop.test` treated every answer as a different person.
+                        # Over the items frame, whose rows are the records.
+                        metric_lines.append(
+                            f"{valid_obj}_items <- data[, {r_name}, drop = FALSE]"
+                        )
+                        metric_lines.append(
+                            f"{valid_obj}_txt <- as.matrix(as.data.frame("
+                            f"lapply({valid_obj}_items, as.character), stringsAsFactors = FALSE))"
+                        )
+                        if p_mode == "numeric":
+                            metric_lines.append(
+                                f"{valid_obj}_num <- as.matrix(.mm_num({valid_obj}_items))"
+                            )
+                            metric_lines.append(f"{valid_obj}_ok <- !is.na({valid_obj}_num)")
+                            pool_hit = f"{valid_obj}_num {r_op} {thresh}"
+                        else:
+                            # The app's rule: the answer trimmed and lower-cased.
+                            metric_lines.append(f"{valid_obj}_ok <- !is.na({valid_obj}_txt)")
+                            pool_hit = (
+                                f"matrix(tolower(trimws({valid_obj}_txt)) %in% "
+                                f"tolower(c({vals_str})), nrow = nrow({valid_obj}_txt))"
+                            )
+                        if excl_r:
+                            metric_lines.append(
+                                f"{valid_obj}_ok <- {valid_obj}_ok & !matrix("
+                                f".mm_is_excluded({valid_obj}_txt, {excl_r}),"
+                                f" nrow = nrow({valid_obj}_txt))"
+                            )
+                        metric_lines.append(
+                            "# 95% CI counting each record once"
+                            " (a Wilson interval on an effective n):"
+                        )
+                        metric_lines.append(f".mm_record_prop({pool_hit}, {valid_obj}_ok)")
+                        metric_lines.append("")
+                        continue
                     metric_lines.append(
                         f"{valid_obj} <- {prop_src}"
                     )
@@ -1444,14 +1708,23 @@ def _build_r_script(
             (hm.input_source_type, hm.input_source_id), hm.name
         )
         metric_lines.append(f"# Metric: {_escape_r_string(hm_label)}")
+        # D57: the metric's own exclusions, by the same rule as the materials'.
+        hm_excl_r = _exclusion_vector_r(sorted(_parse_exclude_values(hm)))
+        if hm_excl_r and hm.metric_type in ("mean", "frequency_distribution"):
+            metric_lines.append(f"# Leaves out the answers this metric excluded: {hm_excl_r}")
         if hm.metric_type == "mean":
             # #821b: `hm_r` is `domains$X` for a dataset_domain input, so these
             # two lines used to read `data$domains$X` — NULL, warned about, NA.
             hm_src = _numeric_vector_r(hm_r)
+            if hm_excl_r:
+                hm_src = f".mm_drop_excluded({hm_src}, {hm_excl_r}, by = {_text_vector_r(hm_r)})"
             metric_lines.append(f"mean({hm_src}, na.rm = TRUE)")
             metric_lines.append(f"sd({hm_src}, na.rm = TRUE)")
         elif hm.metric_type == "frequency_distribution":
-            metric_lines.append(f"table({_text_vector_r(hm_r)})")
+            hm_freq = _text_vector_r(hm_r)
+            if hm_excl_r:
+                hm_freq = f".mm_drop_excluded({hm_freq}, {hm_excl_r})"
+            metric_lines.append(f"table({hm_freq})")
         elif (
             hm.metric_type == "domain_aggregate"
             and hm.input_source_type == "dataset_domain"
@@ -1561,9 +1834,18 @@ def _build_r_script(
                     f"{frame} <- {frame}[stats::complete.cases({frame}), ]"
                 )
                 if st.test_type == "cronbachs_alpha":
+                    # #1540: the app's rule (`compute_cronbachs_alpha`: at least 3
+                    # complete records). `psych::alpha` RAISES on 0 or 1 complete rows
+                    # (executed: "'x' is empty") — reachable when a stored result's data
+                    # has since lost its records, and it halted the script.
+                    test_lines.append(f"if (nrow({frame}) >= 3) {{")
+                    test_lines.append(f"  print(psych::alpha({frame}, check.keys = FALSE))")
+                    test_lines.append("} else {")
                     test_lines.append(
-                        f"psych::alpha({frame}, check.keys = FALSE)"
+                        f'  cat("Not computed: Cronbach\'s alpha requires at least 3 complete '
+                        f'records, got", nrow({frame}), "as in Mixed Measures.\\n")'
                     )
+                    test_lines.append("}")
                 else:  # split_half
                     test_lines.append("# Odd-even split, Spearman-Brown corrected")
                     test_lines.append(
@@ -1607,6 +1889,23 @@ def _build_r_script(
                     test_lines.append("")
                     continue
 
+                # #1329 (D52): the groups each test may use are decided at RUN
+                # time by the app's rule — a one-person group made `t.test`
+                # raise and halt the script, and the saved ANOVA now leaves such
+                # a group out rather than refusing (D51).
+                st_y = f'.mm_num(data${tm_r}, "{tm_r}")'
+                st_g = f"data${tm_grp_r}"
+                if st.stale:
+                    # #1540 D-b: the app shows this test's LAST result until it is
+                    # recomputed; the script computes it on the data as it is now.
+                    test_lines.append(
+                        "# Out of date in Mixed Measures: its data changed after it was "
+                        "computed, so the app shows"
+                    )
+                    test_lines.append(
+                        "# the last result until it is recomputed there. This computes it "
+                        "on the data as it is now."
+                    )
                 if st.test_type == "independent_t_test":
                     test_lines.append(
                         f"# Independent t-test: {_escape_r_string(tm_r)} by {_escape_r_string(tm_grp_r)}"
@@ -1615,17 +1914,26 @@ def _build_r_script(
                         "# Welch's t-test (same as scipy.stats.ttest_ind)"
                     )
                     test_lines.append(
-                        f't.test(.mm_num(data${tm_r}, "{tm_r}") ~ data${tm_grp_r}, var.equal = FALSE)'
+                        f"tt_frame <- .mm_testable({st_y}, {st_g}, have_groups = c(2, 2),"
+                        ' test_name = "Independent t-test")'
+                    )
+                    test_lines.append(
+                        "if (!is.null(tt_frame))"
+                        " print(t.test(y ~ g, data = tt_frame, var.equal = FALSE))"
                     )
                 else:  # one_way_anova
                     test_lines.append(
                         f"# One-way ANOVA: {_escape_r_string(tm_r)} by {_escape_r_string(tm_grp_r)}"
                     )
                     test_lines.append(
-                        f'aov_result <- aov(.mm_num(data${tm_r}, "{tm_r}") ~ data${tm_grp_r})'
+                        f"aov_frame <- .mm_testable({st_y}, {st_g}, have_groups = c(3, Inf),"
+                        ' test_name = "One-way ANOVA")'
                     )
-                    test_lines.append("summary(aov_result)")
-                    test_lines.append("TukeyHSD(aov_result)")
+                    test_lines.append("if (!is.null(aov_frame)) {")
+                    test_lines.append("  aov_result <- aov(y ~ g, data = aov_frame)")
+                    test_lines.append("  print(summary(aov_result))")
+                    test_lines.append("  print(TukeyHSD(aov_result))")
+                    test_lines.append("}")
                 test_lines.append("")
 
         except Exception as exc:
@@ -1834,62 +2142,84 @@ def _build_r_script(
                 continue
 
             for vr in var_r_names:
+                # #1329 (D51/D52): every test reads a frame of the groups it may
+                # use, decided at RUN time by `.mm_testable` — the app's rule
+                # (`testable_groups.split_testable`) over the same values. One
+                # frame per model, named for its test, so a rank test and an
+                # ANOVA of the same variable never share one.
+                wants_t = test_type == "t_test" or (test_type == "auto" and n_groups == 2)
+                kind = "rank" if nonparam else ("t" if wants_t else "aov")
+                frame = f"cmp_{kind}_{vr}_by_{grp_r}"
+                y_expr = f'.mm_num({data_ref}${vr}, "{vr}")'
+                g_expr = f"{data_ref}${grp_r}"
                 if nonparam:
                     rc_lines.append(
                         f"# Non-parametric test: {vr} by {grp_r}"
                     )
+                    # A rank test uses a one-value group; an EMPTY one would
+                    # still halt `wilcox.test` ("exactly 2 levels").
+                    rc_lines.append(f"{frame} <- .mm_testable({y_expr}, {g_expr}, min_n = 1)")
                     if n_groups == 2:
+                        # #1326 STAT-12 (D58): the app now takes R's rule, so
+                        # the default call IS the app's method.
                         rc_lines.append(
-                            "# Mann-Whitney U (wilcox.test defaults match the app's"
-                            " scipy.stats.mannwhitneyu)"
+                            "# Mann-Whitney U. R's default is Mixed Measures' rule: an exact p"
+                            " when both groups"
                         )
                         rc_lines.append(
-                            f'wilcox.test(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r})'
+                            "# have fewer than 50 values and no value is tied; otherwise the"
+                            " normal approximation"
+                        )
+                        rc_lines.append(
+                            "# with a continuity correction (the app's p says which)."
+                        )
+                        rc_lines.append(
+                            f"if (!is.null({frame})) print(wilcox.test(y ~ g, data = {frame}))"
                         )
                     else:
                         rc_lines.append(
-                            f'kruskal.test(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r})'
+                            f"if (!is.null({frame})) print(kruskal.test(y ~ g, data = {frame}))"
                         )
                 else:
-                    # Mirrors `comparisons.py::_resolve_test_type`: `auto` picks
-                    # by group count; an explicit choice is honoured.
-                    wants_t = test_type == "t_test" or (test_type == "auto" and n_groups == 2)
+                    # `wants_t` mirrors `comparisons.py::_resolve_test_type`:
+                    # `auto` picks by group count; an explicit choice is honoured.
                     rc_lines.append(f"# Parametric test: {vr} by {grp_r}")
                     if wants_t:
-                        t_ref = data_ref
                         if n_groups > 2:
                             # An explicitly-chosen t-test on 3+ groups: the app
-                            # runs Welch on the FIRST TWO groups in display order
-                            # (`_run_t_test` takes `group_names[0]`/`[1]`), so the
-                            # export reproduces that rather than emitting a call
-                            # that cannot run. `droplevels` is what makes it
-                            # legal — `t.test.formula` counts the factor's
-                            # LEVELS, not its observed values.
-                            pair = ", ".join(
-                                f'"{_escape_r_string(g)}"' for g in group_values[:2]
+                            # runs Welch on the FIRST TWO TESTABLE groups in its
+                            # display order (`_run_t_test` takes the first two
+                            # of what `split_testable` returns), so the frame
+                            # takes them in the app's order — never a call over
+                            # 3+ levels, which `t.test.formula` refuses.
+                            order = ", ".join(
+                                f'"{_escape_r_string(g)}"' for g in group_values
                             )
-                            t_ref = f"tt_data_{vr}"
                             rc_lines.append(
                                 f"# t-test explicitly selected over {n_groups} groups —"
-                                " the app compares the first two."
+                                " the app compares the first two that can be tested."
                             )
                             rc_lines.append(
-                                f"{t_ref} <- droplevels({data_ref}[{data_ref}${grp_r}"
-                                f" %in% c({pair}), ])"
+                                f"{frame} <- .mm_testable({y_expr}, {g_expr},"
+                                f" groups = c({order}), take = 2)"
                             )
+                        else:
+                            rc_lines.append(f"{frame} <- .mm_testable({y_expr}, {g_expr})")
                         rc_lines.append(
-                            f't.test(.mm_num({t_ref}${vr}, "{vr}") ~ {t_ref}${grp_r}, var.equal = FALSE)'
+                            f"if (!is.null({frame}))"
+                            f" print(t.test(y ~ g, data = {frame}, var.equal = FALSE))"
                         )
                     else:
                         # One object per model. A shared `aov_result` is fine
                         # read top-to-bottom but silently overwrites the previous
                         # model, so a reader cannot go back to an earlier one.
                         aov_obj = f"aov_{vr}_by_{grp_r}"
-                        rc_lines.append(
-                            f'{aov_obj} <- aov(.mm_num({data_ref}${vr}, "{vr}") ~ {data_ref}${grp_r})'
-                        )
-                        rc_lines.append(f"summary({aov_obj})")
-                        rc_lines.append(f"TukeyHSD({aov_obj})")
+                        rc_lines.append(f"{frame} <- .mm_testable({y_expr}, {g_expr})")
+                        rc_lines.append(f"if (!is.null({frame})) {{")
+                        rc_lines.append(f"  {aov_obj} <- aov(y ~ g, data = {frame})")
+                        rc_lines.append(f"  print(summary({aov_obj}))")
+                        rc_lines.append(f"  print(TukeyHSD({aov_obj}))")
+                        rc_lines.append("}")
             rc_lines.append("")
 
     if rc_lines:
@@ -1930,12 +2260,40 @@ def _build_r_script(
         xtab_lines.append(f"# Cross-tabulation: {_escape_r_string(pe_name)}")
         xtab_lines.append(f"cross_tab <- table(data${row_r}, data${col_r})")
         xtab_lines.append("print(cross_tab)")
-        xtab_lines.append("chisq.test(cross_tab)")
-        xtab_lines.append("# Cramer's V — denominator is the TABLE's own N (#495d:")
-        xtab_lines.append("# nrow(data) counted other datasets' rows and missing pairs)")
+        # #1326 STAT-06 (D50): the TABLE keeps every declared level; the TEST
+        # runs on the observed submatrix, as the app does (#591) — an all-zero
+        # row made R print `X-squared = NaN`, and V's `min(dim())` must come from
+        # the same submatrix. #1328 (D49): Pearson's χ², uncorrected — R's
+        # default `correct = TRUE` applies Yates on a 2×2, which the app no
+        # longer does — and V from that statistic. On a 2×2 the app also shows
+        # Fisher's exact p, so the script prints it.
+        xtab_lines.append("# The test runs on the OBSERVED table: a declared level nobody chose is a")
+        xtab_lines.append("# row of the table above, never of the test (as in Mixed Measures).")
         xtab_lines.append(
-            "sqrt(chisq.test(cross_tab)$statistic / (sum(cross_tab) * (min(dim(cross_tab)) - 1)))"
+            "cross_tab_obs <- cross_tab[rowSums(cross_tab) > 0, colSums(cross_tab) > 0,"
+            " drop = FALSE]"
         )
+        xtab_lines.append("if (min(dim(cross_tab_obs)) >= 2) {")
+        xtab_lines.append("  # Pearson's chi-square without Yates's continuity correction.")
+        xtab_lines.append("  xt_chisq <- chisq.test(cross_tab_obs, correct = FALSE)")
+        xtab_lines.append("  print(xt_chisq)")
+        xtab_lines.append("  # Cramer's V from that chi-square; the denominator is the table's own N")
+        xtab_lines.append("  # (#495d: nrow(data) counted other datasets' rows and missing pairs)")
+        xtab_lines.append(
+            "  xt_v <- sqrt(unname(xt_chisq$statistic) /"
+            " (sum(cross_tab_obs) * (min(dim(cross_tab_obs)) - 1)))"
+        )
+        xtab_lines.append("  print(xt_v)")
+        xtab_lines.append("  # Fisher's exact p, on a 2 x 2 table only (as in Mixed Measures)")
+        xtab_lines.append("  if (all(dim(cross_tab_obs) == 2)) {")
+        xtab_lines.append("    xt_fisher_p <- fisher.test(cross_tab_obs)$p.value")
+        xtab_lines.append("    print(xt_fisher_p)")
+        xtab_lines.append("  }")
+        xtab_lines.append("} else {")
+        xtab_lines.append(
+            "  cat(\"Chi-square not computed: fewer than two observed rows or columns.\\n\")"
+        )
+        xtab_lines.append("}")
         xtab_lines.append("")
 
     if xtab_lines:
@@ -2165,8 +2523,17 @@ def _build_r_script(
                     # Frequency distribution bar
                     if mt == "frequency_distribution" and ttype == "column":
                         var_name = f"ch_{_slugify(tr_name, max_len=20)}"
+                        # D57: excluded answers leave BEFORE the table, so they
+                        # leave the percentage base too, as in the app (its
+                        # frequency counts only non-excluded answers). The old
+                        # exact-label filter ran after the percentages.
+                        ev_r = _exclusion_vector_r(exclude_vals)
+                        tab_src = (
+                            f".mm_drop_excluded(data${tr_name}, {ev_r})" if ev_r
+                            else f"data${tr_name}"
+                        )
                         chart_lines.append(
-                            f"{var_name} <- as.data.frame(table(data${tr_name}))"
+                            f"{var_name} <- as.data.frame(table({tab_src}))"
                         )
                         chart_lines.append(
                             f'names({var_name}) <- c("value", "count")'
@@ -2182,14 +2549,6 @@ def _build_r_script(
                             chart_lines.append(
                                 f"{var_name} <- {var_name}[!({var_name}$value"
                                 f" %in% c({hr_str})), ]"
-                            )
-                        if exclude_vals:
-                            ev_str = ", ".join(
-                                f'"{_escape_r_string(v)}"' for v in exclude_vals
-                            )
-                            chart_lines.append(
-                                f"{var_name} <- {var_name}[!({var_name}$value"
-                                f" %in% c({ev_str})), ]"
                             )
 
                         # Sort
@@ -2384,7 +2743,13 @@ def _build_r_script(
                 chart_lines.append(
                     "sb_long <- do.call(rbind, lapply(sb_cols, function(col) {"
                 )
-                chart_lines.append("  tbl <- table(data[[col]])")
+                # D57: excluded answers leave before each column's table, so
+                # they leave its percentage base too, as in the app.
+                sb_ev_r = _exclusion_vector_r(exclude_vals)
+                sb_src = (
+                    f".mm_drop_excluded(data[[col]], {sb_ev_r})" if sb_ev_r else "data[[col]]"
+                )
+                chart_lines.append(f"  tbl <- table({sb_src})")
                 chart_lines.append("  data.frame(variable = col, value = names(tbl),")
                 chart_lines.append("             count = as.numeric(tbl),")
                 chart_lines.append(
@@ -2398,13 +2763,6 @@ def _build_r_script(
                     )
                     chart_lines.append(
                         f"sb_long <- sb_long[!(sb_long$value %in% c({hr_str})), ]"
-                    )
-                if exclude_vals:
-                    ev_str = ", ".join(
-                        f'"{_escape_r_string(v)}"' for v in exclude_vals
-                    )
-                    chart_lines.append(
-                        f"sb_long <- sb_long[!(sb_long$value %in% c({ev_str})), ]"
                     )
                 if sort_order == "custom" and custom_order:
                     co_str = ", ".join(
@@ -2585,6 +2943,25 @@ def _build_r_script(
             )
         r_lines.append("")
 
+    # #1530 D95/D97 (1.5.9) — an export asked while blind leaves intercoder
+    # agreement out (the Reliability tab is hidden while blind, and agreement is a
+    # comparison WITH the colleagues' coding); the script says so where the
+    # sections would stand, so an absent block is never mistaken for "no data".
+    if agreement_left_out_for:
+        r_lines.append("# ---- Inter-rater reliability: left out ----")
+        r_lines.append(
+            "# This export was made while blind mode was on, for the coding of "
+            f"{_escape_r_string(', '.join(agreement_left_out_for))}."
+        )
+        r_lines.append(
+            "# Intercoder agreement compares coders, so its sections are left out, as the"
+        )
+        r_lines.append(
+            "# Reliability tab is hidden while blind. Reveal colleagues' work in the app"
+        )
+        r_lines.append("# (the reveal is logged) and export again to include them.")
+        r_lines.append("")
+
     # Inter-rater reliability (Track J · J2-5, M-4). The FIRST inferential coding
     # statistic in the R export: per code, re-derive the tool's κ/α/% from a
     # coder×unit matrix CSV via the `irr` package, so the export reproduces the
@@ -2599,6 +2976,20 @@ def _build_r_script(
         r_lines.append("# Per code, over the coders who coded shared material (Option B")
         r_lines.append("# source-level engagement). Krippendorff's alpha (any n), plus Cohen's")
         r_lines.append("# kappa + percent agreement when exactly 2 coders. Reproduces the tool's IRR.")
+        # #1333 / #1334 — what one UNIT (a row of the CSV) is, stated beside the
+        # number it changes. The same coding gives a different alpha under each
+        # basis, and a script that reproduces the figure without it reproduces
+        # half the claim (the `set_basis` rule, code-sets.md §8).
+        r_lines.append(f"# {_escape_r_string(UNIT_BASIS_SENTENCE[irr_unit_basis])}")
+        r_lines.append(f"#   (unit_basis = {_escape_r_string(irr_unit_basis)}; the rating and code-set")
+        r_lines.append("#   blocks below use the same units.)")
+        # D18 — WHO was treated as a facilitator: the flag decides the units, and
+        # the import sets it only for an "Interviewer" or "Facilitator" label.
+        if irr_facilitator_speakers:
+            r_lines.append(
+                "#   Turns left out as a facilitator's: "
+                f"{_escape_r_string(', '.join(irr_facilitator_speakers))}."
+            )
         # #43 — the app reports confidence intervals on these coefficients and
         # this script does NOT recompute them. Said out loud rather than left to
         # inference: a researcher comparing the two would otherwise read the
@@ -2611,24 +3002,48 @@ def _build_r_script(
         r_lines.append("#   bootstrap over units (R's RNG would give a different one), and")
         r_lines.append("#   kappa's needs psych::cohen.kappa. The point estimates below are")
         r_lines.append("#   what this script reproduces.")
+        # 🔴 #1325 (D39) — irr's complete-data branch is wrong for 3+ coders.
+        # Written at EVERY call site rather than once as a function, because each
+        # section is run on its own (by a researcher, and by the round-trip tests).
+        r_lines.append("# NOTE: irr's kripp.alpha weights every pair of values 1, instead of")
+        r_lines.append("#   1/(m - 1), whenever the matrix has NO missing cell, which is wrong")
+        r_lines.append("#   for three or more coders (irr 0.84.1 and 0.85). A column of NA")
+        r_lines.append("#   (cbind(t(m), NA)) forces its missing-data branch, which is")
+        r_lines.append("#   Krippendorff's own computation; on data with a missing cell it")
+        r_lines.append("#   changes nothing.")
+        # 🔴 #1325 (D40) — the app's own reasons, read, never re-derived.
+        r_lines.append("# NOTE: where the app reports NO coefficient this prints alpha=NA and the")
+        r_lines.append("#   app's reason: insufficient_n (fewer than two passages coded by two")
+        r_lines.append("#   or more coders; over one, alpha is 0 for any disagreement) or")
+        r_lines.append("#   no_variance (nobody, or everybody, applied the code). irr_value is")
+        r_lines.append("#   what kripp.alpha itself returns there, shown rather than hidden.")
         r_lines.append(f'irr_raw <- read_csv("{project_slug}_irr.csv", {_READ_CSV_NA})')
         r_lines.append(f"irr_coder_cols <- c({coder_cols_r})")
+        r_lines.append(f"irr_reason <- {_r_reason_vector((irr_reasons or {}).get('per_code', {}))}")
         r_lines.append("for (cid in unique(irr_raw$code_id)) {")
+        r_lines.append('  ckey <- sprintf("%.0f", cid)')
         r_lines.append("  rows_c <- irr_raw[irr_raw$code_id == cid, , drop = FALSE]")
         r_lines.append("  cname <- as.character(rows_c$code_name[1])")
         r_lines.append("  m <- as.matrix(rows_c[, irr_coder_cols, drop = FALSE])")
         r_lines.append('  storage.mode(m) <- "numeric"')
+        r_lines.append("  why <- unname(irr_reason[ckey])")
         # The metric is the constant the app scored with, never a restated
         # literal — the rating block below uses a DIFFERENT one on purpose.
-        r_lines.append(f'  a <- kripp.alpha(t(m), method = "{ALPHA_METRIC_NOMINAL}")$value')
+        r_lines.append(f'  a_irr <- kripp.alpha(cbind(t(m), NA), method = "{ALPHA_METRIC_NOMINAL}")$value')
+        r_lines.append("  a <- if (is.na(why)) a_irr else NA")
         r_lines.append("  k <- NA; ag <- NA")
         r_lines.append("  if (ncol(m) == 2) {")
         r_lines.append("    dc <- m[stats::complete.cases(m), , drop = FALSE]")
-        r_lines.append("    if (nrow(dc) > 0) { k <- kappa2(dc)$value; ag <- agree(dc)$value / 100 }")
+        r_lines.append("    if (nrow(dc) > 0) {")
+        r_lines.append("      if (is.na(why)) k <- kappa2(dc)$value")
+        r_lines.append("      ag <- agree(dc)$value / 100")
+        r_lines.append("    }")
         r_lines.append("  }")
-        r_lines.append('  cat(sprintf("IRR\\tcode=%s\\talpha=%.6f\\tkappa=%s\\tagree=%s\\tname=%s\\n",')
-        r_lines.append('              cid, a, ifelse(is.na(k), "NA", sprintf("%.6f", k)),')
-        r_lines.append('              ifelse(is.na(ag), "NA", sprintf("%.6f", ag)), cname))')
+        r_lines.append('  cat(sprintf("IRR\\tcode=%s\\talpha=%s\\tkappa=%s\\tagree=%s\\treason=%s\\tirr_value=%.6f\\tname=%s\\n",')
+        r_lines.append('              ckey, ifelse(is.na(a), "NA", sprintf("%.6f", a)),')
+        r_lines.append('              ifelse(is.na(k), "NA", sprintf("%.6f", k)),')
+        r_lines.append('              ifelse(is.na(ag), "NA", sprintf("%.6f", ag)),')
+        r_lines.append('              ifelse(is.na(why), "", why), a_irr, cname))')
         r_lines.append("}")
         r_lines.append("")
 
@@ -2652,15 +3067,25 @@ def _build_r_script(
         r_lines.append("# rated. One alpha per code, never pooled: each code is its own")
         r_lines.append("# instrument with its own range. Reproduces the app's Reliability tab.")
         r_lines.append("# NOTE: as above, the app's confidence intervals are not recomputed here.")
+        r_lines.append("# NOTE: as above, kripp.alpha is called through its missing-data branch")
+        r_lines.append("#   (cbind(t(m), NA)), and alpha=NA carries the app's reason —")
+        r_lines.append("#   insufficient_n (fewer than two passages rated by two or more coders)")
+        r_lines.append("#   or no_variance (every compared rating identical) — beside irr_value.")
         r_lines.append(f'irr_mag_raw <- read_csv("{project_slug}_irr_magnitude.csv", {_READ_CSV_NA})')
         r_lines.append(f"irr_mag_coder_cols <- c({coder_cols_r})")
+        r_lines.append(f"irr_mag_reason <- {_r_reason_vector((irr_reasons or {}).get('magnitude', {}))}")
         r_lines.append("for (cid in unique(irr_mag_raw$code_id)) {")
+        r_lines.append('  ckey <- sprintf("%.0f", cid)')
         r_lines.append("  rows_c <- irr_mag_raw[irr_mag_raw$code_id == cid, , drop = FALSE]")
         r_lines.append("  cname <- as.character(rows_c$code_name[1])")
         r_lines.append("  m <- as.matrix(rows_c[, irr_mag_coder_cols, drop = FALSE])")
         r_lines.append('  storage.mode(m) <- "numeric"')
-        r_lines.append(f'  a <- kripp.alpha(t(m), method = "{MAGNITUDE_ALPHA_METRIC}")$value')
-        r_lines.append('  cat(sprintf("IRR_MAGNITUDE\\tcode=%s\\talpha=%.6f\\tname=%s\\n", cid, a, cname))')
+        r_lines.append("  why <- unname(irr_mag_reason[ckey])")
+        r_lines.append(f'  a_irr <- kripp.alpha(cbind(t(m), NA), method = "{MAGNITUDE_ALPHA_METRIC}")$value')
+        r_lines.append("  a <- if (is.na(why)) a_irr else NA")
+        r_lines.append('  cat(sprintf("IRR_MAGNITUDE\\tcode=%s\\talpha=%s\\treason=%s\\tirr_value=%.6f\\tname=%s\\n",')
+        r_lines.append('              ckey, ifelse(is.na(a), "NA", sprintf("%.6f", a)),')
+        r_lines.append('              ifelse(is.na(why), "", why), a_irr, cname))')
         r_lines.append("}")
         r_lines.append("")
 
@@ -2704,35 +3129,45 @@ def _build_r_script(
         r_lines.append("# NEVER pooled into the overall alpha above: two instruments, one")
         r_lines.append("# coefficient is dishonest. The app shows this as its own table.")
         r_lines.append("# NOTE: as above, the app's confidence intervals are not recomputed here.")
-        # ⚠️ Stated rather than silently diverging: `compute_irr` DECLINES to
-        # report a coefficient when a set has no variance or no comparable unit
-        # (`no_variance` / `insufficient_n`), where `kripp.alpha` returns a number
-        # for the same matrix. That is a reporting decision about a degenerate
-        # case, not a disagreement about the arithmetic, and re-deriving that
-        # vocabulary here would be a second implementation of a settled question.
-        r_lines.append("# NOTE: where a set has no variance to agree about, the app reports the")
-        r_lines.append("#   coefficient as undefined and this script still prints kripp.alpha's")
-        r_lines.append("#   value for it. The app's reason is the honest reading of that case.")
+        # 🔴 #1325 (D40) — this block used to SAY it diverged (it printed
+        # kripp.alpha's 1.0 where the app declines a set with no variance, with a
+        # note that the app's reason was the honest one). It now prints the app's
+        # reason, READ from `irr.set_undefined_reason`'s decision — still never a
+        # second implementation of the vocabulary (#995's rule) — with irr's own
+        # value beside it.
+        r_lines.append("# NOTE: as above, kripp.alpha is called through its missing-data branch")
+        r_lines.append("#   (cbind(t(m), NA)), and alpha=NA carries the app's reason —")
+        r_lines.append("#   insufficient_n (fewer than two comparable passages) or no_variance")
+        r_lines.append("#   (every comparable passage took one value) — beside irr_value.")
         r_lines.append(f'irr_set_raw <- read_csv("{project_slug}_irr_code_sets.csv", {_READ_CSV_NA})')
         r_lines.append(f"irr_set_coder_cols <- c({coder_cols_r})")
+        r_lines.append(f"irr_set_reason <- {_r_reason_vector((irr_reasons or {}).get('sets', {}))}")
         r_lines.append("for (sid in unique(irr_set_raw$set_id)) {")
+        r_lines.append('  skey <- sprintf("%.0f", sid)')
         r_lines.append("  rows_s <- irr_set_raw[irr_set_raw$set_id == sid, , drop = FALSE]")
         r_lines.append("  sname <- as.character(rows_s$set_label[1])")
         r_lines.append("  sbasis <- as.character(rows_s$set_basis[1])")
         r_lines.append("  m <- as.matrix(rows_s[, irr_set_coder_cols, drop = FALSE])")
         r_lines.append('  storage.mode(m) <- "numeric"')
+        r_lines.append("  why <- unname(irr_set_reason[skey])")
         # The metric is the constant the app scored with, never a restated literal
         # — and a set α must stay NOMINAL: an ordered metric would sort "none of
         # these" below every code id as though the identifiers meant something.
-        r_lines.append(f'  a <- kripp.alpha(t(m), method = "{ALPHA_METRIC_NOMINAL}")$value')
+        r_lines.append(f'  a_irr <- kripp.alpha(cbind(t(m), NA), method = "{ALPHA_METRIC_NOMINAL}")$value')
+        r_lines.append("  a <- if (is.na(why)) a_irr else NA")
         r_lines.append("  k <- NA; ag <- NA")
         r_lines.append("  if (ncol(m) == 2) {")
         r_lines.append("    dc <- m[stats::complete.cases(m), , drop = FALSE]")
-        r_lines.append("    if (nrow(dc) > 0) { k <- kappa2(dc)$value; ag <- agree(dc)$value / 100 }")
+        r_lines.append("    if (nrow(dc) > 0) {")
+        r_lines.append("      if (is.na(why)) k <- kappa2(dc)$value")
+        r_lines.append("      ag <- agree(dc)$value / 100")
+        r_lines.append("    }")
         r_lines.append("  }")
-        r_lines.append('  cat(sprintf("IRR_CODE_SET\\tset=%s\\talpha=%.6f\\tkappa=%s\\tagree=%s\\tbasis=%s\\tname=%s\\n",')
-        r_lines.append('              sid, a, ifelse(is.na(k), "NA", sprintf("%.6f", k)),')
-        r_lines.append('              ifelse(is.na(ag), "NA", sprintf("%.6f", ag)), sbasis, sname))')
+        r_lines.append('  cat(sprintf("IRR_CODE_SET\\tset=%s\\talpha=%s\\tkappa=%s\\tagree=%s\\treason=%s\\tirr_value=%.6f\\tbasis=%s\\tname=%s\\n",')
+        r_lines.append('              skey, ifelse(is.na(a), "NA", sprintf("%.6f", a)),')
+        r_lines.append('              ifelse(is.na(k), "NA", sprintf("%.6f", k)),')
+        r_lines.append('              ifelse(is.na(ag), "NA", sprintf("%.6f", ag)),')
+        r_lines.append('              ifelse(is.na(why), "", why), a_irr, sbasis, sname))')
         r_lines.append("}")
         r_lines.append("")
 
@@ -2865,14 +3300,23 @@ def _build_r_script(
 @router.get("/r-data")
 def export_r_data(
     project_id: int,
+    # #1530 D98 (1.5.9) — bare default; the Export dialog sends it while blind.
+    coder_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Export analysis-ready data as a ZIP containing a CSV data matrix and
-    a companion R script with factor levels, variable labels, and domain groupings."""
+    a companion R script with factor levels, variable labels, and domain groupings.
+
+    #1530 D95/D97: with ``coder_ids`` narrower than the coders who engaged the
+    shared material, the three intercoder-agreement files and their R sections are
+    left out (`setup.R` says so where they stand) and the archive's NAME ends
+    ``_coder-<name>``. The data CSV holds no coding and is unchanged; the codebook
+    comment keeps every coder's usage counts, as the Codebook page does (#454)."""
 
     # ── Step 1: Validate & load metadata ─────────────────────────────────
     project = _get_project_or_404(db, project_id, user.id)
+    scope = parse_int_list(coder_ids)
 
     datasets = (
         db.query(Dataset)
@@ -3206,7 +3650,13 @@ def export_r_data(
     # filter (a visibility filter must never change a reliability statistic); the
     # exported R re-derives κ/α/% from these. Gated below on the same condition as
     # compute_irr.available.
-    from ..services.irr import build_irr_matrices
+    from ..services.irr import (
+        binary_undefined_reason,
+        build_irr_matrices,
+        facilitator_turn_disclosure,
+        set_undefined_reason,
+        valued_undefined_reason,
+    )
     # ⚠️ #829 added two trailing values (the selectable source set and the scope's
     # engaged coders). The export is deliberately POOLED — it emits what it has
     # always emitted (#402, test_export_r_irr.py) — so it takes no `source` and
@@ -3218,10 +3668,19 @@ def export_r_data(
     # there.** `build_irr_matrices` reports every code and `compute_irr` decides
     # what its TABLE shows, so the app's screen narrowed and this export did not;
     # the set block is an ADDITION beside them, never a replacement.
+    #
+    # #1333 / #1334 — the export counts the units the Reliability tab counts by
+    # default, and the script SAYS which (`irr_unit_basis` reaches the R block),
+    # and — D18 — whose turns were left out as a facilitator's.
+    irr_unit_basis = DEFAULT_RELIABILITY_UNIT_BASIS
     (
-        irr_roster, irr_code_names, irr_per_code_all, _, irr_scope_coders,
+        irr_roster, irr_code_names, irr_per_code_all, irr_selectable, irr_scope_coders,
         irr_magnitude_all, irr_code_sets_all,
-    ) = build_irr_matrices(db, project_id)
+    ) = build_irr_matrices(db, project_id, unit_basis=irr_unit_basis)
+    irr_facilitator_speakers = (
+        facilitator_turn_disclosure(db, project_id, irr_roster, irr_selectable).speakers
+        if unit_basis_excludes_facilitator_turns(irr_unit_basis) else None
+    )
     # 🔴 #1039 (h) — ONE COLUMN PER CODER WHO WORKED THE SHARED MATERIAL, never one
     # per coder on the install. The matrices are as wide as the roster, and the
     # roster is the INSTALL's people (`gather_coder_applications`), so a third
@@ -3234,6 +3693,14 @@ def export_r_data(
     # `ncol(m) == 2` asks exactly what the app asks.
     keep = [i for i, cid in enumerate(irr_roster) if cid in irr_scope_coders]
     irr_coder_ids = [irr_roster[i] for i in keep]
+    # #1530 D98 — a blind export's scope is narrower than the coders the agreement
+    # would compare: every agreement file and section then goes. An empty column set
+    # closes all three gates below (`len(irr_coder_ids) >= 2`) at once, so no file
+    # can be emitted while its section is not, or the reverse.
+    agreement_left_out_for = None
+    if scope and not set(irr_coder_ids) <= set(scope):
+        agreement_left_out_for = coder_scope_names(db, scope)
+        irr_coder_ids = []
 
     def _scope_columns(rows):
         return [[row[i] for i in keep] for row in rows]
@@ -3258,6 +3725,25 @@ def export_r_data(
         set_id: {**entry, "rows": _scope_columns(entry["rows"])}
         for set_id, entry in irr_code_sets_all.items()
         if len(entry["members"]) >= 2
+    }
+    # #1325 (D40) — …which is why they are ASKED here, of the very functions
+    # `compute_irr` decides with, on the same matrices: the script then prints the
+    # app's reason beside irr's raw value instead of a number the app declines.
+    # (Dropping the unengaged coders' all-blank columns changes no comparable
+    # count and no value, so the answer is the app's.)
+    irr_reasons = {
+        "per_code": {
+            cid: r for cid, rows in irr_per_code.items()
+            if (r := binary_undefined_reason(rows)) is not None
+        },
+        "magnitude": {
+            cid: r for cid, e in irr_magnitude.items()
+            if (r := valued_undefined_reason(e["rows"])) is not None
+        },
+        "sets": {
+            sid: r for sid, e in irr_code_sets.items()
+            if (r := set_undefined_reason(e["rows"], len(e["members"]))) is not None
+        },
     }
 
     # ── Step 8: Assemble CSV ─────────────────────────────────────────────
@@ -3288,20 +3774,28 @@ def export_r_data(
         m["col"].id: column_missing_rules(m["col"])
         for m in demo_cols + item_cols
     }
+    # #1332 (D56): the app counts an answer under the declared label it matches
+    # without case, so the script's cell must carry that label — or R's factor
+    # keeps "Strongly Agree" as a level of its own and every frequency, cross-tab
+    # and group the script prints disagrees with the app's.
+    _cell_label_by_col = {
+        m["col"].id: answer_label_resolver(m["col"]) for m in demo_cols + item_cols
+    }
 
     def _text_cell(vals, col_id):
         """Text emission with #495b semantics: missing values ("N/A",
         "Don't know", refusals — or the column's DECLARED missing set, #592)
         are missing EVERYWHERE in the app (#381/#384), so they export as empty
         cells — otherwise R would keep them as factor groups the tool's
-        analyses exclude."""
+        analyses exclude. Any other answer is written under its declared label
+        (#1332)."""
         nonlocal na_blanked_count
         if not vals or vals[0] is None:
             return ""
         if is_missing(vals[0], _cell_rules_by_col.get(col_id)):
             na_blanked_count += 1
             return ""
-        return csv_safe(vals[0])
+        return csv_safe(_cell_label_by_col[col_id](vals[0]))
 
     for row_obj, p_identifier, p_role in row_data:
         n_records += 1
@@ -3447,8 +3941,12 @@ def export_r_data(
         irr_code_names=irr_code_names,
         irr_magnitude=irr_magnitude,
         irr_code_sets=irr_code_sets,
+        irr_unit_basis=irr_unit_basis,
+        irr_facilitator_speakers=irr_facilitator_speakers,
         na_blanked_count=na_blanked_count,
         identifier_cols=identifier_cols,
+        irr_reasons=irr_reasons,
+        agreement_left_out_for=agreement_left_out_for,
     )
 
     # ── Step 10: ZIP & stream ────────────────────────────────────────────
@@ -3465,7 +3963,9 @@ def export_r_data(
     zip_buffer.seek(0)
 
     date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
-    filename = f"{project_slug}_r_export_{date_str}.zip".replace('"', "_")
+    filename = (
+        f"{project_slug}_r_export_{date_str}{coder_scope_filename_suffix(db, scope)}.zip"
+    ).replace('"', "_")
 
     return StreamingResponse(
         zip_buffer,

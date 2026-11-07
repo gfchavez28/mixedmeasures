@@ -2,8 +2,9 @@ import { useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useTheme } from '@/lib/theme-context'
 import { getCodeColor } from '@/lib/utils'
-import { codeAnalysisApi, type CodeAnalysisFilterParams } from '@/lib/api'
+import { codeAnalysisApi, type CodeAnalysisFilterParams, type CooccurrenceMatrixResponse } from '@/lib/api'
 import type { QualCooccurrenceLevel } from '@/lib/qual-analysis-types'
+import { COOCCURRENCE_RULE } from '@/lib/cooccurrence-rule'
 import { LoadState, type LoadStatusSize } from '@/components/LoadStatus'
 import { useListLoad } from '@/hooks/useListLoad'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
@@ -16,7 +17,12 @@ interface QualCooccurrenceProps {
   showProportion: boolean
   colorPreset?: string
   labelFontSize?: number
-  onDataLoad?: (info: { totalSegments: number; totalComments: number }) => void
+  /**
+   * The payload, once it answers — this component owns its query, so a parent reads the
+   * figure through here: its N (`n_units`, #1527 D83) and, on a canvas, its fingerprint
+   * (#1527 D90). Called on every data change; the receiver must be stable.
+   */
+  onDataLoad?: (data: CooccurrenceMatrixResponse) => void
   /**
    * #963 Tier 3 — how much room the non-ready states may take. `page` on the
    * analysis tab, which is a whole screen; `panel` inside a canvas embed, where
@@ -102,12 +108,7 @@ export default function QualCooccurrence({
   }, [data, showProportion])
 
   useEffect(() => {
-    if (data && onDataLoad) {
-      onDataLoad({
-        totalSegments: data.total_coded_segments ?? 0,
-        totalComments: data.total_coded_texts ?? 0,
-      })
-    }
+    if (data && onDataLoad) onDataLoad(data)
   }, [data, onDataLoad])
 
   // ⚠️ The canvas export's readiness poll (`lib/canvas-export.ts`) waits on
@@ -249,6 +250,8 @@ export default function QualCooccurrence({
                 ? 'Diagonal shows total coded units (segments + texts) per code. Off-diagonal shows how often two codes co-occur on the same unit.'
                 : 'Diagonal shows total segments per code. Off-diagonal shows how often two codes co-occur on the same segment.'
         }
+        {/* #1335 (D47): the rule every pair was counted by, on every view and level. */}
+        {` ${COOCCURRENCE_RULE}`}
         {!showProportion && max_cooccurrence > 0 && ` Max co-occurrence: ${max_cooccurrence}.`}
       </p>
     </div>

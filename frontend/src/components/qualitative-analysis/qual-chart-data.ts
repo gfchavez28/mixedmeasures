@@ -9,7 +9,7 @@ import type {
   QualOrientation,
   QualSortOrder,
 } from '@/lib/qual-analysis-types'
-import { getCodeColor } from '@/lib/utils'
+import { getCodeColor, getHslTextColor } from '@/lib/utils'
 
 /** Shared color palette for multi-series qualitative charts (stacked bars, grouped bars). */
 export const QUAL_GROUP_COLORS = [
@@ -37,6 +37,41 @@ export function computeCellValue(
     }
     case 'text_coverage':
       return sourceTotalWordCount > 0 ? codedWordCount / sourceTotalWordCount : 0
+  }
+}
+
+/**
+ * #1529 D92 (1.5.9) — does this chart draw a share of the CODED total? *Proportion* over the
+ * *Coded only* denominator does; every other mode divides by a base that holds every unit
+ * (*All segments*, the source's words) or divides nothing (*Count*).
+ */
+export function drawsCodedShare(valueMode: QualValueMode, denominatorMode: QualDenominatorMode): boolean {
+  return valueMode === 'segment_proportion' && denominatorMode === 'coded'
+}
+
+/**
+ * #1529 D92 — the rows a chart can draw, and the universal rows it leaves off.
+ *
+ * The coded total leaves out a unit marked only with universal codes (invariant J-A), and a
+ * universal code's count is made of exactly such units, so its share of that total is not a
+ * share (#1526 D79 — the bar read 120% and one document's heatmap cell 400% on the review's
+ * probe). A chart cannot draw "no share": an absent bar is how a bar chart draws ZERO, and a
+ * heatmap cell's colour is its value (#689). So under `drawsCodedShare` a universal row is LEFT
+ * OFF the code axis and NAMED (`leftOut`) for ONE note under the chart (`UniversalChartNote`) —
+ * #830g's rule: hidden, never dropped, declared. Every other mode draws every row.
+ *
+ * The ONE decision for the heatmap, the bar (simple and grouped) and the stacked bar; the summary
+ * table withholds the cell instead (`codedSharePercent`), because a table can print "—".
+ */
+export function codedShareAxis<T extends { is_universal: boolean; name: string }>(
+  codes: readonly T[],
+  valueMode: QualValueMode,
+  denominatorMode: QualDenominatorMode,
+): { drawn: T[]; leftOut: string[] } {
+  if (!drawsCodedShare(valueMode, denominatorMode)) return { drawn: [...codes], leftOut: [] }
+  return {
+    drawn: codes.filter(c => !c.is_universal),
+    leftOut: codes.filter(c => c.is_universal).map(c => c.name),
   }
 }
 
@@ -226,8 +261,9 @@ export function shapeQualHeatmapData(
   const sortedSources = sortSources(sources, sortOrder)
   // #675: the code axis is ordered in BOTH orientations — as rows when codes are
   // the rows, as columns when they are the columns. It used to be neither.
+  // #1529 D92: of the rows this mode can draw.
   const codes = sortResponseCodes(
-    response.codes, sortOrder, customOrder,
+    codedShareAxis(response.codes, valueMode, denominatorMode).drawn, sortOrder, customOrder,
     codeMagnitudes(response, valueMode, denominatorMode),
   )
 
@@ -315,7 +351,8 @@ export function shapeQualBarData(
   sortOrder: QualSortOrder,
   customOrder: number[],
 ): QualBarDatum[] {
-  const { codes, sources, totals } = response
+  const { sources, totals } = response
+  const codes = codedShareAxis(response.codes, valueMode, denominatorMode).drawn  // #1529 D92
 
   // Per-code (or per-category when backend returns category-level data) aggregation across all sources
   const bars: QualBarDatum[] = codes.map(code => {
@@ -367,6 +404,12 @@ export interface QualCodeSummaryRow {
   codeName: string
   codeColor: string
   categoryName: string | null
+  /**
+   * #1526 D79 — a universal code ("Unclear", "Unsubstantive/Artifact"). Its row keeps its
+   * counts and has NO share of the coded total (`codedSharePercent`, `lib/universal-share.ts`).
+   * Read off the payload's `is_universal`, never inferred from a name.
+   */
+  isUniversal: boolean
   totalCount: number
   segmentProportion: number
   /**
@@ -374,8 +417,9 @@ export interface QualCodeSummaryRow {
    * because the two are one fact: the count of segments carrying this code, and
    * that count as a share of the coded segments it was counted in.
    *
-   * ⚠️ `null` means "no coded segments in this selection", which is not 0%. The
-   * renderer must not collapse the two (#689's convention, and the falsy-zero
+   * ⚠️ `null` means "no coded segments in this selection", which is not 0% — OR,
+   * since #1526 D79, a universal code's row (`isUniversal` says which). The
+   * renderer must not collapse null into 0 (#689's convention, and the falsy-zero
    * trap: `pct ? … : '—'` prints "—" for a real measured zero).
    */
   segmentPercentage: number | null
@@ -413,6 +457,20 @@ export interface QualCodeSummaryRow {
  */
 export function sharePercent(part: number, whole: number): number | null {
   return whole > 0 ? (part / whole) * 100 : null
+}
+
+/**
+ * A share of a CODED total — *% of Coded*, *% Texts* — or `null` (#1526 D79).
+ *
+ * The coded total leaves out a unit marked only with universal codes (invariant J-A), and a
+ * universal code's own count is made of exactly such units, so its share of that total is not
+ * a share at all (it read 150–200% on the review's probe). A universal row gets `null`, and
+ * the table says why ONCE (`lib/universal-share.ts::UNIVERSAL_SHARE_NOTE`). The ONE place the
+ * rule is decided; a share whose base is what the selection holds (`% Docs`, `% Rec.`, …) uses
+ * `sharePercent` and is a real share on a universal row too.
+ */
+export function codedSharePercent(isUniversal: boolean, part: number, whole: number): number | null {
+  return isUniversal ? null : sharePercent(part, whole)
 }
 
 export interface QualSourceSummaryRow {
@@ -461,6 +519,7 @@ export function shapeQualCodeSummary(
       codeName: code.name,
       codeColor: getCodeColor(code),
       categoryName: code.category_name,
+      isUniversal: code.is_universal,
       totalCount,
       segmentProportion: totals.total_segments > 0 ? totalCount / totals.total_segments : 0,
       // #745: the percentage rides the SAME payload as the count above it.
@@ -473,9 +532,7 @@ export function shapeQualCodeSummary(
       // ⚠️ `totals.total_segments` (above) and `totals.coded_segments` (here)
       // are different denominators on purpose — "share of all segments" vs
       // "share of the coded ones".
-      segmentPercentage: totals.coded_segments > 0
-        ? (totalCount / totals.coded_segments) * 100
-        : null,
+      segmentPercentage: codedSharePercent(code.is_universal, totalCount, totals.coded_segments),
       textCoverage: totals.total_word_count > 0 ? totalWordCount / totals.total_word_count : 0,
       sourceCount: srcCount,
       totalSources: sources.length,
@@ -578,8 +635,9 @@ export function shapeQualStackedBarData(
   const { sources } = response
   const sortedSources = sortSources(sources, sortOrder)
   // #675: bars when codes are the rows, stack + legend order when they are not.
+  // #1529 D92: of the rows this mode can draw.
   const codes = sortResponseCodes(
-    response.codes, sortOrder, customOrder,
+    codedShareAxis(response.codes, valueMode, denominatorMode).drawn, sortOrder, customOrder,
     codeMagnitudes(response, valueMode, denominatorMode),
   )
 
@@ -684,6 +742,9 @@ export function getHeatmapCellStyle(
   const neutralL = isDark ? 16 : 96
   const deepL = isDark ? 30 : 36
   const L = neutralL - intensity * (neutralL - deepL)
-  const textColor = L < 55 ? '#ffffff' : '#1a1a1a'
-  return { backgroundColor: `hsl(${hue}, ${saturation}%, ${L}%)`, color: textColor }
+  // #1560 — the text colour comes from the fill through #271's `getHslTextColor`,
+  // never a hand-written lightness cut: `L < 55 ? white : #1a1a1a` put white on
+  // light-mode fills at 1.66:1 (amber) and 1.69:1 (green). Dark mode's fills
+  // already passed, and the helper picks white there too.
+  return { backgroundColor: `hsl(${hue}, ${saturation}%, ${L}%)`, color: getHslTextColor(hue, saturation, L) }
 }

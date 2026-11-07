@@ -76,14 +76,13 @@ export default function AssumptionNote({ row }: { row: ComparisonRow }) {
             <>
               Equal variances ({assumptionTestLabel(variance.test, variance.center)}):{' '}
               {formatPValue(variance.p)}
-              {/* 🔴 #525b — a group can be in the COMPARISON and not in the
-                  TEST, and neither case used to be reported. An empty group is
-                  dropped outright; a group of ONE contributes a deviation of
-                  exactly zero, which reads as perfect homogeneity rather than as
-                  an absence of evidence (measured: levene([1],[1,2,3,4]) gives
-                  a confident p = .219 resting on that point). Same rule as the
-                  normality line above — a count that quietly shrinks reads as a
-                  complete one. */}
+              {/* 🔴 #525b / #1329 — a group can be in the COMPARISON and not in
+                  the TEST, and neither case used to be reported. An empty group
+                  has nothing to test; a group of ONE is left out since 1.5.9
+                  (D51), as every test of the row leaves it out — it used to stay
+                  in, contributing a deviation of exactly zero that read as
+                  perfect homogeneity. Same rule as the normality line above — a
+                  count that quietly shrinks reads as a complete one. */}
               {varianceCaveat && (
                 <span className="text-mm-text-faint"> — {varianceCaveat}</span>
               )}
