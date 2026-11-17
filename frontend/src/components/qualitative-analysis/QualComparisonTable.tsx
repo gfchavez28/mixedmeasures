@@ -2,6 +2,7 @@ import { Fragment, useMemo, useState } from 'react'
 import { formatP, formatPValue, getSignificanceStars } from '@/lib/chart-data'
 import { NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
 import { undefinedComparisonGroups } from '@/lib/qual-comparison'
+import { noCodingNote, noCodingScope, withNoCodingLabel } from '@/lib/coding-completeness'
 import {
   COMPARISON_UNIT_PASSAGE,
   cannotReachSignificance, comparisonMethodNote, deltaIntervalSpoken, deltaIntervalTitle, deltaIntervalVisual,
@@ -26,18 +27,36 @@ interface QualComparisonTableProps {
 type SortKey = 'code' | 'category' | 'delta' | 'p' | 'effect' | 'count'
 
 function effectSizeBadge(value: number, type: string): { bg: string; label: string } {
-  const abs = Math.abs(value)
+  const abs = effectMagnitude(value, type)
   if (type === 'cramers_v') {
     if (abs >= 0.5) return { bg: 'bg-red-100 dark:bg-red-950/40 text-red-700 dark:text-red-300', label: 'large' }
     if (abs >= 0.3) return { bg: 'bg-amber-100 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300', label: 'medium' }
     if (abs >= 0.1) return { bg: 'bg-mm-bg text-mm-text-muted', label: 'small' }
     return { bg: 'bg-mm-bg text-mm-text-faint', label: '' }
   }
-  // odds_ratio
+  // odds_ratio — on its own scale: 4 and 1/4 are the same size (#1549 a)
   if (abs >= 4.0) return { bg: 'bg-red-100 dark:bg-red-950/40 text-red-700 dark:text-red-300', label: 'large' }
   if (abs >= 2.5) return { bg: 'bg-amber-100 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300', label: 'medium' }
   if (abs >= 1.5) return { bg: 'bg-mm-bg text-mm-text-muted', label: 'small' }
   return { bg: 'bg-mm-bg text-mm-text-faint', label: '' }
+}
+
+/**
+ * #1549 (a) — how large an effect is, for its badge and its sort. Cramér's V is a
+ * size already. An odds ratio is not: below 1 it measures the same association
+ * the other way round, so OR 0.25 is as large as OR 4. It was read as `|OR|`, so
+ * every association against the first group got no badge and sorted as negligible.
+ * (An odds ratio is never 0 or negative here: a zero cell has none, `zero_cell`.)
+ */
+function effectMagnitude(value: number, type: string | null): number {
+  if (type === 'odds_ratio' && value > 0) return Math.max(value, 1 / value)
+  return Math.abs(value)
+}
+
+/** The effect a row sorts by, or `null` (no test, or no value) — sorted last either way. */
+function sortableEffect(test: StatTestResult | null | undefined): number | null {
+  if (test?.effect_size == null) return null
+  return effectMagnitude(test.effect_size, test.effect_size_label)
 }
 
 const SIG_LEVELS = { show_05: true, show_01: true, show_001: true }
@@ -79,6 +98,11 @@ export default function QualComparisonTable({
     return data.basis ? unitCount(data.basis.unit, t.n) : unitCount(COMPARISON_UNIT_PASSAGE, t.total_segments)
   }
   const methodNote = comparisonMethodNote(data)
+  // #1626 (D244): every group listed, a 0 included; null when none has one.
+  const noCodingSentence = noCodingNote(
+    groups.map(g => [g, group_totals[g]?.without_coding ?? 0] as const),
+    noCodingScope(data.scope?.no_coding_scope),
+  )
   // #1323 D8: three or more groups take the Freeman–Halton EXACT test, which has no
   // χ² statistic — a χ² column would be "–" in every row under a header naming a
   // test that did not run. Shown only when some result carries a statistic.
@@ -116,6 +140,11 @@ export default function QualComparisonTable({
   )
   // #1421: groups with no segments in the material compared — named once, here.
   const undefinedGroups = useMemo(() => undefinedComparisonGroups(data), [data])
+  // #1549 (a): why an effect cell reads "—", once — visible text, so a keyboard or a
+  // screen reader reaches it (a cell's `title` reaches neither) and the PNG carries it.
+  const effectReasons = useMemo(() => [...new Set(entries
+    .filter(e => e.test && e.test.effect_size == null && e.test.effect_size_undefined_reason)
+    .map(e => e.test!.effect_size_undefined_reason as string))], [entries])
   const [sortKey, setSortKey] = useState<SortKey>(is2Group ? 'delta' : 'p')
   const [sortDir, setSortDir] = useState<SortDir>(is2Group ? 'desc' : 'asc')
 
@@ -141,8 +170,13 @@ export default function QualComparisonTable({
           return dir * (Math.abs(a.delta_proportion ?? 0) - Math.abs(b.delta_proportion ?? 0))
         case 'p':
           return dir * (shownP(a.test) - shownP(b.test))
-        case 'effect':
-          return dir * (Math.abs(a.test?.effect_size ?? 0) - Math.abs(b.test?.effect_size ?? 0))
+        case 'effect': {
+          // #1549 (a): a row with no effect is not an effect of 0 — it sorts last.
+          const ea = sortableEffect(a.test)
+          const eb = sortableEffect(b.test)
+          if (ea == null || eb == null) return ea == null ? (eb == null ? 0 : 1) : -1
+          return dir * (ea - eb)
+        }
         case 'count': {
           const aTotal = groups.reduce((sum, g) => sum + (a.by_group[g]?.count ?? 0), 0)
           const bTotal = groups.reduce((sum, g) => sum + (b.by_group[g]?.count ?? 0), 0)
@@ -191,7 +225,7 @@ export default function QualComparisonTable({
               <tr className="bg-mm-bg">
                 <ThCell colSpan={2} className="border-b border-r" />
                 {groups.map(g => (
-                  <GroupTh key={g} group={g} n={groupN(g)} passages={group_totals[g]?.total_segments ?? 0} />
+                  <GroupTh key={g} group={g} n={groupN(g)} passages={group_totals[g]?.total_segments ?? 0} withoutCoding={group_totals[g]?.without_coding} />
                 ))}
                 <th scope="col" colSpan={2 + (hasStatistic ? 1 : 0) + (showEffectSize ? 1 : 0)} className="px-2 py-1.5 border-b text-center font-medium">
                   Test
@@ -204,7 +238,7 @@ export default function QualComparisonTable({
               {is2Group ? (
                 <>
                   {groups.map(g => (
-                    <GroupTh key={g} group={g} n={groupN(g)} passages={group_totals[g]?.total_segments ?? 0} />
+                    <GroupTh key={g} group={g} n={groupN(g)} passages={group_totals[g]?.total_segments ?? 0} withoutCoding={group_totals[g]?.without_coding} />
                   ))}
                   <SortableTh field="delta" label={'\u0394 Prop'} current={sortKey} dir={sortDir} onSort={handleSort} className="text-right border-b border-r" />
                   <SortableTh field="p" label="p" current={sortKey} dir={sortDir} onSort={handleSort} className="text-right border-b border-r" />
@@ -256,6 +290,19 @@ export default function QualComparisonTable({
         {is2Group ? ` \u0394 Prop = ${groups[0]} \u2212 ${groups[1]}.` : ''}
         {data.basis && !data.basis.test_omitted_reason ? ' Significance: * p<.05, ** p<.01, *** p<.001 (adjusted).' : ''}
       </p>
+      {/* #1626 (D244): participants with no coding in scope count as "did not use"
+          every code — said once, inside the component so the PNG and the Canvas
+          embed carry it. */}
+      {noCodingSentence && (
+        <p className="text-xs text-mm-text-muted mt-1" data-no-coding-note="">
+          {noCodingSentence}
+        </p>
+      )}
+      {showEffectSize && effectReasons.map(reason => (
+        <p key={reason} className="text-xs text-mm-text-faint" data-undefined-statistic="">
+          {is2Group ? 'OR' : 'Effect'} {NO_VALUE}: {undefinedTooltip(reason)}
+        </p>
+      ))}
     </div>
   )
 }
@@ -407,8 +454,21 @@ function ProportionCell({ stats }: { stats: GroupCodeStats | undefined }) {
 }
 
 function EffectSizeCell({ test }: { test: StatTestResult | null }) {
-  if (!test?.effect_size || !test.effect_size_label) {
+  if (!test?.effect_size_label) {
     return <td className="px-2 py-1.5 border-b text-center text-mm-text-faint">{'\u2013'}</td>
+  }
+  // #1549 (a): `!test.effect_size` hid a real 0 (Cramér's V of identical shares).
+  // A value of null is undefined, and the server says why (`zero_cell`); the reason
+  // is said once below the table, as #1421's undefined shares are.
+  if (test.effect_size == null) {
+    return (
+      <td
+        className="px-2 py-1.5 border-b text-center text-mm-text-faint"
+        title={undefinedTooltip(test.effect_size_undefined_reason)}
+      >
+        {NO_VALUE}
+      </td>
+    )
   }
   const badge = effectSizeBadge(test.effect_size, test.effect_size_label)
   const label = test.effect_size_label === 'odds_ratio' ? 'OR' : "Cram\u00E9r\u2019s V"
@@ -470,7 +530,12 @@ function SortableTh({
  * ("Clinical Services(n=0)"); a space typed INSIDE the span is trimmed away by
  * the name computation (measured for #908 on `RatingSweep`'s chips).
  */
-function GroupTh({ group, n, passages }: { group: string; n: string; passages: number }) {
+function GroupTh({ group, n, passages, withoutCoding }: {
+  group: string; n: string; passages: number; withoutCoding: number | undefined
+}) {
+  // #1626 (D244): how many of the n have no coding in scope — absent at 0 (absence
+  // makes no claim); the note under the table says what they mean for the shares.
+  const noCoding = withNoCodingLabel(withoutCoding)
   return (
     <th
       scope="col"
@@ -480,7 +545,7 @@ function GroupTh({ group, n, passages }: { group: string; n: string; passages: n
     >
       {group}
       {' '}
-      <span className="text-mm-text-faint font-normal">(n={n})</span>
+      <span className="text-mm-text-faint font-normal">(n={n}{noCoding ? ` · ${noCoding}` : ''})</span>
     </th>
   )
 }

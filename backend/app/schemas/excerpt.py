@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from datetime import datetime
-from .common import UTCTimestamp
+from .common import CodeApplicationIdentity, UTCTimestamp
 
 
 class ExcerptCreate(BaseModel):
@@ -115,6 +115,25 @@ class ExcerptResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class WholePassageQuoteRequest(BaseModel):
+    """D163 — the passage a joint display pins: a segment OR an answer, exactly one."""
+
+    segment_id: int | None = None
+    dataset_value_id: int | None = None
+
+    @model_validator(mode='after')
+    def _exactly_one(self):
+        if (self.segment_id is None) == (self.dataset_value_id is None):
+            raise ValueError("Name a segment_id or a dataset_value_id, exactly one")
+        return self
+
+
+class WholePassageQuoteResponse(ExcerptResponse):
+    """The passage's whole quote, and whether this request made it."""
+
+    created: bool
+
+
 class ExcerptDetailResponse(ExcerptResponse):
     """Extended response with surrounding context segments."""
     context_before: str | None = None
@@ -178,6 +197,9 @@ class QuotedExcerptItem(BaseModel):
     column_name: str | None = None
     applied_code_ids: list[int]
     applied_codes: list[QuotedExcerptCode]
+    # #1592 — who applied each code: one entry per application, from the SAME
+    # applications as `applied_code_ids` (the scope's own while blind, D99). REQUIRED.
+    applied_code_details: list[CodeApplicationIdentity]
     excerpt_note: str | None = None
     context_before: str | None = None
     context_before_speaker: str | None = None

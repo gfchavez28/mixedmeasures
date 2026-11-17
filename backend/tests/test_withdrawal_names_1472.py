@@ -165,8 +165,9 @@ class TestTheSpeakerDoor:
 
     def test_every_spelling_she_was_known_by_is_remembered(self, client):
         """D73's population: her display name, her speaker's name and import label, and
-        her turn's original label — and the ID once, as the ID kind, not again as a name.
-        One transcript naming her four ways: four speakers unlinked, one sentence."""
+        her turn's original label. One transcript naming her four ways: four speakers
+        unlinked, one sentence. #1605 (D229, D237): each of the four as written AND
+        folded, and her ID folded too (its as-written spelling is the ID kind's) — 9."""
         ids = build_world(client)
         pid = ids["pid"]
         db = SessionLocal()
@@ -187,7 +188,7 @@ class TestTheSpeakerDoor:
         finally:
             db.close()
         _withdraw(client, pid, rosa_id)
-        assert len(_name_rows(pid)) == 4                 # the four spellings; not the ID
+        assert len(_name_rows(pid)) == 9                 # 4 as written + 5 folded (the ID's)
         r = _import(client, pid, ["Rosa Diaz", "Rosa", "SPEAKER_03", "Rosa D.", "Noor"])
         assert r.status_code == 200, r.text
         assert r.json()["warnings"] == [tombstones.withdrawn_speaker_warning(4)]
@@ -233,10 +234,14 @@ class TestTheRecordTravels:
         _withdraw(client, pid, ids["P"]["M01"])
         items = archive_payload(export(client, pid))["tombstones"]
         names = [t for t in items if t["entity_type"] == "participant_name"]
-        assert len(names) == 1 and names[0]["identifier_hash"]
+        # #1605 (D232): "Maria" as written and folded, and "M01" folded — no format change,
+        # values in the same kind.
+        assert {t["identifier_hash"] for t in names} == {
+            tombstones.name_hash("Maria"), tombstones.folded_name_hash("Maria"),
+            tombstones.folded_name_hash("M01")}
         assert not any("Maria" in json.dumps(t) for t in items)    # a code, not the name
         pid2 = ok(client.c.post(f"/api/projects/{pid}/duplicate", headers=client.H))["project_id"]
-        assert len(_name_rows(pid2)) == 1
+        assert len(_name_rows(pid2)) == 3
         r = _import(client, pid2, ["Maria"])
         assert r.status_code == 200, r.text
         assert r.json()["warnings"] == [WARNING_ONE]
@@ -257,7 +262,11 @@ class TestTheRecordTravels:
         assert _name_rows(pid) == []
         r = merge(client, blob, pid, code_mapping={})
         assert r.status_code == 200, r.text
-        assert len(_name_rows(pid)) == 1
+        assert {h for (h,) in _name_rows(pid)} == {                 # #1605: both forms
+            tombstones.name_hash("Maria"), tombstones.folded_name_hash("Maria"),
+            tombstones.folded_name_hash("M01")}
+        r = _import(client, pid, ["MARIA"])                         # and the folded one works
+        assert r.json()["warnings"] == [tombstones.withdrawn_speaker_warning(1, 1)]
 
     def test_the_record_round_trips_through_write_and_load_with_its_kind(self, client):
         ids = build_world(client)

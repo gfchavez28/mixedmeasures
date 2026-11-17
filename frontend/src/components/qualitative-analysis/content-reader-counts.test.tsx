@@ -83,6 +83,7 @@ describe('#1077 (a) — the document reader counts people', () => {
             onSourceSelect={() => {}}
             source="all"
             coderLens={null}
+            viewerId={1}
             blind={false}
           />
         </MemoryRouter>

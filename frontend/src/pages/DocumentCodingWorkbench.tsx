@@ -2385,6 +2385,8 @@ export function DocumentSegmentRow({
                   codeMap={codeMap}
                   allCodes={allCodes}
                   codesStatus={codesStatus}
+                  // #1592: a remove only on the active coder's own chip.
+                  viewer={{ coderId: activeCoderId ?? null }}
                   onCodeChange={onCodeChange}
                   onFocusCode={onFocusCode}
                   coderMap={coderMap}

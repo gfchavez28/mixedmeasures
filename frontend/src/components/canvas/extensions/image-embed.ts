@@ -2,6 +2,7 @@ import { Node } from '@tiptap/core'
 import { ReactNodeViewRenderer } from '@tiptap/react'
 import { Plugin } from '@tiptap/pm/state'
 import ImageEmbedView from './ImageEmbedView'
+import { placeBlock } from '../insert-block'
 
 export interface ImageEmbedOptions {
   uploadImage: ((file: File) => Promise<{ image_id: string }>) | null
@@ -84,8 +85,9 @@ export const ImageEmbed = Node.create<ImageEmbedOptions>({
           event.preventDefault()
           uploadFn(file).then(({ image_id }) => {
             const node = nodeType.create({ imageId: image_id })
-            const tr = view.state.tr.replaceSelectionWith(node)
-            view.dispatch(tr)
+            // #1341: `replaceSelectionWith` replaced a selected embed — and at the end of a
+            // theme left the image selected, so a second paste replaced the first.
+            view.dispatch(placeBlock(view.state.tr, node))
           }).catch(err => console.error('Image paste upload failed:', err))
           return true
         },

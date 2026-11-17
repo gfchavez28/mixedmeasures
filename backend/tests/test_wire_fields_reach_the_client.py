@@ -70,6 +70,9 @@ EXEMPT: dict[str, str] = {
     # KEPT as substrate on the 2026-09-06 decision, like the multi-user auth endpoints
     # behind `MM_MULTIUSER_AUTH_ENABLED`.
     "canonical_code_id": "code-equivalence CRUD — no client module, kept as substrate (#882)",
+    # (#1615's `withheld_rating_variables` was exempt here in the review's prototype, "decision
+    # open"; D295 decided it — the Quantitative page reads each door's own count,
+    # `lib/blind-rating-columns.ts::withheldDoorNotice` — and the entry went with the build.)
     # `metric_name` (row-scores) and `value_count` (the dataset rows summary) were exempt
     # here until 2026-09-06, when #882 was decided and BOTH ENDPOINTS WERE DELETED along
     # with their schemas. ⚠️ Deleting a route is only half of it: `test_exemptions_are_not_stale`
@@ -82,6 +85,11 @@ EXEMPT: dict[str, str] = {
     # client half that reads them) — "not read YET", the only entries of that kind. The
     # stale check below removed them with the commit that wired the Reliability tab and
     # the Model comparison.
+    #
+    # The JOINT DISPLAY's compute response (ROADMAP row 56) — `missing_code_ids` and
+    # `missing_column_ids` were exempt here, "not read YET", between session A (2026-11-12c,
+    # the server) and session B (2026-11-12e, the editor node that reads them); the stale
+    # check removed them with session B's commit, as it did 1.5.9's three.
 }
 
 # Population floors. Well below the 2026-09-04 measurement (270 classes, 745 fields, 461

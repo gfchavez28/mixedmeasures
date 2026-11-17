@@ -12,6 +12,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MemoryRouter } from 'react-router'
 import type { LinkableRow, LinkableRowsPage } from '@/lib/api'
 
 const linkableRows = vi.fn()
@@ -46,10 +47,13 @@ function renderPicker(over: Partial<Parameters<typeof DatasetRecordPicker>[0]> =
     projectId: 1, datasetId: 6, datasetName: 'Census', onPick: vi.fn(), busy: false,
     linkError: null, onClose: vi.fn(), ...over,
   }
+  // #1625: the open-dataset control is a router <Link> now, so it needs a router.
   const tree = (extra: Partial<typeof props> = {}) => (
-    <QueryClientProvider client={client}>
-      <DatasetRecordPicker {...props} {...extra} />
-    </QueryClientProvider>
+    <MemoryRouter>
+      <QueryClientProvider client={client}>
+        <DatasetRecordPicker {...props} {...extra} />
+      </QueryClientProvider>
+    </MemoryRouter>
   )
   const { rerender } = render(tree())
   return { ...props, rerender: (extra: Partial<typeof props>) => rerender(tree(extra)) }
@@ -271,5 +275,17 @@ describe('#1053 — picking, busy and refused', () => {
     expect(panel).toBeInTheDocument()
     expect(screen.queryByRole('textbox')).toBeNull()
     expect(within(document.body).queryByRole('status')).toBeNull()
+  })
+})
+
+describe('the open-dataset control stays in the app (#1625, D238/D239)', () => {
+  it('is a router link to the dataset, with no target, named without a new tab', async () => {
+    linkableRows.mockResolvedValue(page([rec(1)]))
+    renderPicker()
+    const link = screen.getByRole('link', { name: 'Open dataset "Census"' })
+    expect(link).toHaveAttribute('href', '/projects/1/datasets/6')
+    // The desktop shell denies every new window, so a target here did nothing.
+    expect(link).not.toHaveAttribute('target')
+    await waitFor(() => expect(linkableRows).toHaveBeenCalled())
   })
 })

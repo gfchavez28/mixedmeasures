@@ -1,5 +1,6 @@
 import api from './client'
 import { namedBlob, EXPORT_TIMEOUT_MS } from './download'
+import { liftCoderIds } from './coder-scope-query'  // #1615
 
 // Correlation types
 export interface CorrelationCell {
@@ -20,6 +21,8 @@ export interface CorrelationMatrixResponse {
   /** #1168 R7 — variable groups whose stored scale scores are out of date
    *  (`StaleScaleScoresNotice`). `[]` when fresh or for a column request. */
   stale_domain_ids: number[]
+  /** #1615 D295 — the rating variables left out while blind (the server's own count). */
+  withheld_rating_variables?: number
 }
 
 export interface RegressionResult {
@@ -68,6 +71,8 @@ export interface ScatterMatrixResponse {
   truncated: boolean
   /** #1168 R7 — as on `CorrelationMatrixResponse`. */
   stale_domain_ids: number[]
+  /** #1615 D295 — as on `CorrelationMatrixResponse`. */
+  withheld_rating_variables?: number
 }
 
 // API functions - Correlations
@@ -77,22 +82,32 @@ export const correlationsApi = {
     domain_ids: number[]
     correlation_type: string
     bonferroni: boolean
-  }) =>
-    api.post<CorrelationMatrixResponse>(`/projects/${projectId}/metrics/correlation-matrix`, data).then(res => res.data),
+    /** #1615 — the viewer alone while blind (`lib/analysis-scope.ts`); absent = every coder. */
+    coder_ids?: number[] | null
+  }) => {
+    const [body, params] = liftCoderIds(data)  // #1615: the route reads the scope from the query
+    return api.post<CorrelationMatrixResponse>(`/projects/${projectId}/metrics/correlation-matrix`, body, { params }).then(res => res.data)
+  },
   scatterMatrix: (projectId: number, data: {
     column_ids: number[]
     domain_ids: number[]
     id_type: string
     group_column_id?: number | null
     max_variables?: number
-  }) =>
-    api.post<ScatterMatrixResponse>(`/projects/${projectId}/metrics/scatter-matrix`, data).then(res => res.data),
+    /** #1615 — the viewer alone while blind (`lib/analysis-scope.ts`); absent = every coder. */
+    coder_ids?: number[] | null
+  }) => {
+    const [body, params] = liftCoderIds(data)  // #1615: the route reads the scope from the query
+    return api.post<ScatterMatrixResponse>(`/projects/${projectId}/metrics/scatter-matrix`, body, { params }).then(res => res.data)
+  },
   /** Resolves to the blob AND the server's filename — see `namedBlob` (#743). */
   correlationMatrixCsv: (projectId: number, params: {
     column_ids: number[]
     domain_ids: number[]
     correlation_type: string
     bonferroni: boolean
+    /** #1615 — the viewer alone while blind (`AnalysisScope.coderScope`); absent = every coder. */
+    coderScope?: string
   }) =>
     api.get(`/projects/${projectId}/metrics/correlation-matrix/csv`, {
       params: {
@@ -100,6 +115,7 @@ export const correlationsApi = {
         domain_ids: params.domain_ids.join(','),
         correlation_type: params.correlation_type,
         bonferroni: params.bonferroni,
+        coder_ids: params.coderScope || undefined,
       },
       responseType: 'blob',
       // #833 — the project-scale export budget, not the 30 s client default.
@@ -113,6 +129,8 @@ export const correlationsApi = {
     domain_ids: number[]
     id_type: string
     group_column_id?: number | null
+    /** #1615 — the viewer alone while blind (`AnalysisScope.coderScope`); absent = every coder. */
+    coderScope?: string
   }) =>
     api.get(`/projects/${projectId}/metrics/scatter-data/csv`, {
       params: {
@@ -120,6 +138,7 @@ export const correlationsApi = {
         domain_ids: params.domain_ids.join(','),
         id_type: params.id_type,
         group_column_id: params.group_column_id ?? undefined,
+        coder_ids: params.coderScope || undefined,
       },
       responseType: 'blob',
       // #833 — the project-scale export budget, not the 30 s client default.

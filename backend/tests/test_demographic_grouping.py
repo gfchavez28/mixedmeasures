@@ -106,7 +106,7 @@ def test_demographic_comparison_groups_numeric_order(demographic_project, db_ses
 
 
 def test_demographic_filter_values_numeric_order(demographic_project, db_session):
-    options = get_demographic_filter_options(db_session, 750)
+    options = get_demographic_filter_options(db_session, 750, blind_scope=None)
     grade = next(f for f in options["filters"] if f["subtype"] == "Grade")
     assert [v["value"] for v in grade["values"]] == ["8", "10"]
 
@@ -168,7 +168,7 @@ def test_demographic_comparison_excludes_recognized_na(demographic_project, db_s
     demographic column (#384). Reproduced by execution before fixing
     (the internal design notes)."""
     _add_declined_participant(db_session)
-    pmap = _build_participant_group_map(db_session, 750, "Grade")
+    pmap = _build_participant_group_map(db_session, 750, "Grade", blind_scope=None)
     assert 7503 not in pmap, "N/A-valued participant must join no group"
     result = get_demographic_comparison(db_session, 750, group_by_subtype="Grade")
     assert result["groups"] == ["8", "10"]
@@ -195,5 +195,5 @@ def test_role_groups_exempt_from_na_rule(db_session):
                     role="Prefer not to say"),
     ])
     db.flush()
-    pmap = _build_participant_group_map(db, 751, "role")
+    pmap = _build_participant_group_map(db, 751, "role", blind_scope=None)
     assert pmap == {7511: "Teacher", 7512: "Prefer not to say"}

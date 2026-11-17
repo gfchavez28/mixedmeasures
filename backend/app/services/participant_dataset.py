@@ -498,6 +498,17 @@ def sync_rows(db: Session, dataset: Dataset) -> SyncReport:
     # collide on the unique index. The row's cells go with it by
     # `ON DELETE CASCADE`, as they did under the ORM delete (`DatasetRow.values`
     # is `passive_deletes`, #802).
+    if reap:
+        # #1546 (D157) — the reaped records' answers take their edit wording out of
+        # the audit trail with them (a column the researcher added here is edited by
+        # hand). Read first; it writes only when it finds an entry (#1033). Imported
+        # here: the withdrawal modules it reaches import this one.
+        from .deleted_source_audit import strip_deleted_answer_words
+
+        strip_deleted_answer_words(
+            db, project_id,
+            row_ids=[r for (r,) in db.execute(select(rows_t.c.id).where(orphaned))],
+        )
     removed = (db.execute(delete(rows_t).where(orphaned)).rowcount or 0) if reap else 0
 
     if relabel_rows:

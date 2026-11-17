@@ -5,7 +5,9 @@ EVERY test of its row, and the row says so.** Listed: the table keeps its n,
 mean and median (its SD and interval are undefined — one value has no spread,
 and every reference answers NA, never 0). Left out of: the F, Tukey's post hoc,
 the Welch t and Levene's check — all four read the groups this module returns,
-so no two of them can use different models again.
+so no two of them can use different models again. The Q–Q plot beside them asks
+too, at the PARAMETRIC minimum whatever the row's test (#1549 b, D194: normality
+is the parametric model's assumption), and names the groups it leaves out.
 
 Before this, three rules ran side by side: the comparison's F dropped a
 one-value group while its OWN Tukey table kept it (measured on A(6) B(5) C(1):

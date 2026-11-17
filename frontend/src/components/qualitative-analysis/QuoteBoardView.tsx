@@ -87,6 +87,10 @@ interface QuoteBoardViewProps {
   /** The CSV's first line while the read is coder-scoped (`frequencyFileScope`), else `null`.
    *  From the page, which knows the scope and the coder's name. */
   fileScope: string | null
+  /** #1592 — the viewer (`useAuth().user.id`): a card's chip offers *Remove code* only where
+   *  the viewer holds that code on the quote (`applied_code_details`). REQUIRED; `null` offers
+   *  no remove. */
+  viewerId: number | null
 }
 
 interface GroupedSection {
@@ -345,6 +349,7 @@ const SortableCard = memo(function SortableCard({
   isCardFocused,
   onSendToCanvas,
   onSendToNewCanvas,
+  viewerId,
 }: {
   excerpt: QuotedExcerptItem
   projectId: number
@@ -363,6 +368,7 @@ const SortableCard = memo(function SortableCard({
   isCardFocused: boolean
   onSendToCanvas?: (canvasId: number, canvasName: string) => void
   onSendToNewCanvas?: (canvasName: string) => void
+  viewerId: number | null
 }) {
   const {
     attributes,
@@ -400,6 +406,7 @@ const SortableCard = memo(function SortableCard({
         onSendToCanvas={onSendToCanvas}
         onSendToNewCanvas={onSendToNewCanvas}
         isDraggable={isDraggable}
+        viewerId={viewerId}
         dragHandleRef={setActivatorNodeRef}
         dragHandleListeners={listeners}
         isDragging={isDragging}
@@ -442,6 +449,7 @@ export default function QuoteBoardView({
   blindSettled,
   onReveal,
   fileScope,
+  viewerId,
 }: QuoteBoardViewProps) {
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
@@ -961,6 +969,7 @@ export default function QuoteBoardView({
                       isCardFocused={focusedCodeId == null || e.applied_code_ids.includes(focusedCodeId)}
                       onSendToCanvas={onSendToCanvasProp ? (canvasId, canvasName) => onSendToCanvasProp(e.excerpt_id, canvasId, canvasName) : undefined}
                       onSendToNewCanvas={onSendToNewCanvasProp ? (canvasName) => onSendToNewCanvasProp(e.excerpt_id, canvasName) : undefined}
+                      viewerId={viewerId}
                     />
                   ))}
                 </div>

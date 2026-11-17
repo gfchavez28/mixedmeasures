@@ -338,8 +338,10 @@ def _copy_file_chunked(src: Path, dest_dir: Path, fmt: str) -> Path:
         tmp.unlink(missing_ok=True)
         raise
 
-    # Drop any stale original of a *different* prior format (an id can be reused
-    # after a delete, so the target dir is not guaranteed to be empty).
+    # Drop any stale original of a *different* prior format: the target dir is not
+    # guaranteed to be empty. Conversation and observation ids are never reissued since
+    # #1639 (D319), but one freed before that upgrade can be issued once more (D320), and
+    # a replace upload writes into the same folder.
     for stale in dest_dir.glob("original.*"):
         if stale != dest:
             try:

@@ -7,6 +7,7 @@ Supports three source modes:
 """
 
 from collections import defaultdict
+from dataclasses import dataclass
 from itertools import combinations
 from sqlalchemy.orm import Session, contains_eager, joinedload
 from sqlalchemy import func, select, case as sa_case
@@ -20,16 +21,21 @@ from ..models.document import Document
 from ..models.observation import Observation
 from ..models.speaker import Speaker
 from ..models.participant import Participant
-from ..models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue, ColumnType
+from ..models.dataset import (
+    CATEGORICAL_GROUPING_TYPES, ColumnType, Dataset, DatasetColumn, DatasetRow, DatasetValue,
+)
 from ..models.excerpt import Excerpt, segment_has_any_quote_filter
 from .coding_layers import LAYER_CONSENSUS, layer_scope_filter, narrow_to_coders
+from ..routers.helpers import visible_segment_filter
 # #1536 (D116–D118): what a participant filter keeps, per passage kind — the ONE statement.
 from . import participant_filter as pf
 from .grouping import order_value_labels
 from .missing_values import column_missing_rules, is_missing
 from .value_labels import answer_label_resolver
 from .text_analysis import substantive_text_clause, treat_as_empty_for_project
+from ..models.text_coding_config import is_empty_text
 from .undefined_stats import NO_SEGMENTS, finite_or_none
+from .participant_scores import withheld_rating_columns_in_project
 from . import comparison_basis as cmp_basis
 from .multiplicity import (
     CORRECTIONS, DEFAULT_CORRECTION, adjust_p_values, best_case_adjusted, tarone_family_size,
@@ -129,6 +135,28 @@ def _chip_filter(query, coder_ids: list[int] | None, layer_scope: str | None,
     if chips_follow_coder_ids:
         return _coder_filter(query, coder_ids, layer_scope)
     return query.filter(layer_scope_filter(layer_scope))
+
+
+def _unit_chips(rows) -> tuple[dict[int, list[int]], dict[int, list[dict]]]:
+    """#1592 — ONE read of a passage list's `(unit, code, coder)` applications, two views.
+
+    `applied_code_ids` is each unit's DISTINCT codes, in the order the read returned them
+    (what the chips draw, as before); `applied_code_details` is each application's
+    `(code_id, user_id)` — who applied it — from the SAME rows, so the two can never
+    disagree about scope: both follow `_chip_filter` (the layer, and the viewer's own
+    while blind, #1531 D102). The client offers *Remove code* only on a chip the viewer
+    holds (`lib/coding-progress.ts::viewerMayRemoveChip`): the remove door deletes the
+    caller's application alone, so on a colleague's chip it removed nothing, silently.
+    """
+    codes: dict[int, list[int]] = defaultdict(list)
+    details: dict[int, list[dict]] = defaultdict(list)
+    seen: set[tuple[int, int]] = set()
+    for unit_id, code_id, user_id in rows:
+        if (unit_id, code_id) not in seen:
+            seen.add((unit_id, code_id))
+            codes[unit_id].append(code_id)
+        details[unit_id].append({"code_id": code_id, "user_id": user_id})
+    return codes, details
 
 
 # ── Internal: conversation-based frequencies ─────────────────────────────────
@@ -895,14 +923,14 @@ def get_segments_with_context(
     # Per-segment code chips: honor the selected layer (J2-C) and de-dup per
     # coder — without distinct, a code applied by N coders yields N entries
     # (consensus inflation + the #441 duplicate-key collision downstream).
+    # #1592: the coder rides the same read, so each passage also says who applied each
+    # code (`_unit_chips`) — the chips stay its distinct codes.
     focal_codes = _chip_filter(
-        db.query(CodeApplication.segment_id, CodeApplication.code_id)
+        db.query(CodeApplication.segment_id, CodeApplication.code_id, CodeApplication.user_id)
         .filter(CodeApplication.segment_id.in_(focal_seg_ids)),
         coder_ids, layer_scope, chips_follow_coder_ids,
     ).distinct().all()
-    codes_by_seg: dict[int, list[int]] = defaultdict(list)
-    for seg_id, cid in focal_codes:
-        codes_by_seg[seg_id].append(cid)
+    codes_by_seg, details_by_seg = _unit_chips(focal_codes)
 
     # Quote flag: shape-agnostic (whole OR time-range — slab 5 D32); char-range
     # excerpts deliberately don't mark a segment quoted (pre-slab-5 behavior).
@@ -947,6 +975,7 @@ def get_segments_with_context(
             "start_time": seg.start_time,
             "is_quoted": seg.id in quoted_seg_ids,
             "applied_code_ids": codes_by_seg.get(seg.id, []),
+            "applied_code_details": details_by_seg.get(seg.id, []),
             "participant_id": participant.id if participant else None,
             "participant_name": (participant.display_name or participant.identifier) if participant else None,
         }
@@ -1056,13 +1085,11 @@ def get_segments_with_context(
             doc_segs_by_doc[seg.document_id].append(seg)
 
         doc_focal_codes = _chip_filter(
-            db.query(CodeApplication.segment_id, CodeApplication.code_id)
+            db.query(CodeApplication.segment_id, CodeApplication.code_id, CodeApplication.user_id)
             .filter(CodeApplication.segment_id.in_(doc_focal_seg_ids)),
             coder_ids, layer_scope, chips_follow_coder_ids,
         ).distinct().all()
-        doc_codes_by_seg: dict[int, list[int]] = defaultdict(list)
-        for seg_id, cid in doc_focal_codes:
-            doc_codes_by_seg[seg_id].append(cid)
+        doc_codes_by_seg, doc_details_by_seg = _unit_chips(doc_focal_codes)  # #1592
 
         doc_quoted_seg_ids = set(
             eid for (eid,) in db.query(Excerpt.segment_id).filter(
@@ -1100,6 +1127,7 @@ def get_segments_with_context(
                 "start_time": None,
                 "is_quoted": seg.id in doc_quoted_seg_ids,
                 "applied_code_ids": doc_codes_by_seg.get(seg.id, []),
+                "applied_code_details": doc_details_by_seg.get(seg.id, []),
                 "participant_id": None,
                 "participant_name": None,
             }
@@ -1190,13 +1218,11 @@ def get_segments_with_context(
             obs_segs_by_obs[seg.observation_id].append(seg)
 
         obs_focal_codes = _chip_filter(
-            db.query(CodeApplication.segment_id, CodeApplication.code_id)
+            db.query(CodeApplication.segment_id, CodeApplication.code_id, CodeApplication.user_id)
             .filter(CodeApplication.segment_id.in_(obs_focal_seg_ids)),
             coder_ids, layer_scope, chips_follow_coder_ids,
         ).distinct().all()
-        obs_codes_by_seg: dict[int, list[int]] = defaultdict(list)
-        for seg_id, cid in obs_focal_codes:
-            obs_codes_by_seg[seg_id].append(cid)
+        obs_codes_by_seg, obs_details_by_seg = _unit_chips(obs_focal_codes)  # #1592
 
         # ONE query answers both "is this clip quoted?" and "where are its
         # sub-clip quotes?" (slab 5c). It already read these rows and threw the
@@ -1257,6 +1283,7 @@ def get_segments_with_context(
                 "is_quoted": seg.id in obs_quoted_seg_ids,
                 "quote_ranges": obs_quote_ranges.get(seg.id, []),
                 "applied_code_ids": obs_codes_by_seg.get(seg.id, []),
+                "applied_code_details": obs_details_by_seg.get(seg.id, []),
                 "participant_id": None,
                 "participant_name": None,
             }
@@ -1315,14 +1342,27 @@ def get_segments_with_context(
     }
 
 
+def _withheld_subtypes(db: Session, project_id: int, demo_cols, blind_scope) -> set[str]:
+    """#1615: the subtypes among ``demo_cols`` holding a column withheld under the scope."""
+    withheld = withheld_rating_columns_in_project(db, project_id, blind_scope)
+    return {c.demographic_subtype or c.column_text for c in demo_cols if c.id in withheld}
+
+
 def get_demographic_filter_options(
     db: Session,
     project_id: int,
+    *,
+    blind_scope,
 ) -> dict:
     """Get available demographic filter options for a project.
 
     Returns demographic columns grouped by subtype, with distinct values
     and which participant IDs match each value. Also returns conversation list.
+
+    #1615: under a blind scope a subtype holding a rating-derived column is LEFT OUT
+    whole and counted (``withheld_rating_filters``) — its values would name who is in a
+    band of colleagues' ratings. The group-by refuses the same subtype
+    (`_build_participant_group_map`).
     """
     demo_cols = (
         db.query(DatasetColumn)
@@ -1333,6 +1373,8 @@ def get_demographic_filter_options(
         )
         .all()
     )
+    hidden = _withheld_subtypes(db, project_id, demo_cols, blind_scope)
+    demo_cols = [c for c in demo_cols if (c.demographic_subtype or c.column_text) not in hidden]
 
     if not demo_cols:
         convs = (
@@ -1344,6 +1386,7 @@ def get_demographic_filter_options(
         return {
             "filters": [],
             "conversations": [{"id": c_id, "name": c_name} for c_id, c_name in convs],
+            "withheld_rating_filters": len(hidden),
         }
 
     linked_rows = (
@@ -1436,6 +1479,7 @@ def get_demographic_filter_options(
     return {
         "filters": filters,
         "conversations": [{"id": c_id, "name": c_name} for c_id, c_name in convs],
+        "withheld_rating_filters": len(hidden),
     }
 
 
@@ -1924,13 +1968,17 @@ def get_coded_comments_with_context(
     # Get all code applications for these dataset_values — layer-scoped + per-coder
     # de-duped (see the conversation focal_codes note; #447 / #441 class).
     all_apps = _chip_filter(
-        db.query(CodeApplication.dataset_value_id, CodeApplication.code_id)
+        db.query(CodeApplication.dataset_value_id, CodeApplication.code_id, CodeApplication.user_id)
         .filter(CodeApplication.dataset_value_id.in_(paged_dv_ids)),
         coder_ids, layer_scope, chips_follow_coder_ids,
     ).distinct().all()
-    codes_by_dv: dict[int, list[int]] = defaultdict(list)
-    for dv_id, cid in all_apps:
-        codes_by_dv[dv_id].append(cid)
+    codes_by_dv, details_by_dv = _unit_chips(all_apps)  # #1592
+
+    # #1640: an answer the project counts as no response ("N/A", …) stays in this
+    # list — it is a coding, and the header and badges above it (`get_code_frequencies`'
+    # usage count, #1526 D80) count it — and says so, because the Descriptives table's
+    # shares leave it out. Decided by the ONE rule, `is_empty_text` (#519).
+    treat_as_empty = treat_as_empty_for_project(db, project_id)
 
     # Group by dataset
     ds_groups: dict[int, dict] = {}
@@ -1954,6 +2002,8 @@ def get_coded_comments_with_context(
             "dataset_name": v.ds_name,
             "column_name": col_display,
             "applied_code_ids": codes_by_dv.get(v.id, []),
+            "applied_code_details": details_by_dv.get(v.id, []),
+            "counted_as_no_response": is_empty_text(v.value_text, treat_as_empty),
         })
 
     datasets = []
@@ -2097,12 +2147,111 @@ def get_code_cooccurrence(
 
 # ── Participant → demographic group mapping ───────────────────────────────
 
+class GroupingColumnError(ValueError):
+    """The variable named to form participant groups cannot (D166).
+
+    A subclass, so a caller that catches ``ValueError`` still does; ``status_code``
+    says which refusal it is — 404 for a column outside this project (never a hint
+    that it exists elsewhere), 400 for one whose TYPE cannot form groups.
+    """
+
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+#: #1615 — why a variable worked out from participant scores forms no groups while blind.
+#: The participant table's words (#1608 D198: *"A participant score combines every coder's
+#: ratings, so it would show your colleagues' judgements."*), said of a GROUPING: a band of
+#: a score tells a blind coder which band each person's every-coder score fell in.
+def rating_grouping_refusal(name: str) -> str:
+    return (f"“{name}” cannot form groups while blind: it comes from participant scores, "
+            "which combine every coder's ratings, so its groups would show your "
+            "colleagues' judgements.")
+
+
+def grouping_column(
+    db: Session, project_id: int, column_id: int, *, blind_scope,
+) -> DatasetColumn:
+    """The project's column ``column_id``, if it may form groups — else the refusal.
+
+    The ONE eligibility gate for grouping participants by a column id: the comparison
+    and the joint display both ask it, so neither can accept what the other refuses.
+
+    🔴 #1615: ``blind_scope`` is REQUIRED (D197's shape) — the viewer's coder ids while
+    blind mode withholds, else None. A column the participant table's snapshot fills
+    from a coder outside it (`participant_scores.withheld_rating_columns_in_project`:
+    a score, its rated-passage count, anything computed or derived from one) is
+    refused with 409 — its groups would sort people by colleagues' ratings. Never a
+    live self-scoped substitute (D198).
+    """
+    column = (
+        db.query(DatasetColumn)
+        .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+        .filter(DatasetColumn.id == column_id, Dataset.project_id == project_id)
+        .first()
+    )
+    if column is None:
+        raise GroupingColumnError("That variable is not in this project.", 404)
+    if column.column_type not in CATEGORICAL_GROUPING_TYPES:
+        name = column.column_name or column.column_text
+        raise GroupingColumnError(
+            f"“{name}” cannot form groups: only an ordinal, nominal, binary or "
+            "demographic variable can. A continuous variable can be banded into "
+            "groups with a recode first.",
+            400,
+        )
+    if column.id in withheld_rating_columns_in_project(db, project_id, blind_scope):
+        raise GroupingColumnError(
+            rating_grouping_refusal(column.column_name or column.column_text), 409)
+    return column
+
+
+def _participant_groups_by_column(db: Session, column: DatasetColumn) -> dict[int, str]:
+    """Map participant_id → their answer's group on ONE column (D166).
+
+    A column belongs to one dataset, and a dataset holds at most one row per
+    participant (`uq_dataset_rows_dataset_participant`), so each person has at most
+    one cell here — #1549 (c)'s "two values for one demographic" cannot arise on this
+    path. The rules are the subtype path's: #598/#592's column-aware missing rule (a
+    declared or default non-answer forms no group) and #1332's label the answer
+    matches (`answer_label_resolver`). Read through the column's cells to their linked
+    rows — never a list of row ids bound into a query (#1548 a, `sql-id-sets.md`).
+    """
+    rules = column_missing_rules(column)
+    as_label = answer_label_resolver(column)
+    mapping: dict[int, str] = {}
+    cells = (
+        db.query(DatasetValue.value_text, DatasetRow.participant_id)
+        .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+        .filter(
+            DatasetValue.column_id == column.id,
+            DatasetRow.dataset_id == column.dataset_id,
+            DatasetRow.participant_id != None,
+        )
+    )
+    for value_text, participant_id in cells:
+        if not value_text or not value_text.strip():
+            continue
+        if is_missing(value_text, rules):
+            continue  # missing never defines a group (#598; #592: column-aware)
+        mapping[participant_id] = as_label(value_text).strip()
+    return mapping
+
+
 def _build_participant_group_map(
     db: Session,
     project_id: int,
-    subtype: str,
+    subtype: str | None = None,
+    *,
+    column_id: int | None = None,
+    blind_scope,
 ) -> dict[int, str]:
     """Map participant_id → demographic group value for the given subtype.
+
+    D166: or for ONE column named by id (``column_id``), of any categorical type
+    (`grouping_column` decides which). Exactly one of the two. The subtype path stays
+    for saved materials that carry ``group_by_subtype``.
 
     Reuses the same linkage logic as get_demographic_filter_options().
 
@@ -2113,6 +2262,12 @@ def _build_participant_group_map(
     rather than routing through ``grouping.load_grouping_values``. #592: the
     rule is column-aware (a declared ``missing_values`` list wins).
     """
+    if (subtype is None) == (column_id is None):
+        raise ValueError("group participants by a subtype or by a column id, exactly one")
+    if column_id is not None:
+        return _participant_groups_by_column(
+            db, grouping_column(db, project_id, column_id, blind_scope=blind_scope))
+
     # Check participant.role first if subtype == "role".
     # Deliberately EXEMPT from the N/A rule: role is a curated participant
     # field the researcher typed, not a survey answer (#598).
@@ -2144,6 +2299,11 @@ def _build_participant_group_map(
         c for c in demo_cols
         if (c.demographic_subtype or c.column_text) == subtype
     ]
+    # #1615: a subtype is ONE grouping, so one rating-derived column in it withholds it
+    # whole (fail closed) — the Filters list leaves the same subtype out
+    # (`get_demographic_filter_options`), so the two cannot disagree.
+    if _withheld_subtypes(db, project_id, target_cols, blind_scope):
+        raise GroupingColumnError(rating_grouping_refusal(subtype), 409)
     if not target_cols:
         return mapping
 
@@ -2156,40 +2316,34 @@ def _build_participant_group_map(
     # quantitative comparison's groups from the same column.
     as_label_by_col = {c.id: answer_label_resolver(c) for c in target_cols}
 
-    linked_rows = (
-        db.query(DatasetRow.id, DatasetRow.participant_id, DatasetRow.dataset_id)
-        .join(Dataset, DatasetRow.dataset_id == Dataset.id)
+    # #1548 (a): ONE read from the target columns' cells to their linked rows. It
+    # used to read every linked row of the project, then bind every one of their ids
+    # into `row_id IN (…)` — 225,001 parameters on the D12 corpus, 25,000 short of
+    # SQLite's ceiling (#960: a raw 500 past 250,000 linked rows), planned as a SCAN of
+    # every cell in the project (1.6 s there; this read 0.45 s). The target columns
+    # are the project's (read above), so their cells' rows are too.
+    # ⚠️ ORDER BY the cell's id keeps who-wins for a person with two values (#1549
+    # (c), decided with D166) what the old SCAN gave on this corpus: the later cell.
+    values = (
+        db.query(DatasetValue.column_id, DatasetValue.value_text,
+                 DatasetRow.participant_id, DatasetRow.dataset_id)
+        .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
         .filter(
-            Dataset.project_id == project_id,
+            DatasetValue.column_id.in_(target_col_ids),
             DatasetRow.participant_id != None,
         )
+        .order_by(DatasetValue.id)
         .all()
     )
-    row_participant = {r.id: r.participant_id for r in linked_rows}
-    row_dataset = {r.id: r.dataset_id for r in linked_rows}
-    linked_row_ids = [r.id for r in linked_rows]
-
-    if linked_row_ids and target_col_ids:
-        values = (
-            db.query(DatasetValue.row_id, DatasetValue.column_id, DatasetValue.value_text)
-            .filter(
-                DatasetValue.row_id.in_(linked_row_ids),
-                DatasetValue.column_id.in_(target_col_ids),
-            )
-            .all()
-        )
-        for row_id, col_id, val_text in values:
-            if not val_text or not val_text.strip():
-                continue
-            if is_missing(val_text, rules_by_col.get(col_id)):
-                # missing never defines a group (#598; #592: column-aware)
-                continue
-            pid = row_participant.get(row_id)
-            if pid is None:
-                continue
-            if col_dataset.get(col_id) != row_dataset.get(row_id):
-                continue
-            mapping[pid] = as_label_by_col[col_id](val_text).strip()
+    for col_id, val_text, pid, row_dataset_id in values:
+        if not val_text or not val_text.strip():
+            continue
+        if is_missing(val_text, rules_by_col.get(col_id)):
+            # missing never defines a group (#598; #592: column-aware)
+            continue
+        if col_dataset.get(col_id) != row_dataset_id:
+            continue
+        mapping[pid] = as_label_by_col[col_id](val_text).strip()
 
     return mapping
 
@@ -2503,8 +2657,13 @@ def get_source_frequencies(
     coder_ids: list[int] | None = None,
     layer_scope: str | None = None,
     observation_ids: list[int] | None = None,
+    *,
+    blind_scope=None,
 ) -> dict:
     """Compute per-source, per-code frequencies with word counts.
+
+    #1615: ``blind_scope`` (the viewer while blind mode withholds) reaches the subtype
+    grouping — a rating-derived subtype is refused (`_build_participant_group_map`).
 
     ⚠️ **#749 — this reads an empty id list DIFFERENTLY from its sibling
     `get_code_frequencies` (above, ~line 462). Read that one before changing
@@ -2543,7 +2702,8 @@ def get_source_frequencies(
     # Build participant→group mapping if grouping requested
     part_group_map: dict[int, str] | None = None
     if group_by_subtype:
-        part_group_map = _build_participant_group_map(db, project_id, group_by_subtype)
+        part_group_map = _build_participant_group_map(
+            db, project_id, group_by_subtype, blind_scope=blind_scope)
 
     # ── Conversations ──
     conversations = (
@@ -3700,10 +3860,184 @@ def get_source_level_cooccurrence(
 
 # ── Demographic Comparison ────────────────────────────────────────────────
 
+@dataclass
+class ParticipantGather:
+    """Every passage in scope and the codes on it, folded per PERSON (#1548 (a)).
+
+    The code-by-group comparison's steps 1 and 2, extracted so the joint display's
+    code strand (D167/D168) reads the same people, the same passages and the same
+    codes — two gathers would be two answers to "who used this code" (#733).
+    ``person_codes`` rows are (participant id | None, code id, distinct passages).
+
+    ``coded_people`` (#1626, D243) is everyone with at least one passage in scope that
+    carries a coding under the request's coder AND layer scope — J-A's "coded" (a
+    NON-universal code, a visible passage), over EVERY code, never narrowed by the code
+    selection: a person coded only with other codes is coded. A person with material and
+    NO coding counts as "did not use" every code, which is true only once their material
+    has been coded, so both consumers SAY how many there are per group. It follows the
+    coder scope on purpose: a blind coder's shares are over the people she has coded, and
+    a count over every coder would tell her how far her colleagues have got (#964).
+    """
+
+    sources: dict[str, set[int]]
+    person_passages: dict[int, int]
+    person_words: dict[int, int]
+    unassigned: int
+    person_codes: list[tuple[int | None, int, int]]
+    coded_people: set[int]
+
+
+def gather_participant_codes(
+    db: Session,
+    project_id: int,
+    *,
+    conversation_ids: list[int] | None,
+    document_ids: list[int] | None,
+    text_column_ids: list[int] | None,
+    exclude_facilitator: bool,
+    participant_ids: list[int] | None,
+    code_ids: list[int] | None,
+    coder_ids: list[int] | None,
+    layer_scope: str | None,
+) -> ParticipantGather:
+    """Steps 1–2 of ``get_demographic_comparison`` — see its docstring for the rules.
+
+    Per source kind, ``None`` = every source of that kind and a list = exactly those
+    (``[]`` = none, #1297). Every keyword is REQUIRED, so a second caller decides each
+    scope rather than inheriting the comparison's.
+    """
+    # ── 1. Every passage in scope, folded per PERSON (None = nobody) as it is read ──
+    # Rows of (participant id | None, source id, passages, words) — one per person and
+    # source, never one per passage (#1548 (a): the per-passage dicts and their second
+    # pass cost seconds on 1.5M passages). Filtered by the SOURCE selection and the
+    # project; never by a participant-id list built from the data (SQLite's
+    # 250,000-parameter ceiling, `sql-id-sets.md`).
+    sources: dict[str, set[int]] = {"conv": set(), "doc": set(), "col": set()}
+    wanted = set(participant_ids) if participant_ids else None
+    person_passages: dict[int, int] = defaultdict(int)
+    person_words: dict[int, int] = defaultdict(int)
+    unassigned = 0
+
+    # #1548 (b): both scopes reach a segment through its PARENT, so the visibility test
+    # is `from_parent=True` (#1463 D62): with the default form SQLite started every arm
+    # at `ix_segments_merged_into_id` — every visible segment on the INSTALL — and
+    # probed each for the parent (0.4 s per document arm on a 1.2M-turn install with
+    # no documents at all; ~0 ms this way).
+    def _scope_conv(q):
+        q = (q.join(Conversation, Segment.conversation_id == Conversation.id)
+              .outerjoin(Speaker, Segment.speaker_id == Speaker.id)
+              .filter(Conversation.project_id == project_id,
+                      *visible_segment_filter(from_parent=True)))
+        if exclude_facilitator:
+            q = q.filter((Speaker.is_facilitator == 0) | (Speaker.id == None))
+        if conversation_ids is not None:
+            q = q.filter(Segment.conversation_id.in_(conversation_ids))
+        return q
+
+    def _scope_doc(q):
+        q = (q.join(Document, Segment.document_id == Document.id)
+              .filter(Document.project_id == project_id,
+                      *visible_segment_filter(from_parent=True)))
+        if document_ids is not None:
+            q = q.filter(Segment.document_id.in_(document_ids))
+        return q
+
+    tae = treat_as_empty_for_project(db, project_id)
+
+    def _scope_text(q):
+        q = (q.join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
+              .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+              .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
+              .filter(Dataset.project_id == project_id,
+                      DatasetColumn.column_type == ColumnType.OPEN_TEXT,
+                      substantive_text_clause(tae)))
+        if text_column_ids is not None:
+            q = q.filter(DatasetValue.column_id.in_(text_column_ids))
+        return q
+
+    # Each arm: (its kind, the person column, the source column, the passage's id and
+    # word-count columns, the coding column that names the passage, the passage table,
+    # its scope, and whether SQL counts per person and source). A passage has ONE
+    # person, so counting per person loses nothing the per-passage fold had. Turns and
+    # document passages are counted in SQL (many per person and source: 600,300 turns
+    # → 900 rows on D12); answers are read one row each, because a person has one per
+    # column and a GROUP BY there only adds a sort (D12: 1.8 s plain, 2.6–4.8 s grouped).
+    arms = []
+    if conversation_ids is None or conversation_ids:
+        arms.append(("conv", Speaker.participant_id, Segment.conversation_id, Segment.id,
+                     Segment.word_count, CodeApplication.segment_id, Segment, _scope_conv, True))
+    if document_ids is None or document_ids:
+        arms.append(("doc", Document.participant_id, Segment.document_id, Segment.id,
+                     Segment.word_count, CodeApplication.segment_id, Segment, _scope_doc, True))
+    if text_column_ids is None or text_column_ids:
+        arms.append(("col", DatasetRow.participant_id, DatasetValue.column_id, DatasetValue.id,
+                     DatasetValue.word_count, CodeApplication.dataset_value_id, DatasetValue,
+                     _scope_text, False))
+
+    for kind, person, source, unit_id, word_count, _target, table, scope, grouped in arms:
+        if grouped:
+            rows = (scope(db.query(person, source, func.count(unit_id), func.sum(word_count))
+                          .select_from(table))
+                    .group_by(person, source).all())
+        else:
+            rows = ((pid, src, 1, wc) for pid, src, wc in
+                    scope(db.query(person, source, word_count).select_from(table)).all())
+        for pid, src, n, wc in rows:
+            sources[kind].add(src)
+            # A participant filter makes "unassigned" moot (source frequencies' rule).
+            if wanted is not None and pid not in wanted:
+                continue
+            if pid is None:
+                unassigned += n
+                continue
+            person_passages[pid] += n
+            person_words[pid] += int(wc or 0)
+
+    # ── 2. Which codes each PERSON's passages carry (coder + layer scope) ──
+    # Rows of (participant id | None, code id, distinct passages carrying it) — per
+    # person, never per passage (#1548 (a): 54,000 rows where the per-passage read
+    # returned 1,800,900 on D12, 4.2 s against 9.9 s).
+    def _code_scope(q):
+        if code_ids:
+            q = q.filter(CodeApplication.code_id.in_(code_ids))
+        return _coder_filter(q, coder_ids, layer_scope)  # + J2-B consensus exclusion
+
+    person_codes: list[tuple[int | None, int, int]] = []
+    for _kind, person, _source, _uid, _wc, target, table, scope, _grouped in arms:
+        q = (db.query(person, CodeApplication.code_id, func.count(func.distinct(target)))
+             .select_from(CodeApplication)
+             .join(table, target == table.id))
+        person_codes.extend(_code_scope(scope(q)).group_by(person, CodeApplication.code_id).all())
+
+    # ── 3. Who has ANY coding in scope (#1626, D243) — see the dataclass ──
+    # With no code selected, `person_codes` already holds every code, so the answer is
+    # free; a selection (and every joint display) narrowed it, so ask once per arm, under
+    # the same coder + layer scope and the same passage scope, over every code.
+    universal_ids = {cid for (cid,) in db.query(Code.id).filter(
+        Code.project_id == project_id, Code.is_universal == True)}  # noqa: E712
+    coded_people: set[int] = set()
+    if not code_ids:
+        coded_people = {pid for pid, cid, _n in person_codes
+                        if pid is not None and cid not in universal_ids}
+    else:
+        for _kind, person, _source, _uid, _wc, target, table, scope, _grouped in arms:
+            q = (db.query(person)
+                 .select_from(CodeApplication)
+                 .join(table, target == table.id)
+                 .distinct())
+            if universal_ids:
+                q = q.filter(CodeApplication.code_id.notin_(universal_ids))
+            coded_people.update(pid for (pid,) in _coder_filter(scope(q), coder_ids, layer_scope)
+                                if pid is not None)
+
+    return ParticipantGather(sources, person_passages, person_words, unassigned, person_codes,
+                             coded_people)
+
+
 def get_demographic_comparison(
     db: Session,
     project_id: int,
-    group_by_subtype: str,
+    group_by_subtype: str | None = None,
     code_ids: list[int] | None = None,
     conversation_ids: list[int] | None = None,
     text_column_ids: list[int] | None = None,
@@ -3715,8 +4049,16 @@ def get_demographic_comparison(
     observation_ids: list[int] | None = None,
     unit: str = cmp_basis.DEFAULT_COMPARISON_UNIT,
     correction: str = DEFAULT_CORRECTION,
+    group_by_column_id: int | None = None,
+    *,
+    blind_scope=None,
 ) -> dict:
     """Compare, per code, how many PARTICIPANTS in each group used it (#1323).
+
+    **The groups (D166).** By ``group_by_subtype`` (a demographic subtype NAME, or
+    ``role``, matched across every dataset — what saved materials carry) or by
+    ``group_by_column_id`` (ONE categorical column of any participant-linked dataset,
+    `grouping_column` deciding which). Exactly one.
 
     **The unit.** A participant counts once: they "used" a code when at least one of
     their passages in the material compared carries it. The denominator is the
@@ -3750,7 +4092,9 @@ def get_demographic_comparison(
     if correction not in CORRECTIONS:
         raise ValueError(f"unknown multiplicity correction: {correction!r}")
 
-    part_group = _build_participant_group_map(db, project_id, group_by_subtype)
+    part_group = _build_participant_group_map(
+        db, project_id, group_by_subtype, column_id=group_by_column_id,
+        blind_scope=blind_scope)  # #1615
     # Filter to requested participants
     if participant_ids:
         wanted = set(participant_ids)
@@ -3760,114 +4104,41 @@ def get_demographic_comparison(
     # before "8" (the #406 class) in the comparison columns.
     groups = order_value_labels(set(part_group.values()))
 
-    # ── 1. Every passage in scope, and the person it belongs to (None = nobody) ──
-    # Rows of (kind, unit id, participant id | None, word count). Filtered by the
-    # SOURCE selection and the project; never by a participant-id list built from
-    # the data (SQLite's 250,000-parameter ceiling, `sql-id-sets.md`).
-    units: dict[tuple[str, int], int | None] = {}
-    words: dict[tuple[str, int], int] = {}
-    sources: dict[str, set[int]] = {"conv": set(), "doc": set(), "col": set()}
+    # ── 1–2. Every passage in scope and the codes on it, folded per PERSON ──
+    gathered = gather_participant_codes(
+        db, project_id,
+        conversation_ids=conversation_ids, document_ids=document_ids,
+        text_column_ids=text_column_ids, exclude_facilitator=exclude_facilitator,
+        participant_ids=participant_ids, code_ids=code_ids,
+        coder_ids=coder_ids, layer_scope=layer_scope,
+    )
+    sources = gathered.sources
+    person_passages = gathered.person_passages
+    person_words = gathered.person_words
+    unassigned = gathered.unassigned
+    person_codes = gathered.person_codes
 
-    def _scope_conv(q):
-        q = (q.join(Conversation, Segment.conversation_id == Conversation.id)
-              .outerjoin(Speaker, Segment.speaker_id == Speaker.id)
-              .filter(Conversation.project_id == project_id,
-                      Segment.merged_into_id == None, Segment.split_into_id == None))
-        if exclude_facilitator:
-            q = q.filter((Speaker.is_facilitator == 0) | (Speaker.id == None))
-        if conversation_ids is not None:
-            q = q.filter(Segment.conversation_id.in_(conversation_ids))
-        return q
-
-    def _scope_doc(q):
-        q = (q.join(Document, Segment.document_id == Document.id)
-              .filter(Document.project_id == project_id,
-                      Segment.merged_into_id == None, Segment.split_into_id == None))
-        if document_ids is not None:
-            q = q.filter(Segment.document_id.in_(document_ids))
-        return q
-
-    tae = treat_as_empty_for_project(db, project_id)
-
-    def _scope_text(q):
-        q = (q.join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
-              .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
-              .join(DatasetRow, DatasetValue.row_id == DatasetRow.id)
-              .filter(Dataset.project_id == project_id,
-                      DatasetColumn.column_type == ColumnType.OPEN_TEXT,
-                      substantive_text_clause(tae)))
-        if text_column_ids is not None:
-            q = q.filter(DatasetValue.column_id.in_(text_column_ids))
-        return q
-
-    if conversation_ids is None or conversation_ids:
-        for sid, pid, src, wc in _scope_conv(
-            db.query(Segment.id, Speaker.participant_id, Segment.conversation_id, Segment.word_count)
-        ).all():
-            units[("seg", sid)] = pid
-            words[("seg", sid)] = int(wc or 0)
-            sources["conv"].add(src)
-    if document_ids is None or document_ids:
-        for sid, pid, src, wc in _scope_doc(
-            db.query(Segment.id, Document.participant_id, Segment.document_id, Segment.word_count)
-        ).all():
-            units[("seg", sid)] = pid
-            words[("seg", sid)] = int(wc or 0)
-            sources["doc"].add(src)
-    if text_column_ids is None or text_column_ids:
-        for vid, pid, src, wc in _scope_text(
-            db.query(DatasetValue.id, DatasetRow.participant_id, DatasetValue.column_id, DatasetValue.word_count)
-        ).all():
-            units[("val", vid)] = pid
-            words[("val", vid)] = int(wc or 0)
-            sources["col"].add(src)
-
-    # ── 2. Which code each passage carries (coder + layer scope; distinct) ──
-    unit_codes: dict[tuple[str, int], set[int]] = defaultdict(set)
-
-    def _code_scope(q):
-        if code_ids:
-            q = q.filter(CodeApplication.code_id.in_(code_ids))
-        return _coder_filter(q, coder_ids, layer_scope)  # + J2-B consensus exclusion
-
-    if conversation_ids is None or conversation_ids:
-        q = db.query(CodeApplication.segment_id, CodeApplication.code_id).join(
-            Segment, CodeApplication.segment_id == Segment.id)
-        for sid, cid in _code_scope(_scope_conv(q)).distinct().all():
-            unit_codes[("seg", sid)].add(cid)
-    if document_ids is None or document_ids:
-        q = db.query(CodeApplication.segment_id, CodeApplication.code_id).join(
-            Segment, CodeApplication.segment_id == Segment.id)
-        for sid, cid in _code_scope(_scope_doc(q)).distinct().all():
-            unit_codes[("seg", sid)].add(cid)
-    if text_column_ids is None or text_column_ids:
-        q = db.query(CodeApplication.dataset_value_id, CodeApplication.code_id).join(
-            DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
-        for vid, cid in _code_scope(_scope_text(q)).distinct().all():
-            unit_codes[("val", vid)].add(cid)
-
-    # ── 3. Fold passages into groups: the denominators in both units ──
-    if participant_ids:
-        # A participant filter makes "unassigned" moot (source frequencies' rule).
-        wanted = set(participant_ids)
-        units = {k: p for k, p in units.items() if p in wanted}
-    unassigned = sum(1 for p in units.values() if p is None)
-    without_group = {p for p in units.values() if p is not None and p not in part_group}
+    # ── 3. Fold people into groups: the denominators in both units ──
+    without_group = {p for p in person_passages if p not in part_group}
     group_people: dict[str, set[int]] = {g: set() for g in groups}
     group_passages: dict[str, int] = defaultdict(int)
     group_words: dict[str, int] = defaultdict(int)
     code_people: dict[str, dict[int, set[int]]] = {g: defaultdict(set) for g in groups}
     code_passages: dict[str, dict[int, int]] = {g: defaultdict(int) for g in groups}
-    for key, pid in units.items():
-        g = part_group.get(pid) if pid is not None else None
+    for pid, n in person_passages.items():
+        g = part_group.get(pid)
         if g is None:
             continue
         group_people[g].add(pid)
-        group_passages[g] += 1
-        group_words[g] += words.get(key, 0)
-        for cid in unit_codes.get(key, ()):
-            code_people[g][cid].add(pid)
-            code_passages[g][cid] += 1
+        group_passages[g] += n
+        group_words[g] += person_words[pid]
+    for pid, cid, n in person_codes:
+        # `part_group` already holds only the filtered people (top of the function).
+        g = part_group.get(pid) if pid is not None else None
+        if g is None:
+            continue
+        code_people[g][cid].add(pid)
+        code_passages[g][cid] += n
 
     def _n(g: str) -> int:
         return len(group_people[g]) if unit == cmp_basis.COMPARISON_UNIT_PARTICIPANT else group_passages[g]
@@ -3898,10 +4169,17 @@ def get_demographic_comparison(
         "observations_left_out": int(n_obs_left_out),
         "unassigned_passages": unassigned,
         "participants_without_group": len(without_group),
+        # #1626 (D244): whose coding `group_totals[g].without_coding` is about.
+        "no_coding_scope": cmp_basis.no_coding_scope(coder_ids, layer_scope),
     }
+    # #1626 (D243): the group's participants with material and NO coding in scope. They
+    # count as "did not use" every code — true only once their material has been coded —
+    # so the result SAYS how many there are; the denominator and the test stay D5's.
+    coded_people = gathered.coded_people
     group_totals = {
         g: {"n": _n(g), "participants": len(group_people[g]),
-            "total_segments": group_passages[g], "total_word_count": group_words[g]}
+            "total_segments": group_passages[g], "total_word_count": group_words[g],
+            "without_coding": len(group_people[g] - coded_people)}
         for g in groups
     }
     if len(groups) < 2:
@@ -4046,7 +4324,13 @@ def get_saturation_data(
     """Compute code saturation curve across conversations, documents, and
     observations in chronological (``created_at``) order — each source is one
     x-axis step, so a coded clip is invisible on the curve until its
-    observation joins the interleave."""
+    observation joins the interleave.
+
+    #1544: each source list reads as the comparison's does (#1297, #1527 D84):
+    ``None`` (absent) is every source of that kind, ``[]`` is NONE of it
+    (`_none_of_this_kind`). The page sends ``[]`` for a kind only when something
+    of another kind is selected, so one selected interview is a one-source curve
+    — before #1544 it walked every document and clip in the project."""
 
     # Get conversations in chronological order
     conversations = (
@@ -4090,7 +4374,8 @@ def get_saturation_data(
     if conversation_ids:
         conv_q = conv_q.filter(Segment.conversation_id.in_(conversation_ids))
     conv_q = _coder_filter(conv_q, coder_ids, layer_scope)
-    conv_code_pairs = conv_q.all()
+    # #1544: a kind sent as `[]` is not read at all (the interleave below skips it too).
+    conv_code_pairs = [] if _none_of_this_kind(conversation_ids) else conv_q.all()
 
     # Get all (document_id, code_id) pairs
     doc_q = (
@@ -4107,7 +4392,7 @@ def get_saturation_data(
     if document_ids:
         doc_q = doc_q.filter(Segment.document_id.in_(document_ids))
     doc_q = _coder_filter(doc_q, coder_ids, layer_scope)
-    doc_code_pairs = doc_q.all()
+    doc_code_pairs = [] if _none_of_this_kind(document_ids) else doc_q.all()
 
     # Get all (observation_id, code_id) pairs
     obs_q = (
@@ -4124,7 +4409,7 @@ def get_saturation_data(
     if observation_ids:
         obs_q = obs_q.filter(Segment.observation_id.in_(observation_ids))
     obs_q = _coder_filter(obs_q, coder_ids, layer_scope)
-    obs_code_pairs = obs_q.all()
+    obs_code_pairs = [] if _none_of_this_kind(observation_ids) else obs_q.all()
 
     # Build source → set of code_ids (or category_ids)
     source_items: dict[str, set] = defaultdict(set)
@@ -4171,17 +4456,22 @@ def get_saturation_data(
         item_names = code_names
 
     # Interleave conversations, documents, and observations chronologically
+    # #1544: `is not None`, never truthiness — `[]` keeps NO source of its kind, where
+    # the truthy test read it as every one.
+    def _kept(ids: list[int] | None, source_id: int) -> bool:
+        return ids is None or source_id in ids
+
     all_sources = []
     for c in conversations:
-        if conversation_ids and c.id not in conversation_ids:
+        if not _kept(conversation_ids, c.id):
             continue
         all_sources.append(("conversation", c.id, c.name, c.created_at))
     for d in documents:
-        if document_ids and d.id not in document_ids:
+        if not _kept(document_ids, d.id):
             continue
         all_sources.append(("document", d.id, d.name, d.created_at))
     for o in observations:
-        if observation_ids and o.id not in observation_ids:
+        if not _kept(observation_ids, o.id):
             continue
         all_sources.append(("observation", o.id, o.name, o.created_at))
     all_sources.sort(key=lambda x: (x[3], x[0], x[1]))

@@ -35,6 +35,9 @@ interface QuoteCardProps {
   onFocusCode?: (codeId: number) => void
   onSendToCanvas?: (canvasId: number, canvasName: string) => void
   onSendToNewCanvas?: (canvasName: string) => void
+  /** #1592 — the viewer: a chip offers *Remove code* only where the viewer holds that code on
+   *  this quote (`excerpt.applied_code_details` says who applied each). REQUIRED. */
+  viewerId: number | null
   // DnD props (from useSortable)
   isDraggable?: boolean
   dragHandleRef?: Ref<HTMLButtonElement>
@@ -176,6 +179,7 @@ const QuoteCard = memo(function QuoteCard({
   onFocusCode,
   onSendToCanvas,
   onSendToNewCanvas,
+  viewerId,
   isDraggable = false,
   dragHandleRef,
   dragHandleListeners,
@@ -280,6 +284,9 @@ const QuoteCard = memo(function QuoteCard({
               codeMap={codeMap}
               allCodes={allCodes}
               codesStatus={codesStatus}
+              // #1592: a remove only where the viewer holds the code — the board names
+              // who applied each (`applied_code_details`, the scope's own while blind).
+              viewer={{ coderId: viewerId, applications: excerpt.applied_code_details }}
               onCodeChange={onCodeChange}
               onFocusCode={onFocusCode}
             />

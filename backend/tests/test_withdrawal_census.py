@@ -196,6 +196,9 @@ COLUMN_CLASS: dict[str, str] = {
     "datasets.import_config": STRUCTURAL,
     "datasets.color": STRUCTURAL,
     "datasets.managed_kind": STRUCTURAL,
+    # #1617 / #1623, D222 — a JSON list of `users.id` (whose ratings the snapshot
+    # holds): coder ids, never a participant's words.
+    "datasets.managed_rater_ids": STRUCTURAL,
     "datasets.uuid": STRUCTURAL,
     "documents.name": RESEARCHER,
     "documents.description": RESEARCHER,
@@ -633,11 +636,19 @@ def census():
                 "excerptId": e["id"], "displayText": e["excerpt_text"],
                 "sourceContext": "Focus group", "conversationId": conversation}}
 
+        # D163 — a joint display PINS their solo turn's quote (and Sam's): a pin carries
+        # an excerpt-embed's attributes inside the node's `display`, so the after-scan
+        # finds ALPHA in `content` and `searchable_text` if the scrub missed it.
+        joint = {"type": "joint-display", "attrs": {"displayKey": "census", "figureEpoch": 1,
+                 "display": {"group_by_column_id": None, "rows": [{
+                     "key": "r1", "construct": "Health", "code_ids": [], "column_ids": [],
+                     "pins": [dict(embed(e1, cid)["attrs"], group="High", role="typical"),
+                              dict(embed(e_sam, cid)["attrs"], group="Low", role=None)]}]}}}
         ok(c.patch(f"/api/projects/{pid}/canvases/{canvas}/themes/{theme}", json={"content": {
             "type": "doc", "content": [
                 {"type": "paragraph", "content": [{"type": "text", "text": "Prose by the researcher."}]},
                 embed(e1, cid), embed(e2, cid), embed(e_sam, cid), embed(e_j, cid),
-                embed(e_k, None), embed(e_m, None), embed(e_p, cid),
+                embed(e_k, None), embed(e_m, None), embed(e_p, cid), joint,
             ]}}, headers=H))
         ok(c.post(f"/api/projects/{pid}/canvases/{canvas}/pending-items",
                   json={"item_type": "excerpt", "source_id": e2["id"]}, headers=H))
@@ -746,6 +757,14 @@ class TestTheDatabaseAfter:
             for t in census.canvas_after["themes"] for n in t["content"]["content"]
             if n["type"] == "excerpt-embed"
         ]
+
+    def test_their_pin_is_blanked_and_someone_elses_stays(self, census):
+        """D163 — the joint display's pins, judged as the embeds beside them."""
+        (joint,) = [n for t in census.canvas_after["themes"] for n in t["content"]["content"]
+                    if n["type"] == "joint-display"]
+        theirs, sams = joint["attrs"]["display"]["rows"][0]["pins"]
+        assert theirs["excerptId"] is None and "ALPHA" not in theirs["displayText"]
+        assert sams["excerptId"] == census.ids["e_sam"] and "SAMQUOTE" in sams["displayText"]
 
 
 # ── (c) every export ─────────────────────────────────────────────────────────
@@ -926,8 +945,9 @@ class TestWhatTheOutcomeRecords:
         o = census.outcome
         # Theme: ALPHA, BRAVO, KILO by id; JULIET as an orphan (D8); MIKE as an
         # orphan of an answer (#1473); PAPA as an orphan of a DELETED merge result
-        # (#1473 b). The snapshot holds the same six.
-        assert o["canvas_embeds_scrubbed"] == 12
+        # (#1473 b); and ALPHA again, PINNED in the joint display (D163). The snapshot
+        # holds the same seven.
+        assert o["canvas_embeds_scrubbed"] == 14
         assert o["canvas_snapshots_rewritten"] == 1
         # The live inbox item for BRAVO, and its copy in the snapshot.
         assert o["canvas_inbox_items_removed"] == 2
@@ -967,8 +987,17 @@ def _project(db):
 
 
 class TestAReusedIdDoesNotRebind:
-    """#1192's class — SQLite reuses the newest row's id, so an embed or inbox item
-    left pointing at a deleted quote shows the NEXT quote given that id."""
+    """#1192's class — an embed or inbox item left pointing at a deleted quote shows the
+    NEXT quote given that id.
+
+    Since #1639 (r2-1) `excerpt` is AUTOINCREMENT, so a quote THIS build deletes is never
+    issued again, and this test's own sequence (the withdrawal deletes, then a new quote)
+    cannot reuse the id any more. The scrub still nulls the id (an embed must not name a
+    deleted quote), and the newcomer is GIVEN the freed id so the test still shows what
+    the nulling prevents. A reused id does survive the upgrade elsewhere: one freed before
+    it, above the table's highest id, that the audit seed (r2-2) never saw — a quote carried
+    by a segment operation or an import, or any quote of a deleted project, whose audit
+    entries the project delete removes (#1230)."""
 
     def test_neither_the_embed_nor_the_inbox_follows_the_id(self, db_session):
         from app.models.canvas import Canvas
@@ -992,8 +1021,8 @@ class TestAReusedIdDoesNotRebind:
         apply_withdrawal(db, db.get(Participant, 1))
         db.flush()
         db.expunge(theirs)  # deleted in bulk; the identity map still holds it
-        newcomer = Excerpt(project_id=1, segment_id=1); db.add(newcomer); db.flush()
-        assert newcomer.id == reused_id, "precondition: SQLite reused the id"
+        newcomer = Excerpt(id=reused_id, project_id=1, segment_id=1); db.add(newcomer); db.flush()
+        assert newcomer.id == reused_id, "precondition: the newcomer holds the freed id"
 
         db.expire_all()
         attrs = json.loads(db.get(CanvasTheme, theme.id).content)["content"][0]["attrs"]

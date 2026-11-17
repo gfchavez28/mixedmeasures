@@ -14,7 +14,7 @@ import { ArrowLeft, FileQuestion, Loader2 } from 'lucide-react'
 import { canvasApi, type SnapshotRelationship } from '@/lib/api'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useCanvasEditor } from '@/components/canvas/useCanvasEditor'
-import { ExcerptEmbed, ChartEmbed, MemoEmbed, CalloutStat, ImageEmbed } from '@/components/canvas/extensions'
+import { ExcerptEmbed, ChartEmbed, MemoEmbed, CalloutStat, ImageEmbed, JointDisplay } from '@/components/canvas/extensions'
 import { formatRelativeTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
@@ -26,6 +26,8 @@ const readOnlyExtensions: AnyExtension[] = [
   MemoEmbed,
   CalloutStat,
   ImageEmbed,
+  // ROADMAP row 56 — read-only here: the view drops every mutation control (#893).
+  JointDisplay,
 ]
 
 // ── Read-only theme renderer ─────────────────────────────────────────────────

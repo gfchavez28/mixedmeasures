@@ -25,7 +25,8 @@ from ..services.statistical_tests import (
     resolve_target_labels,
 )
 from ..services.audit import log_action
-from .helpers import _get_project_or_404
+from ..services.rating_withholding import rating_withholding  # #1615
+from .helpers import _get_project_or_404, parse_int_list
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/statistical-tests",
@@ -64,7 +65,12 @@ def _parse_json(text: str | None) -> dict | None:
 def _build_test_response(
     test: StatisticalTest,
     label_map: dict[tuple[str, int], str] | None = None,
+    *,
+    withheld: bool = False,
 ) -> StatisticalTestResponse:
+    """#1615: ``withheld`` — the viewer is blind and the test's target reads a
+    participant rating score (`rating_withholding.RatingWithholding.test`), so its
+    result and its n are left out and the item says so."""
     target_label = None
     if label_map:
         target_label = label_map.get((test.target_type, test.target_id))
@@ -77,8 +83,9 @@ def _build_test_response(
         target_type=test.target_type,
         target_id=test.target_id,
         target_label=target_label,
-        result_data=_parse_json(test.result_data),
-        valid_n=test.valid_n,
+        result_data=None if withheld else _parse_json(test.result_data),
+        valid_n=None if withheld else test.valid_n,
+        withheld_while_blind=withheld,
         stale=test.stale,
         computed_at=test.computed_at,
         origin=test.origin,
@@ -107,9 +114,12 @@ async def list_tests(
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """List all statistical tests for a project."""
     _get_project_or_404(db, project_id, user.id)
+    withholding = rating_withholding(db, project_id, parse_int_list(coder_ids))
 
     tests = (
         db.query(StatisticalTest)
@@ -121,7 +131,7 @@ async def list_tests(
     label_map = resolve_target_labels(db, tests)
 
     return StatisticalTestListResponse(
-        tests=[_build_test_response(t, label_map) for t in tests],
+        tests=[_build_test_response(t, label_map, withheld=withholding.test(db, t)) for t in tests],
         total=len(tests),
     )
 
@@ -132,6 +142,8 @@ async def create_test(
     body: StatisticalTestCreate,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Create a new statistical test.
 
@@ -197,7 +209,8 @@ async def create_test(
     db.refresh(test)
 
     label_map = resolve_target_labels(db, [test])
-    return _build_test_response(test, label_map)
+    return _build_test_response(test, label_map, withheld=rating_withholding(
+        db, project_id, parse_int_list(coder_ids)).test(db, test))   # #1615
 
 
 @router.get("/{test_id}", response_model=StatisticalTestResponse)
@@ -206,13 +219,16 @@ async def get_test(
     test_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Get a single statistical test with result data."""
     _get_project_or_404(db, project_id, user.id)
     test = _get_test_or_404(db, project_id, test_id)
 
     label_map = resolve_target_labels(db, [test])
-    return _build_test_response(test, label_map)
+    return _build_test_response(test, label_map, withheld=rating_withholding(
+        db, project_id, parse_int_list(coder_ids)).test(db, test))   # #1615
 
 
 @router.patch("/{test_id}", response_model=StatisticalTestResponse)
@@ -222,6 +238,8 @@ async def update_test(
     body: StatisticalTestUpdate,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Update a statistical test config (marks stale)."""
     _get_project_or_404(db, project_id, user.id)
@@ -244,7 +262,8 @@ async def update_test(
     db.refresh(test)
 
     label_map = resolve_target_labels(db, [test])
-    return _build_test_response(test, label_map)
+    return _build_test_response(test, label_map, withheld=rating_withholding(
+        db, project_id, parse_int_list(coder_ids)).test(db, test))   # #1615
 
 
 @router.delete("/{test_id}")
@@ -280,6 +299,8 @@ async def compute_single_test(
     test_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Compute (or recompute) a single statistical test."""
     _get_project_or_404(db, project_id, user.id)
@@ -303,7 +324,8 @@ async def compute_single_test(
     db.refresh(test)
 
     label_map = resolve_target_labels(db, [test])
-    return _build_test_response(test, label_map)
+    return _build_test_response(test, label_map, withheld=rating_withholding(
+        db, project_id, parse_int_list(coder_ids)).test(db, test))   # #1615
 
 
 @router.post("/compute-all", response_model=ComputeAllTestsResponse)

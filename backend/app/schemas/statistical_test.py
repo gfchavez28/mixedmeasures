@@ -63,6 +63,9 @@ class StatisticalTestResponse(BaseModel):
     target_label: str | None = None
     result_data: dict | None = None
     valid_n: int | None = None
+    #: #1615 — while blind, this item is computed from a participant rating score
+    #: (`services/rating_withholding.py`), so its numbers are left out. Never WHO rated.
+    withheld_while_blind: bool = False
     stale: bool
     computed_at: UTCTimestamp | None = None
     origin: str

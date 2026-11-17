@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router'
+import { OutboundLink } from '@/components/OutboundLink'
 import { Plus, FolderOpen, Archive, Trash2, Pencil, Moon, Sun, Settings, FileInput, Package, ChevronDown, Copy, UserPlus } from 'lucide-react'
 import { projectsApi, projectPortabilityApi, type Project, retryUnanswered} from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
@@ -847,14 +848,12 @@ export default function Dashboard() {
             </p>
             <p className="text-sm text-mm-text-muted mb-4 max-w-lg mx-auto">
               New here? Download the Ferncrest example project from{' '}
-              <a
+              <OutboundLink
                 href="https://mixedmeasures.com"
-                target="_blank"
-                rel="noopener noreferrer"
                 className="underline underline-offset-2 hover:text-mm-text"
               >
                 mixedmeasures.com
-              </a>{' '}
+              </OutboundLink>{' '}
               and open it with Import Project above.
             </p>
             <button

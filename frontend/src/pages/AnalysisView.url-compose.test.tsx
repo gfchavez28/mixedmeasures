@@ -21,6 +21,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { TooltipProvider } from '@/components/ui/tooltip'
 
+// #1615 — the quantitative reads take the blind scope from this hook; every coder here.
+vi.mock('@/hooks/useAnalysisScope', () => ({ useAnalysisScope: () => ({ coderIds: null, coderScope: undefined, scopeKey: 'every-coder', scopeReady: true }) }))
 vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api')
   const never = () => new Promise(() => {})

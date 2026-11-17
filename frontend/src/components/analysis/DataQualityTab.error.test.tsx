@@ -4,11 +4,14 @@
  * the server's sentence when one came; otherwise it names the step that re-asks. It said
  * "…or check the server logs.", and a desktop user has no log to open.
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { ApiError } from '@/lib/api'
 import { DataQualityContent, type DataQualityContentProps } from './DataQualityTab'
+
+// #1615 — the quantitative reads take the blind scope from this hook; every coder here.
+vi.mock('@/hooks/useAnalysisScope', () => ({ useAnalysisScope: () => ({ coderIds: null, coderScope: undefined, scopeKey: 'every-coder', scopeReady: true }) }))
 
 function renderWithError(error: Error) {
   const props: DataQualityContentProps = {

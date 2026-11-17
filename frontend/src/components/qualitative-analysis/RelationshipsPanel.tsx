@@ -340,6 +340,10 @@ export interface RelationshipsContentProps {
   /** #1545 — the page's description of the chosen filter values (`participantFilterFileScope`),
    *  for the Comparison CSV's scope line. Required: a mount decides it. */
   participantFilterLabel: string | undefined
+  /** #1615 — the page's `withholding`: while blind, the Comparison CSV asks the server to refuse
+   *  a grouping worked out from participant scores (`ratings_follow_coder_ids`), exactly as the
+   *  page's own copy of this export does. Required: a mount decides it. */
+  ratingsFollowCoderIds: boolean
   cooccurrenceN: number | null
   comparisonData: DemographicComparisonResponse | undefined
   comparisonLoading: boolean
@@ -350,7 +354,7 @@ export interface RelationshipsContentProps {
 export function RelationshipsContent(props: RelationshipsContentProps) {
   const {
     pid, qa, codes, filterParams, cooccurrenceParams, demoFilters, participantFilterLabel,
-    cooccurrenceN, comparisonData, comparisonLoading, comparisonN,
+    ratingsFollowCoderIds, cooccurrenceN, comparisonData, comparisonLoading, comparisonN,
     onCooccurrenceDataLoad,
   } = props
 
@@ -376,8 +380,9 @@ export function RelationshipsContent(props: RelationshipsContentProps) {
     // already holds it) so the CSV matches the on-screen numbers.
     if (filterParams.coder_ids) params.coder_ids = filterParams.coder_ids
     if (filterParams.layer_scope) params.layer_scope = filterParams.layer_scope
+    if (ratingsFollowCoderIds) params.ratings_follow_coder_ids = 'true'  // #1615, as the page's copy
     exportApi.demographicComparisonCsv(pid, params)
-  }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, filterParams.coder_ids, filterParams.layer_scope, participantFilterLabel])
+  }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, filterParams.coder_ids, filterParams.layer_scope, participantFilterLabel, ratingsFollowCoderIds])
 
   return (
     <div>

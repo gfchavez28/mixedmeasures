@@ -145,13 +145,11 @@ THREE_COL_ALLOWLIST = {
     "services/grouping.py": 1,
     # THE loader itself (#592 slab 2: selects column_id so each value is
     # judged by ITS column's declared rules).
-    "services/code_analysis.py": 2,
-    # 1) _build_participant_group_map — participant-keyed grouping (#598):
-    #    applies the missing rule in place (column-aware since #592 slab 2);
-    #    not expressible through the row-keyed loader.
-    # 2) get_demographic_filter_options — filter OPTIONS are subsetting, not
-    #    grouping; offering "Decline to state" as a selectable filter value is
-    #    deliberate.
+    "services/code_analysis.py": 1,
+    # get_demographic_filter_options — filter OPTIONS are subsetting, not
+    # grouping; offering "Decline to state" as a selectable filter value is
+    # deliberate. (_build_participant_group_map moved to PARTICIPANT_KEYED_SHAPE
+    # below with #1548 (a).)
     "services/append_duplicates.py": 1,
     # existing_fingerprints (#1014) — record IDENTITY for the append dedup, not
     # grouping. It must NOT apply the missing rule: a stored "Refused" is a
@@ -279,6 +277,33 @@ def test_participant_keyed_grouping_sites_are_pinned():
         f"Three-column grouping-shape select set changed: {hits} vs allowlist "
         f"{THREE_COL_ALLOWLIST}. See this test's docstring before touching "
         "the allowlist."
+    )
+
+
+# #1548 (a): the participant-keyed grouping read — a cell's column and text with the
+# person its row is linked to, in one join (it was a three-column read bound to every
+# linked row's id). Its own shape, so the site stays pinned rather than vanishing from
+# the three-column set.
+PARTICIPANT_KEYED_SHAPE = re.compile(
+    _PROJECTION + r"DatasetValue\.column_id\s*,\s*DatasetValue\.value_text\s*,"
+    r"\s*DatasetRow\.participant_id\b"
+)
+PARTICIPANT_KEYED_ALLOWLIST = {
+    "services/code_analysis.py": 1,
+    # _build_participant_group_map — participant-keyed grouping (#598): applies the
+    # missing rule in place (column-aware since #592 slab 2); not expressible through
+    # the row-keyed loader.
+}
+
+
+def test_participant_keyed_grouping_read_is_pinned():
+    """#598 / #1548 (a): the participant-keyed grouping read is pinned like the
+    three-column set — a new site grouping people by `value_text` must apply the
+    missing rule, then join this allowlist with a reason."""
+    hits = _scan(PARTICIPANT_KEYED_SHAPE)
+    assert hits == PARTICIPANT_KEYED_ALLOWLIST, (
+        f"Participant-keyed grouping read set changed: {hits} vs allowlist "
+        f"{PARTICIPANT_KEYED_ALLOWLIST}."
     )
 
 

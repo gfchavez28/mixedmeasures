@@ -521,6 +521,15 @@ CLASSIFIED = {
     # #1330 (D55): the pooled proportion's "meets the rule" matrix.
     ("_build_r_script", "pool_hit"): (COMPOSED, "valid_obj + r_op + thresh, or valid_obj + escaped vals_str"),
     ("_build_r_script", "hm_freq"): (COMPOSED, "_text_vector_r, optionally inside .mm_drop_excluded"),
+    # #1636: a saved metric computed per group — its group labels, escaped inside c().
+    ("_build_r_script", "hm_r"): (IDENT, _R_NAMES + " (a column's, on the grouped arm)"),
+    ("_build_r_script", "hm_grp_r"): (IDENT, _R_NAMES),
+    ("_build_r_script", "hm_grp2_r"): (IDENT, _R_NAMES),
+    ("_build_r_script", "by"): (IDENT, "one or two R names joined by `_`"),
+    ("_build_r_script", "obj"): (IDENT, "`mean_`/`freq_` + R names"),
+    ("_build_r_script", "groups_r"): (COMPOSED, "_r_string_vector: escaped values in c()"),
+    ("_build_r_script", "grp_args"): (COMPOSED, "`data$` + R names, groups_r, hm_excl_r and _text_vector_r"),
+    ("<module>", "ord(c)"): (NUMBER, "a code point of metrics.COMPOSITE_SEPARATOR, written as hex"),
     ("_build_r_script", "tab_src"): (COMPOSED, "`data$` + an R name, optionally inside .mm_drop_excluded"),
     ("_build_r_script", "sb_src"): (COMPOSED, "`data[[col]]`, optionally inside .mm_drop_excluded"),
     # #1329 (D52): the `.mm_testable` frames' inputs.
@@ -574,6 +583,12 @@ CLASSIFIED = {
     ("_build_r_script", "p"): (VOCAB, "required_packages, all literals"),
     ("_build_r_script", "pkgs_str"): (COMPOSED, _PARTS),
     ("_build_r_script", "na_blanked_count"): (NUMBER, "a counter"),
+    # #1608 — how many rating columns a blind export left out: a sum of len()s.
+    ("_build_r_script", "ratings_left_out"): (NUMBER, "a counter"),
+    # #1615 — how many variable groups over them it left out (a len()), and the clause
+    # built from it and two literals.
+    ("_build_r_script", "rating_groups_left_out"): (NUMBER, "a counter"),
+    ("_build_r_script", "groups"): (VOCAB, "two literal clauses around a counter"),
     ("_build_r_script", "sec_name"): (VOCAB, "toc_sections, all literals"),
     ("write_category_tree", "indent"): (VOCAB, "spaces"),
     ("write_category_tree", "cat_total"): (NUMBER, "a sum of COUNTs"),
@@ -690,6 +705,8 @@ BOUND = {
     "hm_excl_r": r"_exclusion_vector_r\(",
     "ev_r": r"_exclusion_vector_r\(",
     "sb_ev_r": r"_exclusion_vector_r\(",
+    # #1636: a grouped metric's group labels — user text — escaped inside c().
+    "groups_r": r"_r_string_vector\(",
 }
 
 

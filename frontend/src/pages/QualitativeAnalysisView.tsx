@@ -39,8 +39,8 @@ import type { DataLabelPosition } from '@/lib/chart-data'
 import { invalidateDerivedCounts } from '@/lib/coding-cache'
 import {
   codeFrequenciesFileRequest, codedSegmentsFileRequest, comparisonSourceParams, comparisonSources,
-  cooccurrenceFilterParams, SEGMENTS_FILE_ANSWERS_NOTE, SEGMENTS_FILE_NO_PASSAGE_REASON, sourceDataCsvParams,
-  type QualCsvParams,
+  cooccurrenceFilterParams, saturationParams, SEGMENTS_FILE_ANSWERS_NOTE, SEGMENTS_FILE_NO_PASSAGE_REASON,
+  sourceDataCsvParams, type QualCsvParams,
 } from '@/lib/qual-comparison'
 import { MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
 import {
@@ -547,7 +547,9 @@ export default function QualitativeAnalysisView() {
     aggregation: qa.codeMode === 'categories' ? 'category' : undefined,
     coder_ids: effectiveCoderInclude.length ? effectiveCoderInclude : null,
     layer_scope: qa.layerScope,
-  }), [qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, qa.chartType, qa.groupBy, qa.codeMode, effectiveCoderInclude, qa.layerScope])
+    // #1615: while withholding, a grouping worked out from participant scores is refused.
+    ...(withholding ? { ratings_follow_coder_ids: true } : {}),
+  }), [qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, qa.chartType, qa.groupBy, qa.codeMode, effectiveCoderInclude, qa.layerScope, withholding])
 
   const { data: sourceFreqData, isLoading: sourceFreqLoading } = useQuery({
     queryKey: ['qual-source-frequencies', pid,
@@ -562,6 +564,7 @@ export default function QualitativeAnalysisView() {
       qa.codeMode,
       effectiveCoderIncludeCsv ?? '',
       qa.layerScope,
+      withholding,  // #1615: the same coder list asks a different question while blind
     ],
     queryFn: () => codeAnalysisApi.sourceFrequencies(pid, sourceFreqRequest),
     enabled: !!pid && blindSettled && !nobodyMatches && qa.tab === 'descriptives' && qa.chartType !== 'saturation'
@@ -569,32 +572,32 @@ export default function QualitativeAnalysisView() {
       && (qa.selectedConversationIds.size > 0 || qa.selectedTextColumnIds.size > 0 || qa.selectedDocumentIds.size > 0 || qa.selectedObservationIds.size > 0),
   })
 
-  // Saturation query
+  // Saturation query. #1544: the request reads the selection through the one builder the
+  // Canvas also uses, and IS the key — so the key moves with everything sent, the question
+  // selection included (it decides whether an empty kind reads as none or as every source),
+  // and the effective coder scope (#454) rides inside it.
+  const saturationRequest = useMemo(() => saturationParams({
+    exclude_facilitator: qa.excludeFacilitator,
+    category_level: qa.codeMode === 'categories',
+    coder_ids: effectiveCoderIncludeCsv,
+    layer_scope: qa.layerScope,
+  }, {
+    conversations: qa.selectedConversationIds, textColumns: qa.selectedTextColumnIds,
+    documents: qa.selectedDocumentIds, observations: qa.selectedObservationIds,
+  }), [qa.excludeFacilitator, qa.codeMode, effectiveCoderIncludeCsv, qa.layerScope, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds])
   const { data: saturationData, isLoading: saturationLoading } = useQuery({
-    queryKey: ['qual-saturation', pid, qa.excludeFacilitator, qa.codeMode === 'categories',
-      Array.from(qa.selectedConversationIds).sort().join(','),
-      Array.from(qa.selectedDocumentIds).sort().join(','),
-      Array.from(qa.selectedObservationIds).sort().join(','),
-      effectiveCoderIncludeCsv ?? '',
-      qa.layerScope,
-    ],
-    queryFn: () => codeAnalysisApi.saturation(pid, {
-      exclude_facilitator: qa.excludeFacilitator,
-      category_level: qa.codeMode === 'categories',
-      conversation_ids: qa.selectedConversationIds.size > 0 ? Array.from(qa.selectedConversationIds).join(',') : undefined,
-      document_ids: qa.selectedDocumentIds.size > 0 ? Array.from(qa.selectedDocumentIds).join(',') : undefined,
-      observation_ids: qa.selectedObservationIds.size > 0 ? Array.from(qa.selectedObservationIds).join(',') : undefined,
-      coder_ids: effectiveCoderIncludeCsv,
-      layer_scope: qa.layerScope,
-    }),
+    queryKey: ['qual-saturation', pid, saturationRequest],
+    queryFn: () => codeAnalysisApi.saturation(pid, saturationRequest),
     enabled: !!pid && blindSettled && qa.tab === 'descriptives' && qa.chartType === 'saturation',
   })
 
   // Demographic filters for comparison group-by dropdown
   const { data: demoFiltersData } = useQuery({
-    queryKey: ['demographic-filters', pid],
-    queryFn: () => codeAnalysisApi.demographicFilters(pid),
-    enabled: !!pid,
+    // #1615 (C2): the viewer's id ONLY while withholding — a subtype worked out from
+    // participant scores is left out (and counted); the scope rides the key.
+    queryKey: ['demographic-filters', pid, withholding ? (effectiveCoderIncludeCsv ?? '') : 'every-coder'],
+    queryFn: () => codeAnalysisApi.demographicFilters(pid, withholding ? effectiveCoderIncludeCsv : undefined),
+    enabled: !!pid && blindSettled,
   })
 
   const demoFilters = demoFiltersData?.filters ?? []
@@ -656,8 +659,9 @@ export default function QualitativeAnalysisView() {
       participant_ids: qa.participantIds.length > 0 ? qa.participantIds : undefined,
       coder_ids: effectiveCoderInclude.length ? effectiveCoderInclude : null,
       layer_scope: qa.layerScope,
+      ...(withholding ? { ratings_follow_coder_ids: true } : {}),  // #1615
     }
-  }, [qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderInclude, qa.layerScope])
+  }, [qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderInclude, qa.layerScope, withholding])
 
   const { data: comparisonData, isLoading: comparisonLoading } = useQuery({
     queryKey: [
@@ -672,6 +676,7 @@ export default function QualitativeAnalysisView() {
       qa.participantIds.join(','),
       effectiveCoderIncludeCsv ?? '',
       qa.layerScope,
+      withholding,  // #1615
     ],
     queryFn: () => codeAnalysisApi.demographicComparison(pid, comparisonRequest!),
     enabled: !!pid && blindSettled && !nobodyMatches && qa.tab === 'relationships' && qa.relView === 'comparisons' && !!comparisonRequest,
@@ -1052,9 +1057,10 @@ export default function QualitativeAnalysisView() {
       participantFilterLabel,
       // #499: the EFFECTIVE (blind-forced) coder/layer scope, so the CSV matches the screen.
       coderIdsCsv: effectiveCoderIncludeCsv,
+      ratingsFollowCoderIds: withholding,  // #1615
       layerScope: qa.layerScope,
     }))
-  }, [pid, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, participantFilterLabel, effectiveCoderIncludeCsv, qa.layerScope])
+  }, [pid, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, participantFilterLabel, effectiveCoderIncludeCsv, qa.layerScope, withholding])
 
   // #1535 (D111–D114): the Segments CSV holds exactly the passages the page selected — its
   // request and its door's state decided together by `codedSegmentsFileRequest`. It used to
@@ -1225,8 +1231,9 @@ export default function QualitativeAnalysisView() {
     // matches the on-screen numbers.
     if (effectiveCoderIncludeCsv) params.coder_ids = effectiveCoderIncludeCsv
     if (qa.layerScope) params.layer_scope = qa.layerScope
+    if (withholding) params.ratings_follow_coder_ids = 'true'  // #1615
     exportApi.demographicComparisonCsv(pid, params)
-  }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderIncludeCsv, qa.layerScope, participantFilterLabel])
+  }, [pid, qa.groupBy, qa.selectedCodeIds, qa.selectedConversationIds, qa.selectedTextColumnIds, qa.selectedDocumentIds, qa.selectedObservationIds, qa.excludeFacilitator, qa.participantIds, effectiveCoderIncludeCsv, qa.layerScope, participantFilterLabel, withholding])
 
   // Content mode keyboard nav
   // qa.contentMode/qa.setContentMode are stable but compiler infers full qa object
@@ -1333,7 +1340,11 @@ export default function QualitativeAnalysisView() {
   // Descriptives chart while the backend had data to give.
   const hasSourceSelection = qa.selectedConversationIds.size > 0 || qa.selectedTextColumnIds.size > 0 || qa.selectedDocumentIds.size > 0 || qa.selectedObservationIds.size > 0
   const hasQualSelection = hasCodeSelection && hasSourceSelection
-  const hasDemographicFilters = demoFilters.length > 0
+  // #1615 D287: the subtypes the server left out while blind (each holds a variable worked out
+  // from participant scores). A project whose every subtype is withheld still shows *Filters*,
+  // so its line can say so.
+  const withheldRatingFilters = demoFiltersData?.withheld_rating_filters ?? 0
+  const hasDemographicFilters = demoFilters.length > 0 || withheldRatingFilters > 0
 
   // Determine content code ID (from hook or from palette)
 
@@ -1721,6 +1732,7 @@ export default function QualitativeAnalysisView() {
                     state={participantFilter}
                     onChooseValues={values => chooseFilterValues(values, demoFilters, pid)}
                     onClear={qa.clearParticipantFilter}
+                    withheldCount={withheldRatingFilters}
                   />
                 </div>
               )}
@@ -2004,6 +2016,8 @@ export default function QualitativeAnalysisView() {
                           // #1531 D102: the ACT, not the claim — while withholding, each
                           // passage's chips follow the scope that chose the passages.
                           chipsFollowCoderIds={withholding}
+                          // #1592: whose chips may offer a remove.
+                          viewerId={user?.id ?? null}
                         />
                       ) : (
                         <ContentBySource
@@ -2028,6 +2042,8 @@ export default function QualitativeAnalysisView() {
                           // code's coder, so a client lens narrows the chips here. #1541: the
                           // viewer's own (`bySourceLens`), never the roster hide set.
                           coderLens={bySourceLens}
+                          // #1592: whose chips may offer a remove.
+                          viewerId={user?.id ?? null}
                           blind={blind}
                           onReveal={toggleReveal}
                         />
@@ -2068,6 +2084,8 @@ export default function QualitativeAnalysisView() {
                       blind={blind}
                       onReveal={toggleReveal}
                       blindSettled={blindSettled}
+                      // #1592: whose chips may offer a remove.
+                      viewerId={user?.id ?? null}
                       fileScope={frequencyFileScope(
                         null,
                         quoteFilterParams.coder_ids ? [user?.username ?? `coder ${self}`] : [],
@@ -2087,6 +2105,7 @@ export default function QualitativeAnalysisView() {
                       cooccurrenceParams={cooccurrenceParams}
                       demoFilters={demoFilters}
                       participantFilterLabel={participantFilterLabel}
+                      ratingsFollowCoderIds={withholding}
                       cooccurrenceN={cooccurrenceN}
                       comparisonData={comparisonData}
                       comparisonLoading={comparisonLoading}

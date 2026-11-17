@@ -1,4 +1,5 @@
 import api from './client'
+import type { AppliedCodeIdentity } from './segments'
 
 // Excerpt types
 export interface ExcerptNoteInfo {
@@ -106,6 +107,9 @@ export interface QuotedExcerptItem {
   column_name: string | null
   applied_code_ids: number[]
   applied_codes: QuotedExcerptCode[]
+  /** #1592 — who applied each code: one per application, from the same applications as
+   * `applied_code_ids` (the board's coder scope while blind, #1531 D99). REQUIRED. */
+  applied_code_details: AppliedCodeIdentity[]
   excerpt_note: string | null
   context_before: string | null
   context_before_speaker: string | null
@@ -144,6 +148,14 @@ export const excerptsApi = {
    * inside a 200, so the reason never reaches the UI (§8j.6.3). */
   create: (projectId: number, data: ExcerptCreatePayload) =>
     api.post<ExcerptResponse>(`/projects/${projectId}/excerpts`, data).then(res => res.data),
+  /** D163 — the passage's WHOLE quote: the existing one (`created: false`) or a new one; since
+   * slice 2 (r4-2) an open-text answer's too (`dataset_value_id`). A joint display pins through
+   * this, because a second plain `create` of a quoted passage 409s and a pin must be a quote in
+   * every sense (the Quote Board, the exports, a withdrawal). */
+  wholePassage: (projectId: number, data: { segment_id: number } | { dataset_value_id: number }) =>
+    api.post<ExcerptResponse & { created: boolean }>(
+      `/projects/${projectId}/excerpts/whole-passage`, data,
+    ).then(res => res.data),
   bulkCreate: (projectId: number, items: ExcerptCreatePayload[]) =>
     api.post<{ created_count: number; skipped_count: number }>(`/projects/${projectId}/excerpts/bulk`, { items }).then(res => res.data),
   delete: (projectId: number, excerptId: number) =>

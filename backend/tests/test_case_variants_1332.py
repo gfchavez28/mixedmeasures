@@ -177,12 +177,17 @@ class TestTheThreeLoadersTheReviewNamed:
 
 class TestTheReadersBuildingFound:
     def test_the_qualitative_comparisons_participant_groups(self, project):
-        groups = code_analysis._build_participant_group_map(project, PID, "gender")
+        groups = code_analysis._build_participant_group_map(project, PID, "gender", blind_scope=None)
         assert sorted(set(groups.values())) == ["Female", "Male"]
         assert sum(1 for g in groups.values() if g == "Female") == 5
 
+    def test_and_the_same_column_named_by_id(self, project):
+        """D166 — grouping by the column's id names its groups by the same rule."""
+        by_id = code_analysis._build_participant_group_map(project, PID, column_id=SEX, blind_scope=None)
+        assert by_id == code_analysis._build_participant_group_map(project, PID, "gender", blind_scope=None)
+
     def test_and_the_filter_offering_them(self, project):
-        opts = code_analysis.get_demographic_filter_options(project, PID)
+        opts = code_analysis.get_demographic_filter_options(project, PID, blind_scope=None)
         gender = next(f for f in opts["filters"] if f["subtype"] == "gender")
         assert [v["value"] for v in gender["values"]] == ["Female", "Male"]
         assert gender["values"][0]["count"] == 5
@@ -226,7 +231,14 @@ READERS = {
     ("services/cross_tabulation.py", "compute_cross_tabulation"),
     ("services/grouping.py", "load_grouping_values_for_columns"),
     ("services/code_analysis.py", "_build_participant_group_map"),
+    # D166 — the same groups for ONE column named by id (the comparison, the joint display).
+    ("services/code_analysis.py", "_participant_groups_by_column"),
     ("services/code_analysis.py", "get_demographic_filter_options"),
+    # The joint display's survey strand: a categorical variable's distribution (D167).
+    ("services/joint_display.py", "_variable_strand"),
+    # Joint display slice 2 (D173): a case's category, and a rule condition's category.
+    ("services/joint_display_cases.py", "read_cases"),
+    ("services/joint_display_cases.py", "_compile_rule"),
     ("routers/export_r.py", "_get_observed_values"),
     ("routers/export_r.py", "export_r_data"),  # `_text_cell`'s per-column labels
 }

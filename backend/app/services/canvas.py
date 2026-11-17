@@ -12,6 +12,12 @@ from ..models.canvas import (
     Canvas, CanvasTheme, CanvasThemeRelationship,
     CanvasPendingItem, CanvasSnapshot,
 )
+from .joint_display_node import (
+    JOINT_DISPLAY_NODE,
+    display_of,
+    display_referenced_excerpt_ids,
+    display_search_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +53,16 @@ def walk_tiptap_nodes(doc: dict | None, node_types: set[str],
         walk_tiptap_nodes(child, node_types, callback)
 
 
+def mention_text(attrs: dict) -> str:
+    """#1457 — a theme mention as the editor shows it: ``@`` and its label, else its id
+    (Tiptap's `label ?? id`). The search text and the Word export print these words, and the
+    Markdown and HTML exports print the same (`lib/canvas-export.ts`)."""
+    label = attrs.get("label")
+    if label is None:
+        label = attrs.get("id")
+    return "@" + ("" if label is None else str(label))
+
+
 def extract_theme_searchable_text(content_json: dict | None) -> str | None:
     """Extract all plain text from a theme's Tiptap JSON (prose + evidence
     node display text) for full-text search indexing."""
@@ -65,6 +81,9 @@ def extract_theme_searchable_text(content_json: dict | None) -> str | None:
                 parts.append(t)
         # Evidence node display text
         attrs = node.get("attrs") or {}
+        if node_type == "mention":
+            # #1457 — the words the editor shows ("@Barriers"); the node holds no text child.
+            parts.append(mention_text(attrs))
         if node_type == "excerpt-embed":
             dt = attrs.get("displayText", "")
             if dt:
@@ -87,6 +106,12 @@ def extract_theme_searchable_text(content_json: dict | None) -> str | None:
                 v = attrs.get(key, "")
                 if v:
                     parts.append(str(v))
+        elif node_type == JOINT_DISPLAY_NODE:
+            # D162 — the researcher's writing in the display, and its pinned quotes
+            # (a pin's text is indexed as an excerpt-embed's is).
+            display = display_of(attrs, strict=False)
+            if display is not None:
+                parts.extend(display_search_text(display))
         for child in node.get("content", []):
             _collect(child)
 
@@ -109,6 +134,15 @@ def extract_referenced_source_ids(content_json: dict | None) -> list[dict] | Non
             refs.append({"type": source_type, "id": source_id})
 
     walk_tiptap_nodes(content_json, EMBED_NODE_TYPES, _collect)
+
+    def _collect_pins(node: dict) -> None:
+        # D163 — a pinned quote is a quote: listed as an excerpt-embed's would be.
+        display = display_of(node.get("attrs") or {}, strict=False)
+        if display is not None:
+            refs.extend({"type": "excerpt", "id": eid}
+                        for eid in display_referenced_excerpt_ids(display))
+
+    walk_tiptap_nodes(content_json, {JOINT_DISPLAY_NODE}, _collect_pins)
     return refs or None
 
 
@@ -480,6 +514,151 @@ def update_theme(db: Session, theme: CanvasTheme,
 def delete_theme(db: Session, theme: CanvasTheme) -> None:
     db.delete(theme)
     db.flush()
+
+
+# ── Undoing a theme delete (#1301) ──────────────────────────────────────────
+#
+# 🔴 The undo restores what the delete DESTROYED (the internal design notes). Its undo
+# used to re-create `{name, color}` only, so Ctrl+Z gave back an empty, unplaced shell: the
+# writing, embeds, description, kind, place, parent, links and nesting were gone. The delete
+# now hands the client `theme_restore_record` — read from the ROW, so it is what the server
+# holds, never the page's cache — and the undo sends it back to `restore_theme`, ONE
+# transaction, so the restore cannot half-land.
+
+
+def theme_restore_record(theme: CanvasTheme) -> dict:
+    """Everything deleting ``theme`` destroys, read BEFORE the delete (#1301).
+
+    The row itself, its links in both directions (``ondelete=CASCADE``) and its children's
+    ids (``SET NULL`` un-nests them). Shaped as ``schemas.canvas.ThemeRestore``.
+    """
+    rels = list(theme.relationships_out or []) + list(theme.relationships_in or [])
+    return {
+        "id": theme.id,
+        "name": theme.name,
+        "section_type": theme.section_type,
+        "description": theme.description,
+        "color": theme.color,
+        "doc_order": theme.doc_order,
+        "table_column_order": theme.table_column_order,
+        "viz_x": theme.viz_x,
+        "viz_y": theme.viz_y,
+        "parent_theme_id": theme.parent_theme_id,
+        "content": build_theme_response(theme)["content"],
+        "child_ids": sorted(c.id for c in (theme.children or [])),
+        "relationships": [_build_relationship_dict(r) for r in rels],
+    }
+
+
+def restore_theme(db: Session, canvas_id: int, record: dict) -> tuple[CanvasTheme, dict]:
+    """Put a deleted theme back from its ``theme_restore_record`` (#1301).
+
+    Returns the theme and what could NOT come back, because the canvas changed after the
+    delete — ``{"parent": bool, "children": int, "relationships": int}`` — for the client to
+    say (the undo rule: report a part that failed, never drop the whole step).
+
+    - **Its old id when it is free**, so a mention of it in another theme (`@`, its id as a
+      string) and every history entry that captured the id still name it. SQLite reuses the
+      highest id, so a theme created after the delete may hold it — then a new id, and its
+      own links are remapped to it.
+    - **Its parent** only if that theme is still in this canvas and still top-level (one level
+      of nesting, as ``update_theme`` enforces); otherwise it comes back top-level.
+    - **Its children** that are still in this canvas, top-level and childless — a child moved
+      under another theme since stays where the researcher put it.
+    - **Its links** whose other end is still in this canvas and whose pair is not linked again
+      (``uq_canvas_theme_rel_pair``); each keeps its old id when free.
+    """
+    lost = {"parent": False, "children": 0, "relationships": 0}
+    old_id = record.get("id")
+    free = old_id is not None and db.get(CanvasTheme, old_id) is None
+
+    parent_id = record.get("parent_theme_id")
+    if parent_id is not None:
+        parent = db.query(CanvasTheme).filter(
+            CanvasTheme.id == parent_id, CanvasTheme.canvas_id == canvas_id,
+        ).first()
+        if parent is None or parent.parent_theme_id is not None:
+            parent_id = None
+            lost["parent"] = True
+
+    doc_order = record["doc_order"]
+    theme = CanvasTheme(
+        id=old_id if free else None,
+        canvas_id=canvas_id,
+        name=record["name"],
+        section_type=record.get("section_type") or "theme",
+        description=record.get("description"),
+        color=record.get("color"),
+        doc_order=doc_order,
+        table_column_order=record.get("table_column_order") or doc_order,
+        viz_x=record.get("viz_x"),
+        viz_y=record.get("viz_y"),
+        parent_theme_id=parent_id,
+    )
+    db.add(theme)
+    db.flush()
+    # Through the one content writer, so `searchable_text` and `referenced_source_ids`
+    # are rebuilt exactly as a save would.
+    update_theme_content(db, theme, record.get("content"))
+
+    child_ids = list(dict.fromkeys(record.get("child_ids") or []))
+    if child_ids:
+        children = (
+            db.query(CanvasTheme)
+            .filter(CanvasTheme.canvas_id == canvas_id, CanvasTheme.id.in_(child_ids))
+            .all()
+        )
+        has_children = {
+            pid for (pid,) in db.query(CanvasTheme.parent_theme_id)
+            .filter(CanvasTheme.parent_theme_id.in_([c.id for c in children]))
+        }
+        renested = 0
+        for child in children:
+            if (theme.parent_theme_id is None and child.id != theme.id
+                    and child.parent_theme_id is None and child.id not in has_children):
+                child.parent_theme_id = theme.id
+                renested += 1
+        lost["children"] = len(child_ids) - renested
+
+    live = {
+        tid for (tid,) in db.query(CanvasTheme.id).filter(CanvasTheme.canvas_id == canvas_id)
+    }
+    for rel in record.get("relationships") or []:
+        src = theme.id if rel["source_theme_id"] == old_id else rel["source_theme_id"]
+        tgt = theme.id if rel["target_theme_id"] == old_id else rel["target_theme_id"]
+        taken = db.query(CanvasThemeRelationship.id).filter(
+            CanvasThemeRelationship.canvas_id == canvas_id,
+            CanvasThemeRelationship.source_theme_id == src,
+            CanvasThemeRelationship.target_theme_id == tgt,
+        ).first() is not None
+        if src == tgt or src not in live or tgt not in live or taken:
+            lost["relationships"] += 1
+            continue
+        rel_id = rel.get("id")
+        db.add(CanvasThemeRelationship(
+            id=rel_id if rel_id is not None and db.get(CanvasThemeRelationship, rel_id) is None else None,
+            canvas_id=canvas_id,
+            source_theme_id=src,
+            target_theme_id=tgt,
+            relationship_type=rel["relationship_type"],
+            label=rel.get("label"),
+            weight=rel.get("weight") or 1,
+            is_bidirectional=bool(rel.get("is_bidirectional")),
+            line_style=rel.get("line_style"),
+            line_color=rel.get("line_color"),
+        ))
+        db.flush()
+
+    # Its old place: back at its own `doc_order`. A theme moved or created since that holds
+    # the same number ties with it, and the re-gap orders a tie by id.
+    if db.query(CanvasTheme.id).filter(
+        CanvasTheme.canvas_id == canvas_id, CanvasTheme.doc_order == doc_order,
+        CanvasTheme.id != theme.id,
+    ).first() is not None:
+        recompute_theme_doc_orders(db, canvas_id)
+    db.flush()
+    db.refresh(theme)
+    return theme, lost
 
 
 def reorder_themes(db: Session, canvas_id: int, theme_ids: list[int]) -> None:

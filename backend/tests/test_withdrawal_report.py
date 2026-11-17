@@ -29,6 +29,7 @@ from app.models.note import Note
 from app.models.memo import Memo
 from app.models.row_score import RowScore
 from app.models.metric import MetricDefinition
+from app.config import get_backup_dir
 from app.services.withdrawal_report import build_withdrawal_report
 
 
@@ -186,6 +187,17 @@ class TestReachability:
             # survey has no identifier-typed column (the count's own test is
             # `test_withdrawal_tombstones.py::TestTheReportCountsUnlinkedRecords…`).
             "unlinked_records_with_identifier": 0,
+            # #1546 D158 — beside the report too; this fixture has no canvas (the
+            # count's own tests are `test_withdrawal_canvas_unplaced_1546.py`).
+            "canvas_quotes_unplaced": {"quotes": 0, "sections": [], "snapshots": []},
+            # Joint display slice 2 (r3-6) — beside the report too; no canvas here (the
+            # count's own tests are `test_joint_display_slice2_cases.py`).
+            "canvas_misfit_cases": 0,
+            # #1606 D234/D235 — beside the report too; one project here, and the
+            # suite's own backup folder holds no update copy (their own tests are
+            # `test_withdrawal_copies_elsewhere_1606.py`).
+            "other_projects_with_identifier": {"projects": [], "total": 0},
+            "pre_update_copies": {"count": 0, "folder": str(get_backup_dir().absolute())},
         }
 
     def test_the_decoys_document_is_excluded(self, populated):
@@ -374,6 +386,7 @@ class TestTheReportReachesTheWire:
     def test_every_report_class_has_the_same_fields_as_its_wire_schema(self):
         from dataclasses import fields
         from app.schemas import participant as wire
+        from app.services import canvas_embed_scrub as canvas
         from app.services import withdrawal_report as service
 
         pairs = [
@@ -381,6 +394,13 @@ class TestTheReportReachesTheWire:
             (service.ConversationTouchpoint, wire.WithdrawalConversationTouchpoint, set()),
             (service.DatasetTouchpoint, wire.WithdrawalDatasetTouchpoint, set()),
             (service.DocumentTouchpoint, wire.WithdrawalDocumentTouchpoint, set()),
+            # #1546 D158 — the canvas quotes it cannot place, and where they are.
+            (canvas.UnplacedCanvasQuotes, wire.WithdrawalUnplacedCanvasQuotes, set()),
+            (canvas.UnplacedCanvasPlace, wire.WithdrawalCanvasPlace, set()),
+            # #1606 D234/D235 — the other projects holding the ID, and the update copies.
+            (service.OtherProjectsWithIdentifier, wire.WithdrawalOtherProjects, set()),
+            (service.OtherProject, wire.WithdrawalOtherProject, set()),
+            (service.PreUpdateCopies, wire.WithdrawalPreUpdateCopies, set()),
         ]
         for cls, schema, derived in pairs:
             written = {f.name for f in fields(cls)} | derived

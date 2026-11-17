@@ -343,7 +343,7 @@ def test_participant_group_map_two_sided(db_session):
         db.add(DatasetValue(row_id=row.id, column_id=10, value_text=val))
     db.flush()
 
-    pmap = _build_participant_group_map(db, 1, "Grade")
+    pmap = _build_participant_group_map(db, 1, "Grade", blind_scope=None)
     assert pmap.get(1) == "8"
     assert 2 not in pmap, "declared-missing 99 joined a demographic group"
     assert pmap.get(3) == "Prefer not to say", "REPLACE semantics"

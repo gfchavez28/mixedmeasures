@@ -71,6 +71,7 @@ import { OptionsAccordion, AccordionSection, useAccordionState } from '@/compone
 import SegmentedControl from '@/components/ui/segmented-control'
 import SendToCanvasMenu from '@/components/canvas/SendToCanvasMenu'
 import { comparisonGroupChips } from '@/lib/comparison-chips'
+import { isWithheld, WITHHELD_OPTION_NOTE } from '@/lib/analysis-scope'
 import {
   analysedDatasetIds,
   groupingScopeBlock,
@@ -1024,11 +1025,13 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                     <SelectContent>
                       {(analysisColumnsData?.demographics ?? []).map(d => {
                         const blocked = groupingScopeBlock(d.dataset_id, analysedDatasets)
+                        // #1615 — a rating score hidden while blind takes the same shape.
+                        const note = isWithheld(d) ? WITHHELD_OPTION_NOTE : blocked ? OTHER_DATASET_NOTE : null
                         return (
-                          <SelectItem key={d.id} value={String(d.id)} disabled={!!blocked}>
+                          <SelectItem key={d.id} value={String(d.id)} disabled={note != null}>
                             {d.column_name || d.column_text} ({d.dataset_name})
-                            {blocked && (
-                              <span className="text-mm-text-faint"> — {OTHER_DATASET_NOTE}</span>
+                            {note && (
+                              <span className="text-mm-text-faint"> — {note}</span>
                             )}
                           </SelectItem>
                         )
@@ -1056,11 +1059,12 @@ export default function AnalysisSidebar(props: AnalysisSidebarProps) {
                             // The secondary grouping composites with the primary
                             // over the SAME rows, so it takes the same gate.
                             const blocked = groupingScopeBlock(d.dataset_id, analysedDatasets)
+                            const note = isWithheld(d) ? WITHHELD_OPTION_NOTE : blocked ? OTHER_DATASET_NOTE : null
                             return (
-                              <SelectItem key={d.id} value={String(d.id)} disabled={!!blocked}>
+                              <SelectItem key={d.id} value={String(d.id)} disabled={note != null}>
                                 {d.column_name || d.column_text} ({d.dataset_name})
-                                {blocked && (
-                                  <span className="text-mm-text-faint"> — {OTHER_DATASET_NOTE}</span>
+                                {note && (
+                                  <span className="text-mm-text-faint"> — {note}</span>
                                 )}
                               </SelectItem>
                             )

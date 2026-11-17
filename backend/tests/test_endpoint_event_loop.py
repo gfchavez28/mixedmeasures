@@ -47,13 +47,17 @@ from app.routers.excerpts import list_quoted_excerpts
 from app.routers.export import export_code_cooccurrence_csv
 from app.routers.codes import list_categories, list_codes
 from app.routers.conversations import list_conversations
-from app.routers.participants import list_participants, withdraw_participant
+from app.routers.participants import delete_participant, list_participants, withdraw_participant
 from app.routers.dataset import (
     append_import, create_participants_dataset, get_linkable_rows, import_dataset,
     link_by_column, preview_link_by_column, refresh_participants_dataset,
     update_manual_column,
 )
 from app.routers.export_excel import export_datasets_excel, export_study_excel
+from app.routers.joint_display import compute as joint_display_compute
+from app.routers.joint_display import passages as joint_display_passages
+from app.routers.joint_display import pin_attribution_facts as joint_display_pin_facts
+from app.routers.joint_display import case_rows as joint_display_cases
 from app.routers.export_r import export_r_data
 from app.routers.metrics import get_row_matrix, get_row_matrix_csv
 from app.routers.projects import get_project_summary
@@ -154,9 +158,36 @@ MUST_BE_SYNC = [
     # an exact test per code (Freeman–Halton enumerates tables for 3+ groups; past
     # its cap a 9,999-draw Monte Carlo). Measured by the 2026-10-31 pre-implementation
     # review on its prototype, timed at the call:
+    # #1548: on the D12 corpus (1.2M turns, 225,000 linked participants, 3.6M codings),
+    # in-process at the call, three groups: 41.0s encrypted / 31.8s plaintext at
+    # 59a4fe25, 24-29s / 19-21s after its per-person gather (2026-11-12 review r1).
     (demographic_comparison, "0.13-0.64s at 2.4k-30k turns, +0.65s on the first scipy "
-                             "import (review r1, 2026-10-31)"),
+                             "import (review r1, 2026-10-31); D12 24-29s encrypted "
+                             "(#1548, was 41.0s)"),
     (demographic_comparison_csv, "the same computation, then the CSV — the two move together"),
+    # Joint display session A (D165–D168) — the display's numbers: the comparison's gather,
+    # each survey variable's cells, and the live rating rollup when a row binds a rated code.
+    # In-process on a migrated PLAINTEXT copy of the D12 kit (225,000 linked participants,
+    # 3.6M codings), three rows (four codes, three variables), three groups, quiet machine.
+    (joint_display_compute, "D12 plaintext 7.3-7.5s; 61-62s with one rated code (the rollup "
+                            "reads every coding)"),
+    # Joint display session B (D209/D210) — a pin's suggestions and its attribution facts:
+    # each reads one column's group map over every cell (D12: 225,000 linked rows).
+    (joint_display_passages, "encrypted D12 2.9-3.3s for one group of ~75,000 (9,985 coded "
+                             "passages, 50 listed)"),
+    (joint_display_pin_facts, "encrypted D12 1.6-1.7s for 50 quotes with an attribution column"),
+    # Joint display slice 2 (D173): the compute's gather per code strand + each bound
+    # column's cells. Over HTTP on the slice-2 review's seeded PLAINTEXT D12 copy (225,000
+    # participants), min-max of three, /health polled (`…-slice-2-kit/gates/d12-timings-*.log`).
+    (joint_display_cases, "D12 plaintext 10.6-11.1s for a page of 50 at any offset, with or "
+                          "without a rule [/health worst 0.32s as def]; encrypted 19.5-25.6s "
+                          "[0.33s]"),
+    # Joint display slice 2 (D314): a participant DELETE now walks every canvas section and
+    # snapshot for the misfit scrub. Encrypted D12 with 3 canvases x 30 sections, each holding a
+    # display that names 30 people in 6 case lists, plus 30 snapshots (the slice 2 build,
+    # `…-slice-2-kit`'s sibling scratch `time_delete.py`): as async, the whole call was the freeze.
+    (delete_participant, "encrypted D12, heavy canvas: 1.6s named in no list, 4.1-4.5s named in "
+                         "every display — /health worst 1.4s / 4.3s, all on the loop, as async"),
     # #1463 D62 — TopRail reads the summary on EVERY project page. Measured by the
     # 2026-11-02e review on the D12 corpus (1.2M turns, nine coders), encrypted, over
     # HTTP: async, the whole call is the freeze; as def, [/health in brackets]. Its

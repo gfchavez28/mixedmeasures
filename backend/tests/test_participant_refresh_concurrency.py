@@ -122,13 +122,14 @@ def _rollup_held_open(monkeypatch):
     seen = {}
     real = ps.compute_magnitude_rollup
 
-    def held(db, project_id):
+    def held(db, project_id, *, coder_ids):
         # `in_transaction` is the DB-API's own answer: True once a write has
         # begun a transaction that has not ended. The rollup must see False.
         seen["write_txn_open"] = db.connection().connection.dbapi_connection.in_transaction
+        seen["coder_ids"] = coder_ids  # #1608 — the refresh asks for every coder (None)
         started.set()
         release.wait(HOLD_S)
-        return real(db, project_id)
+        return real(db, project_id, coder_ids=coder_ids)
 
     monkeypatch.setattr(ps, "compute_magnitude_rollup", held)
     yield started, release, seen
@@ -184,6 +185,7 @@ class TestAnotherWriterIsNotLockedOut:
         assert "error" not in out, out.get("error")
         assert error is None, f"the other writer was locked out: {error}"
         assert seen["write_txn_open"] is False
+        assert seen["coder_ids"] is None  # #1608 — the shared snapshot is every coder's
         report = out["value"][0]
         # The two triggers were really exercised, so the lock had a reason to be taken.
         assert report.rows_added == 1
@@ -253,7 +255,9 @@ class TestAFailedRefreshSaysSo:
         db.commit()
         before = get_participant_dataset(db, 1).managed_synced_at
 
-        def boom(_db, _project_id):
+        def boom(_db, _project_id, *, coder_ids):
+            # #1608 — the snapshot is SHARED: the refresh never passes a viewer's scope.
+            assert coder_ids is None, coder_ids
             raise RuntimeError("the rollup failed")
 
         monkeypatch.setattr(ps, "compute_magnitude_rollup", boom)
@@ -414,11 +418,11 @@ class TestOneRefreshAtATime:
         real = ps.compute_magnitude_rollup
         started, release = threading.Event(), threading.Event()
 
-        def held(session, project_id):
+        def held(session, project_id, *, coder_ids):
             rollups.append(project_id)
             started.set()
             release.wait(HOLD_S)
-            return real(session, project_id)
+            return real(session, project_id, coder_ids=coder_ids)
 
         monkeypatch.setattr(ps, "compute_magnitude_rollup", held)
         first, second = world["Session"](), world["Session"]()

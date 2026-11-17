@@ -16,6 +16,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MemoryRouter } from 'react-router'
 
 const list = vi.fn()
 vi.mock('@/lib/api', () => ({
@@ -102,10 +103,13 @@ function countNotes(node: unknown): number {
 
 function renderPanel() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  // #1625: a note's link is a router <Link> now, so it needs a router.
   return render(
-    <QueryClientProvider client={qc}>
-      <AllNotesPanel projectId={1} />
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={qc}>
+        <AllNotesPanel projectId={1} />
+      </QueryClientProvider>
+    </MemoryRouter>,
   )
 }
 
@@ -143,6 +147,10 @@ it('deep-links an observation note to its clip in the workbench', async () => {
 
   const link = screen.getByRole('link', { name: /Open this note's observation/ })
   expect(link).toHaveAttribute('href', '/projects/1/observations/4?clip=88')
+  // #1625 (D238/D239): it opens in place — no target the desktop shell would deny,
+  // and a name that no longer promises a new tab.
+  expect(link).not.toHaveAttribute('target')
+  expect(link).toHaveAccessibleName("Open this note's observation")
 })
 
 it('offers an Observations source filter that isolates observation notes', async () => {
@@ -243,9 +251,11 @@ describe('#963 — the notes panel waits for its list', () => {
   function renderWithSearch(search: string) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     return render(
-      <QueryClientProvider client={qc}>
-        <AllNotesPanel projectId={1} search={search} />
-      </QueryClientProvider>,
+      <MemoryRouter>
+        <QueryClientProvider client={qc}>
+          <AllNotesPanel projectId={1} search={search} />
+        </QueryClientProvider>
+      </MemoryRouter>,
     )
   }
 

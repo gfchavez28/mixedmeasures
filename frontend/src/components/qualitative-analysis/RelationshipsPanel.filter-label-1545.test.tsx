@@ -39,7 +39,7 @@ function exportWith(participantIds: number[], participantFilterLabel: string | u
       <RelationshipsContent
         pid={1} qa={qa} codes={[]} filterParams={{}} cooccurrenceParams={{}} demoFilters={[FILTER]}
         participantFilterLabel={participantFilterLabel}
-        cooccurrenceN={null} comparisonData={DATA} comparisonLoading={false}
+        ratingsFollowCoderIds={false} cooccurrenceN={null} comparisonData={DATA} comparisonLoading={false}
         comparisonN={null} onCooccurrenceDataLoad={vi.fn()}
       />
     </MemoryRouter>,

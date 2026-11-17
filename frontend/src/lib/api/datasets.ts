@@ -416,6 +416,9 @@ export interface ColumnFrequenciesResponse {
   column_id: number
   frequencies: ValueFrequency[]
   total: number
+  /** #1615 — a participant score (or a variable built from one) asked for while blind:
+   *  no values were sent, so `frequencies` / `total` are empty for THAT reason. */
+  withheld_while_blind?: boolean
 }
 
 export interface CopyToResponse {
@@ -560,6 +563,8 @@ export interface ComputedPreviewResponse {
   warnings: string[]
   preview_rows: ComputedPreviewRow[]
   r_expression?: string | null
+  /** #1615 — the expression reads a participant score while blind: checked, no rows sent. */
+  values_withheld_while_blind?: boolean
 }
 
 export interface DomainScoreColumn {
@@ -624,6 +629,8 @@ export interface DatasetDataResponse {
   total_rows: number
   offset: number
   limit: number
+  /** #1608 — rating columns a blind request left out of `columns` and `rows` (0 = none). */
+  withheld_rating_columns?: number
   /**
    * participant_id -> row_identifier, DATASET-scoped (not page-scoped).
    * Backs the picker's already-linked guard; deriving it from the loaded page
@@ -958,9 +965,15 @@ export const datasetsApi = {
     api.patch<Dataset>(`/projects/${projectId}/datasets/${datasetId}`, data).then(res => res.data),
   listColumns: (projectId: number, datasetId: number) =>
     api.get(`/projects/${projectId}/datasets/${datasetId}/columns`).then(res => res.data),
-  getData: (projectId: number, datasetId: number, page?: { limit?: number; offset?: number }) =>
+  /** #1608 — `coderIds` (sent while blind) leaves the participant table's rating columns out. */
+  getData: (
+    projectId: number, datasetId: number, page?: { limit?: number; offset?: number }, coderIds?: string,
+  ) =>
     api.get<DatasetDataResponse>(`/projects/${projectId}/datasets/${datasetId}/data`, {
-      params: { limit: page?.limit ?? DATASET_PAGE_SIZE, offset: page?.offset ?? 0 },
+      params: {
+        limit: page?.limit ?? DATASET_PAGE_SIZE, offset: page?.offset ?? 0,
+        ...(coderIds ? { coder_ids: coderIds } : {}),
+      },
     }).then(res => res.data),
   /**
    * Where a row sits in the grid's ordering, and which page holds it (#834).
@@ -1013,9 +1026,11 @@ export const datasetsApi = {
     api.post(
       `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/recompute`
     ).then(res => res.data),
-  previewComputedColumn: (projectId: number, datasetId: number, data: ComputedColumnCreate) =>
+  // #1615: `coderIds` as `getFrequencies` — a preview prints a score's cells.
+  previewComputedColumn: (projectId: number, datasetId: number, data: ComputedColumnCreate, coderIds?: string) =>
     api.post<ComputedPreviewResponse>(
-      `/projects/${projectId}/datasets/${datasetId}/columns/computed/preview`, data
+      `/projects/${projectId}/datasets/${datasetId}/columns/computed/preview`, data,
+      coderIds ? { params: { coder_ids: coderIds } } : undefined,
     ).then(res => res.data),
   getDomainScores: (projectId: number, datasetId: number) =>
     api.get<DomainScoresResponse>(
@@ -1228,9 +1243,11 @@ export const recodeApi = {
       { target_column_ids: targetColumnIds }
     ).then(res => res.data),
 
-  getFrequencies: (projectId: number, datasetId: number, columnId: number) =>
+  // #1615: `coderIds` = `useBlindScope().coderScope` — sent only while blind mode withholds.
+  getFrequencies: (projectId: number, datasetId: number, columnId: number, coderIds?: string) =>
     api.get<ColumnFrequenciesResponse>(
-      `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/frequencies`
+      `/projects/${projectId}/datasets/${datasetId}/columns/${columnId}/frequencies`,
+      coderIds ? { params: { coder_ids: coderIds } } : undefined,
     ).then(res => res.data),
 
   // #576/#577: declare a code→label dictionary for a numbers-only column.

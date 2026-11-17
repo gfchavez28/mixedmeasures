@@ -123,9 +123,11 @@ export function useCanvasEditor({
                 })
               },
               onUpdate: (props) => {
+                // `command` too — it closes over this update's range (the slash popup's defect,
+                // 2026-11-12e: onStart's range is the bare trigger, so the typed query stayed).
                 setMentionPopup(prev =>
                   prev
-                    ? { ...prev, items: props.items as ThemeMentionItem[], clientRect: props.clientRect ?? null }
+                    ? { ...prev, items: props.items as ThemeMentionItem[], command: props.command, clientRect: props.clientRect ?? null }
                     : null,
                 )
               },

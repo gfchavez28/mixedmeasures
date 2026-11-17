@@ -104,3 +104,19 @@ class AppliedCodeDetail(BaseModel):
     # differed from ours (the merge kept ours, flagged the difference). None =
     # no unresolved conflict. The coder clears it by rating again.
     magnitude_conflict: float | None = None
+
+
+class CodeApplicationIdentity(BaseModel):
+    """WHO applied a code to a unit — identity only, no rating (#1592, the client's
+    `lib/coding-progress.ts::CodeApplicationIdentity`).
+
+    For the analysis page's passage lists (*By Code*) and the Quote Board, whose chips are
+    a unit's DISTINCT codes: without the coder the client could not tell the viewer's
+    chip from a colleague's, so every chip offered *Remove code* — and the remove door
+    deletes only the caller's application, so on a colleague's chip it did nothing.
+    Built from the SAME rows as the unit's ``applied_code_ids`` (so it follows the same
+    layer and the same blind scope — a colleague's id never rides a list whose chips were
+    narrowed to the viewer's). ``user_id`` None = an unattributed (merged legacy) coding.
+    """
+    code_id: int
+    user_id: int | None

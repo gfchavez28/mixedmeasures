@@ -37,6 +37,7 @@ import {
   COMPARISON_CHART_LABELS,
   type ComparisonChartType,
 } from '@/lib/comparison-chart-types'
+import { useAnalysisScope } from '@/hooks/useAnalysisScope'
 import ComparisonUnavailable from '@/components/analysis/ComparisonUnavailable'
 import StaleScaleScoresNotice from '@/components/analysis/StaleScaleScoresNotice'
 
@@ -115,6 +116,9 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
     excludeGroups, rcFormatting, postHocExpanded, onPostHocToggle,
     domains, setUrlParam,
   } = props
+  // #1615 — the CSVs follow the screen: the viewer alone while blind (the server leaves
+  // rating scores out of the file and says so); nothing is sent before the scope is known.
+  const { coderScope, scopeReady } = useAnalysisScope(pid)
 
   // #1168 R7 — the groups whose stored scale scores the SHOWN result read out
   // of date. Only beside a result on screen: while a view refetches it shows
@@ -148,34 +152,38 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
   }, [])
 
   const handleExportCorrelationCsv = useCallback(async () => {
+    if (!scopeReady) return
     try {
       const { blob, filename } = await correlationsApi.correlationMatrixCsv(pid, {
         column_ids: rcColumnIds,
         domain_ids: rcDomainIds,
         correlation_type: corrType,
         bonferroni: bonferroniOn,
+        coderScope,
       })
       downloadBlob(blob, filename)
     } catch {
       toast.error('Failed to export correlation matrix')
     }
-  }, [pid, rcColumnIds, rcDomainIds, corrType, bonferroniOn])
+  }, [pid, rcColumnIds, rcDomainIds, corrType, bonferroniOn, coderScope, scopeReady])
 
   const handleExportScatterCsv = useCallback(async () => {
+    if (!scopeReady) return
     try {
       const { blob, filename } = await correlationsApi.scatterDataCsv(pid, {
         column_ids: rcColumnIds,
         domain_ids: rcDomainIds,
         id_type: rcColumnIds.length > 0 ? 'column' : 'domain',
+        coderScope,
       })
       downloadBlob(blob, filename)
     } catch {
       toast.error('Failed to export scatter data')
     }
-  }, [pid, rcColumnIds, rcDomainIds])
+  }, [pid, rcColumnIds, rcDomainIds, coderScope, scopeReady])
 
   const handleExportComparisonCsv = useCallback(async () => {
-    if (!compareBy) return
+    if (!compareBy || !scopeReady) return
     try {
       // #743: the server names this after the GROUPING column; inventing a
       // constant here made every export overwrite the last one.
@@ -187,12 +195,13 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
         test_type: testType,
         exclude_groups: excludeGroups.length > 0 ? excludeGroups : undefined,
         nonparametric: nonparametric || undefined,
+        coderScope,
       })
       downloadBlob(blob, filename)
     } catch {
       toast.error('Failed to export group comparison')
     }
-  }, [pid, rcColumnIds, rcDomainIds, compareBy, compareBy2, testType, excludeGroups, nonparametric])
+  }, [pid, rcColumnIds, rcDomainIds, compareBy, compareBy2, testType, excludeGroups, nonparametric, coderScope, scopeReady])
 
   return (
     <div className="space-y-6" role="tabpanel" id="tabpanel-rc" aria-labelledby="tab-rc">
@@ -425,7 +434,7 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
                     metricType="mean"
                     formatting={rcFormatting}
                   />
-                  <ComparisonTestStrip rows={comparisonData.rows} sigLevels={sigLevels} nonparametric={nonparametric} />
+                  <ComparisonTestStrip rows={comparisonData.rows} sigLevels={sigLevels} />
                 </ChartExportWrapper>
               )}
 
@@ -445,7 +454,7 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
                     formatting={rcFormatting}
                     valueLabel={row.full_label}
                   />
-                  <ComparisonTestStrip rows={[row]} sigLevels={sigLevels} nonparametric={nonparametric} />
+                  <ComparisonTestStrip rows={[row]} sigLevels={sigLevels} />
                 </ChartExportWrapper>
               ))}
 
@@ -465,7 +474,7 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
                     formatting={rcFormatting}
                     valueLabel={row.full_label}
                   />
-                  <ComparisonTestStrip rows={[row]} sigLevels={sigLevels} nonparametric={nonparametric} />
+                  <ComparisonTestStrip rows={[row]} sigLevels={sigLevels} />
                 </ChartExportWrapper>
               ))}
 
@@ -482,7 +491,7 @@ export default function CorrelationsComparisonsContent(props: CorrelationsCompar
                     metricType="mean"
                     formatting={rcFormatting}
                   />
-                  <ComparisonTestStrip rows={comparisonData.rows} sigLevels={sigLevels} nonparametric={nonparametric} />
+                  <ComparisonTestStrip rows={comparisonData.rows} sigLevels={sigLevels} />
                 </ChartExportWrapper>
               )}
             </>

@@ -252,6 +252,17 @@ class MagnitudeRollup:
     #: these". Distinct from a participant with no coding, who is absent
     #: entirely, and from a score of zero, which does not exist.
     participants_coded_unrated: frozenset[int] = frozenset()
+    #: #1617 / #1623, D222 — every coder holding a rating (``is not None``: a ZERO
+    #: is a rating) in a ballot this rollup READ, collected before any exclusion.
+    #: So a SUPERSET of the coders whose ratings reach a score: an excluded rating
+    #: counts, and over-counting is the fail-closed direction for what it is for —
+    #: the participant table records it at the refresh, so a blind reader is kept
+    #: from a snapshot by WHOSE ratings it holds, never by who rates now. Taken
+    #: from the ballots themselves, never a second query, which would race the
+    #: gather (seconds long; a rating added or removed in between would put the
+    #: two out of step). 🔴 It names which colleagues rated, so it never rides
+    #: the wire (#964's fail-closed rule).
+    rater_ids: frozenset[int] = frozenset()
 
     def for_participant(self, participant_id: int) -> tuple[ParticipantCodeScore, ...]:
         return tuple(s for s in self.scores if s.participant_id == participant_id)
@@ -293,11 +304,30 @@ def _passage_interval(target_ratings: tuple[float, ...]) -> dict:
     return {"target_sd": sd, **ci, "ci_unavailable_reason": None}
 
 
-def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
+def compute_magnitude_rollup(
+    db: Session, project_id: int, *, coder_ids, code_ids=None,
+) -> MagnitudeRollup:
     """Roll every rating in one project up to a per-participant, per-code score.
 
     Pure over the database: reads, computes, stores nothing. See the module
     docstring for the two steps, the voter rule and the disclosure.
+
+    🔴 **``coder_ids`` has NO DEFAULT (#1608).** None = every coder's ratings —
+    the participant table's refresh, a shared snapshot. A list = only those
+    coders vote (`coding_layers.coder_scope_clause`'s INCLUDE list): what a
+    BLIND reader must ask for. With the viewer alone every target has one voter,
+    so the sole-voter arm returns her own rating and no colleague's reaches the
+    score. Exclusions and ``participants_coded_unrated`` follow the same scope.
+
+    **``code_ids`` (D168): None = every code — the participant table's refresh.**
+    Code ids = the rollup RESTRICTED to those codes (each resolved to its effective
+    code): their scores exactly as the whole rollup gives them, the ratings of those
+    codes it left out, and the participants a passage holding one of them reached
+    without a score on one. The gather reads only the passages holding an asked code,
+    so the cost follows the codes asked for, not the project (the joint display's
+    rated cells: 61 s on D12 for one code, every coding read). Both halves of the
+    exactness live here: the gather keeps each ballot whole (a passage's other codes
+    are its other voters), and this function counts nothing but the asked codes.
     """
     # 🔴 The PROJECT scope, not the consensus writer's. A rollup that must SAY
     # what it excluded has to be able to SEE it: sourcing this from
@@ -313,7 +343,18 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
         # is routed to ITS participant below (a group spanning two people is one
         # passage of EACH, D21), and the group is folded here, per participant.
         group_units=False,
+        coder_ids=coder_ids,
+        # D168 — None reads every target; code ids read only the passages holding one.
+        target_codes=code_ids,
     )
+    # The effective codes this rollup reports on, or None for every code. A passage's
+    # OTHER codes still decide whether an asked code reached consensus there (its
+    # voters); they are never scored or disclosed by a narrowed rollup.
+    asked = votes.target_effective_codes
+
+    def _reported(per_coder) -> set[int]:
+        effs = {eff for codes in per_coder.values() for eff in codes}
+        return effs if asked is None else effs & asked
 
     code_names = dict(
         db.query(Code.id, Code.name).filter(Code.project_id == project_id).all()
@@ -349,7 +390,7 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
     def _exclude_target(ballot: TargetBallot, reason: str) -> None:
         per_coder, ratings = ballot.per_coder, ballot.ratings
         gid = group_of.get(ballot.target_id) if ballot.kind == TARGET_SEGMENT else None
-        for eff in {eff for codes in per_coder.values() for eff in codes}:
+        for eff in _reported(per_coder):
             if gid is None:
                 _exclude(excluded, reason, len(_rated_by(ratings, per_coder, eff)))
             else:
@@ -357,7 +398,14 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
                     (reason, gid, uid, eff) for uid in _rated_by(ratings, per_coder, eff)
                 )
 
+    # D222 — whose ratings this rollup read, before anything is excluded.
+    raters: set[int] = set()
+
     def _consume(ballot: TargetBallot, route: ParticipantRoute | None) -> None:
+        raters.update(
+            uid for uid, by_code in ballot.ratings.items()
+            if any(value is not None for value in by_code.values())
+        )
         if route is None:
             # Not resolvable at all — a target outside the project cannot be in
             # this project's gather, so this is unreachable rather than a state.
@@ -393,6 +441,12 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
             return sum(1 for v in _rating_values(ratings, per_coder, eff) if v is not None)
 
         all_effs = {eff for codes in per_coder.values() for eff in codes}
+        reported = _reported(per_coder)
+        if not reported:
+            # Reachable only when narrowed: a group spanning two people is gathered
+            # whole, so one person's fold can hold none of the asked codes while the
+            # other's does. That person was not reached by an asked code.
+            return
 
         reached.add(participant_id)
 
@@ -406,7 +460,7 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
             # One voter: no consensus is possible, and their judgement stands.
             agreed = all_effs
 
-        for eff in all_effs:
+        for eff in reported:
             if eff not in agreed:
                 _exclude(excluded, EXCLUDED_NO_CODE_CONSENSUS, _n_ratings_for(eff))
                 continue
@@ -481,4 +535,5 @@ def compute_magnitude_rollup(db: Session, project_id: int) -> MagnitudeRollup:
         scores=tuple(scores),
         excluded_ratings=excluded,
         participants_coded_unrated=frozenset(reached - scored),
+        rater_ids=frozenset(raters),
     )

@@ -7,9 +7,11 @@ blind coder downloaded — or saw — her colleagues' coding by name, unit and r
 (measured on one scratch install, 2026-11-05; record:
 the internal design notes, git-ignored).
 
-Every test asks a door BOTH ways on ONE fixture: unscoped, the colleague's work is in
+Every test asks a door BOTH ways on one fixture: unscoped, the colleague's work is in
 it (so the fixture can tell the two apart); scoped to Alice, none of it is, and her own
-work still is. The fixture mirrors the review's kit (`drive_setup.py`):
+work still is. The #1608 section at the end adds a second fixture, `scored_project` (the
+same project with Ana linked and the participant table built and refreshed). The first
+fixture mirrors the review's kit (`drive_setup.py`):
 
   - coders Alice (2) and Bob (3); the conftest's testuser (1) codes nothing;
   - "Interview 1": an interviewer turn, then Ana's turns T1..T4;
@@ -691,3 +693,192 @@ def test_the_python_twin_reads_a_scope_as_sql_does():
     assert in_coder_scope(ALICE, [ALICE])
     assert not in_coder_scope(BOB, [ALICE])
     assert not in_coder_scope(None, [ALICE])   # SQL's IN leaves a NULL out
+
+
+# ── #1608 — participant scores: the doors whose VALUES come from ratings ─────
+#
+# D95 classed the datasets workbook "not a coding view" on a fixture with no score
+# columns. The participant table's rating columns roll up every coder's ratings, so
+# while blind they are withheld wherever a blind coder reads that table. Here Ana's
+# T1 carries Alice's 2 and Bob's 5: the shared snapshot reads 3.5 (Bob's rating is
+# read off it exactly: 2 × 3.5 − 2 = 5), Alice's own live score 2.0.
+
+
+@pytest.fixture
+def scored_project(blind_project):
+    from app.models.participant import Participant
+    from app.services import participant_scores as ps
+    from app.services.participant_dataset import create_participant_dataset, get_participant_dataset
+
+    db = blind_project
+    ana = Participant(project_id=PID, identifier="Ana")
+    db.add(ana)
+    db.flush()
+    db.get(Speaker, 15301).participant_id = ana.id
+    db.flush()
+    create_participant_dataset(db, PID)
+    ps.refresh_participant_dataset(db, PID)
+    dataset = get_participant_dataset(db, PID)
+    rating_cols = {
+        (ps.parse_managed_spec(c.managed_spec) or {}).get("kind"): c
+        for c in db.query(DatasetColumn).filter(DatasetColumn.dataset_id == dataset.id)
+        if ps.parse_managed_spec(c.managed_spec)
+    }
+    return {"db": db, "dataset": dataset, "ana": ana, "cols": rating_cols}
+
+
+def _grid(db, dataset_id, coder_ids=None):
+    from app.routers.dataset import get_dataset_data
+    return _run(get_dataset_data(PID, dataset_id, limit=200, offset=0,
+                                 user=_user(db), db=db, coder_ids=coder_ids))
+
+
+def _rating_headers(names):
+    return sorted(n for n in names if n and ("(score)" in n or "(rated passages)" in n))
+
+
+class TestTheLiveRollupTakesAScope:
+    def test_a_self_scope_is_her_own_rating(self, scored_project):
+        from app.services.magnitude_rollup import compute_magnitude_rollup
+        db, ana = scored_project["db"], scored_project["ana"]
+
+        def mean(coder_ids):
+            (score,) = [s for s in compute_magnitude_rollup(db, PID, coder_ids=coder_ids).scores
+                        if s.participant_id == ana.id and s.code_id == SHARED]
+            return score.mean, score.min_raters_per_target
+
+        assert mean(None) == (3.5, 2)                 # the team's: the shared snapshot's basis
+        assert mean([ALICE]) == (2.0, 1)              # hers alone — the sole-voter arm
+        assert mean([BOB]) == (5.0, 1)
+        assert mean([ALICE, BOB]) == (3.5, 2)         # a scope of every voter changes nothing
+
+    def test_the_voter_count_is_taken_under_the_same_scope(self, scored_project):
+        """The ≥N-voter filter counts voters INSIDE the scope, as the ballots do: with
+        Alice alone, T1 has one voter, so a two-voter gather finds nothing."""
+        from app.services.consensus import SEGMENT_SCOPE_PROJECT, gather_target_votes
+        db = scored_project["db"]
+
+        def targets(coder_ids):
+            votes = gather_target_votes(db, PID, segment_scope=SEGMENT_SCOPE_PROJECT,
+                                        min_voters=2, group_units=False, coder_ids=coder_ids)
+            return sorted(b.target_id for b in votes.ballots())
+
+        assert targets(None) == [T1, R1]
+        assert targets([ALICE]) == []
+        assert targets([ALICE, BOB]) == [T1, R1]
+
+    def test_the_writer_and_the_refresh_ask_for_every_coder(self):
+        """The two callers that must NOT follow a viewer say so in their source — a
+        scope there would write one viewer's judgement into a layer everyone reads."""
+        import inspect
+        from app.services import consensus, participant_scores
+        assert "coder_ids=None," in inspect.getsource(consensus.materialize_consensus_for_project)
+        assert "compute_magnitude_rollup(db, project_id, coder_ids=None)" in inspect.getsource(
+            participant_scores._refresh_in_turn)
+
+
+class TestTheParticipantTableWhileBlind:
+    def test_the_data_view_leaves_the_rating_columns_out_and_counts_them(self, scored_project):
+        db, ds = scored_project["db"], scored_project["dataset"]
+        full = _grid(db, ds.id)
+        score_col = scored_project["cols"]["magnitude_score"]
+        assert _rating_headers(c.column_text for c in full.columns) == [
+            "Shared theme (rated passages)", "Shared theme (score)"]
+        cells = [r.values.get(str(score_col.id)) for r in full.rows]
+        assert [c.value_numeric for c in cells if c] == [3.5]   # the leak, unscoped
+        assert full.withheld_rating_columns == 0
+
+        scoped = _grid(db, ds.id, SCOPE)
+        assert _rating_headers(c.column_text for c in scoped.columns) == []
+        assert all(str(c.id) not in r.values for r in scoped.rows
+                   for c in scored_project["cols"].values())
+        assert scoped.withheld_rating_columns == 2
+        # Everything else is unchanged: the identifier column and its cells.
+        kept = {c.id for c in scoped.columns}
+        assert kept == {c.id for c in full.columns} - {c.id for c in scored_project["cols"].values()}
+        assert scoped.dataset.column_count == full.dataset.column_count - 2
+
+    def test_a_scope_holding_every_rater_keeps_them(self, scored_project):
+        """'Narrower than the raters', as the R export's agreement files (#1530 D98) —
+        a lead's explicit full list still sees the scores."""
+        db, ds = scored_project["db"], scored_project["dataset"]
+        assert _grid(db, ds.id, f"{ALICE},{BOB}").withheld_rating_columns == 0
+
+    def test_an_archived_colleagues_ratings_still_withhold(self, scored_project):
+        """Fail closed (the #1541 class): the snapshot was refreshed while Bob was
+        active and still holds his 5, though the rollup would leave him out now."""
+        db, ds = scored_project["db"], scored_project["dataset"]
+        db.get(User, BOB).archived = True
+        db.flush()
+        assert _grid(db, ds.id, SCOPE).withheld_rating_columns == 2
+
+    def test_a_column_computed_from_a_score_is_withheld_with_it(self, scored_project):
+        import json as _json
+        db, ds = scored_project["db"], scored_project["dataset"]
+        score_col = scored_project["cols"]["magnitude_score"]
+        db.add(DatasetColumn(dataset_id=ds.id, column_code="band", column_name="band",
+                             column_text="Score band", column_type=ColumnType.NUMERIC,
+                             source="computed", expression="x", sequence_order=90,
+                             depends_on_column_ids=_json.dumps([score_col.id])))
+        db.flush()
+        scoped = _grid(db, ds.id, SCOPE)
+        assert "Score band" not in [c.column_text for c in scoped.columns]
+        assert scoped.withheld_rating_columns == 3
+        assert "Score band" in [c.column_text for c in _grid(db, ds.id).columns]
+
+    def test_another_dataset_is_never_touched(self, scored_project):
+        db = scored_project["db"]
+        assert _grid(db, PID, SCOPE).withheld_rating_columns == 0
+        assert [c.column_text for c in _grid(db, PID, SCOPE).columns] == [
+            c.column_text for c in _grid(db, PID).columns]
+
+    def test_the_participant_profile_leaves_them_out(self, scored_project):
+        from app.routers.participants import get_participant
+        db, ana = scored_project["db"], scored_project["ana"]
+
+        def shown(coder_ids=None):
+            detail = _run(get_participant(PID, ana.id, user=_user(db), db=db, coder_ids=coder_ids))
+            return {d.column_text: d.value for d in detail.linked_demographics}
+
+        assert shown()["Shared theme (score)"] == "3.500"   # the leak, unscoped
+        assert _rating_headers(shown(SCOPE)) == []
+
+    def test_the_datasets_workbook_leaves_them_out_and_says_so(self, scored_project):
+        from app.routers.export_excel import export_datasets_excel
+        from app.services.participant_scores import RATING_COLUMNS_WITHHELD_NOTE
+        db, ds = scored_project["db"], scored_project["dataset"]
+
+        def book(coder_ids=None):
+            resp = export_datasets_excel(PID, user=_user(db), db=db, coder_ids=coder_ids)
+            return load_workbook(io.BytesIO(_body(resp)), read_only=False), _filename(resp)
+
+        full, full_name = book()
+        sheet = full[ds.name]
+        full_headers = [c.value for c in next(sheet.iter_rows(max_row=1))]
+        assert len(_rating_headers(full_headers)) == 0  # headers are column CODES …
+        full_dict = [r[2] for r in full["Data Dictionary"].iter_rows(min_row=2, values_only=True)]
+        assert _rating_headers(full_dict) == ["Shared theme (rated passages)", "Shared theme (score)"]
+        assert "_coder-" not in full_name
+
+        scoped, scoped_name = book(SCOPE)
+        scoped_dict = list(scoped["Data Dictionary"].iter_rows(min_row=2, values_only=True))
+        assert _rating_headers(r[2] for r in scoped_dict) == []
+        assert scoped_dict[-1][0].startswith(RATING_COLUMNS_WITHHELD_NOTE)
+        assert scoped_dict[-1][0].endswith("This file holds Alice's view.")
+        assert len(next(scoped[ds.name].iter_rows(max_row=1))) == len(full_headers) - 2
+        assert scoped_name.endswith("_coder-Alice.xlsx")
+        # Another dataset's sheet is data, not coding: identical.
+        assert [tuple(r) for r in scoped["Survey"].iter_rows(values_only=True)] == [
+            tuple(r) for r in full["Survey"].iter_rows(values_only=True)]
+
+    def test_the_r_data_leaves_them_out_and_the_script_says_so(self, scored_project):
+        db = scored_project["db"]
+        full, _ = _r_zip(db)
+        scoped, _ = _r_zip(db, SCOPE)
+        full_header = _member(full, "_data.csv").decode("utf-8-sig").splitlines()[0]
+        scoped_header = _member(scoped, "_data.csv").decode("utf-8-sig").splitlines()[0]
+        assert full_header.count("Shared") == 2 or full_header.count("shared") == 2, full_header
+        assert "hared" not in scoped_header
+        setup = _member(scoped, ".R").decode("utf-8")
+        assert "# 2 participant-table rating column(s) left out." in setup
+        assert "left out." not in _member(full, ".R").decode("utf-8").split("# ---- Helpers")[0]

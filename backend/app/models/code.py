@@ -78,6 +78,10 @@ class Code(Base):
 
     __table_args__ = (
         Index("ix_codes_project_numeric", "project_id", "numeric_id", unique=True),
+        # #1639 (r2-1): a deleted row's id is never handed to the next row — a joint
+        # display (and every other stored reference) names rows by id with no FK.
+        # Migration `c3a7e1f9b5d8` makes the same table; `schema_diff_harness` compares.
+        {"sqlite_autoincrement": True},
     )
 
 

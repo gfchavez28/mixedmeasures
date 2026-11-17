@@ -2814,14 +2814,15 @@ class TestFormatVersionIsPinned:
     incidental side effect of another change.
     """
 
-    def test_current_version_is_7(self):
+    def test_current_version_is_8(self):
         from app.services.project_portability import CURRENT_FORMAT_VERSION
-        assert CURRENT_FORMAT_VERSION == 7, (
+        assert CURRENT_FORMAT_VERSION == 8, (
             "The .mmproject format version changed. That is a real decision, not a "
             "detail: v2 = #414 identifier, v3 = the third Segment parent, v4 = #592 "
             "missing declarations, v5 = #687 code-point excerpt offsets, "
             "v6 = #823(d) recode range bands AND #35 magnitude coding, "
-            "v7 = #958 the five data-scaled entities in their own JSONL entries. If "
+            "v7 = #958 the five data-scaled entities in their own JSONL entries, "
+            "v8 = the joint display's canvas node and its nested ids (D164). If "
             "this is intentional, update this pin AND document what the new version "
             "means in project_portability.py, the internal design notes, and "
             "the internal design notes."

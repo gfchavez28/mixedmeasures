@@ -15,6 +15,8 @@ import { MemoryRouter } from 'react-router'
 
 const api = vi.hoisted(() => ({ analysisColumns: vi.fn() }))
 
+// #1615 — the quantitative reads take the blind scope from this hook; every coder here.
+vi.mock('@/hooks/useAnalysisScope', () => ({ useAnalysisScope: () => ({ coderIds: null, coderScope: undefined, scopeKey: 'every-coder', scopeReady: true }) }))
 vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api')
   return { ...actual, metricsApi: { ...actual.metricsApi, analysisColumns: api.analysisColumns } }

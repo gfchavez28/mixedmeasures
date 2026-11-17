@@ -34,8 +34,15 @@ from ..services.coding_layers import (
     non_consensus_filter,
     visible_target_filter,
 )
-from ..services.metrics import VALID_OPERATORS, resolve_input_source_labels
+from ..services.metrics import (
+    COMPOSITE_SEPARATOR, VALID_OPERATORS, resolve_dataset_column, resolve_input_source_labels,
+)
 from ..services.scale_scores import scale_score_metrics  # #1177
+from ..services.participant_scores import (  # #1608
+    RATING_COLUMNS_WITHHELD_NOTE,
+    withheld_rating_column_ids,
+)
+from ..services.rating_withholding import rating_withholding  # #1615
 from ..services.statistical_tests import _order_columns_by_domain_sequence  # #1244
 from ..services.grouping import load_grouping_values, order_value_labels
 from ..services.missing_values import column_missing_rules, is_missing
@@ -517,6 +524,34 @@ def _effective_group_values(
     ]
 
 
+# #1636: `metrics.COMPOSITE_SEPARATOR` as the body of an R string literal, its
+# non-ASCII characters written as `\uXXXX` escapes — a fixed vocabulary, never
+# user text. `.mm_group_key` names a two-variable group with it, as the app does.
+_R_COMPOSITE_SEPARATOR = "".join(
+    c if ord(c) < 128 else f"\\u{ord(c):04x}" for c in COMPOSITE_SEPARATOR
+)
+
+
+def _r_string_vector(values: list[str]) -> str:
+    """User text as an R `c("…", …)` literal, every value through `_escape_r_string` (#1468)."""
+    return "c(" + ", ".join(f'"{_escape_r_string(v)}"' for v in values) + ")"
+
+
+def _metric_group_values(db: Session, metric_def: MetricDefinition) -> list[str]:
+    """The groups the app shows for a saved metric over ONE column, in its order (#1636).
+
+    The groups are the app's own: `metrics.resolve_dataset_column` groups the
+    metric's rows (the grouping column's missing rules, #384; a record missing
+    either variable of a two-variable grouping is in no group), and the app shows
+    every group but that no-group bucket, ordered by `order_value_labels` (#406).
+    Asked once here rather than re-derived, so the script's groups cannot drift
+    from the app's — the comparisons' `_effective_group_values` reads the
+    grouping column alone, which is not the set a metric's results hold.
+    """
+    grouped = resolve_dataset_column(metric_def, db)
+    return order_value_labels({g for g in grouped if g is not None})
+
+
 def _is_domain_ref(r_name: str) -> bool:
     """`domains$X` names a LIST ENTRY holding column names, not a data column.
 
@@ -690,8 +725,15 @@ def _build_r_script(
     identifier_cols: list[dict] | None = None,
     irr_reasons: dict | None = None,
     agreement_left_out_for: list[str] | None = None,
+    ratings_left_out: int = 0,
+    rating_groups_left_out: int = 0,
 ) -> str:
     """Build the R script content. Returns the full script string with UTF-8 BOM.
+
+    ``ratings_left_out`` — how many participant-table rating columns a blind export
+    left out of the data CSV (#1608); a comment under *Read data* says so.
+    ``rating_groups_left_out`` — the variable groups over them left out with their
+    scale scores, and so every analysis reading one (#1615); the same comment says so.
 
     ``agreement_left_out_for`` — the coders a blind export was scoped to (#1530
     D97): the intercoder agreement sections are not emitted, and a comment stands
@@ -742,6 +784,19 @@ def _build_r_script(
     # Read data
     toc_sections.append("Read data")
     r_lines.append("# ---- Read data ----")
+    if ratings_left_out:
+        # #1608 — what the data CSV does not hold, where its reader looks first.
+        r_lines.append(
+            f"# {ratings_left_out} participant-table rating column(s) left out. "
+            f"{RATING_COLUMNS_WITHHELD_NOTE}"
+        )
+        if rating_groups_left_out:
+            # #1615 — and what was built from them.
+            groups = ("1 variable group over them left out, with its scale score"
+                      if rating_groups_left_out == 1 else
+                      f"{rating_groups_left_out} variable groups over them left out, "
+                      "with their scale scores")
+            r_lines.append(f"# {groups}; so is every saved analysis that reads one.")
     # #533: identifier columns are join keys — force character so readr can't
     # numeric-guess "007" into 7 and break joins on external data.
     # #1483 (b): so is every column whose CELL is text (`_emits_text_cell`, the
@@ -931,6 +986,41 @@ def _build_r_script(
     r_lines.append("  }")
     r_lines.append("  sel <- g %in% keep")
     r_lines.append("  data.frame(y = y[sel], g = factor(g[sel], levels = keep))")
+    r_lines.append("}")
+    r_lines.append("")
+    # #1636: a saved metric GROUPED in the app is computed per group, over the
+    # app's own groups in its order (`_metric_group_values`) — the loop below
+    # wrote the pooled mean under the grouped metric's label. A record whose
+    # group is missing, or none of the app's groups, is in no group, as in the
+    # app; two grouping variables make one group per pair, named as the app
+    # names it (`metrics.COMPOSITE_SEPARATOR`).
+    r_lines.append("# A saved metric grouped in Mixed Measures: one row per group, the app's groups")
+    r_lines.append("# in its order. A record with no group (or a second variable's value missing)")
+    r_lines.append("# is in none, as in the app; `drop` marks the answers the metric excluded.")
+    r_lines.append(".mm_group_key <- function(g, g2 = NULL) {")
+    r_lines.append("  g <- as.character(g)")
+    r_lines.append("  if (is.null(g2)) return(g)")
+    r_lines.append("  g2 <- as.character(g2)")
+    r_lines.append(
+        f'  ifelse(is.na(g) | is.na(g2), NA_character_, paste(g, g2, sep = "{_R_COMPOSITE_SEPARATOR}"))'
+    )
+    r_lines.append("}")
+    r_lines.append(".mm_group_summary <- function(y, g, groups, g2 = NULL, drop = NULL) {")
+    r_lines.append("  key <- .mm_group_key(g, g2)")
+    r_lines.append("  if (!is.null(drop)) y[drop] <- NA")
+    r_lines.append("  ok <- !is.na(y) & !is.na(key)")
+    r_lines.append("  do.call(rbind, lapply(groups, function(lv) {")
+    r_lines.append("    v <- y[ok & key == lv]")
+    r_lines.append("    data.frame(group = lv, n = length(v),")
+    r_lines.append("               mean = if (length(v) > 0) mean(v) else NA_real_,")
+    r_lines.append("               sd = if (length(v) > 1) sd(v) else NA_real_)")
+    r_lines.append("  }))")
+    r_lines.append("}")
+    r_lines.append(".mm_group_table <- function(x, g, groups, g2 = NULL, drop = NULL) {")
+    r_lines.append("  key <- .mm_group_key(g, g2)")
+    r_lines.append("  keep <- !is.na(x) & !is.na(key) & key %in% groups")
+    r_lines.append("  if (!is.null(drop)) keep <- keep & !drop")
+    r_lines.append("  table(group = factor(key[keep], levels = groups), value = x[keep])")
     r_lines.append("}")
     r_lines.append("")
 
@@ -1712,6 +1802,63 @@ def _build_r_script(
         hm_excl_r = _exclusion_vector_r(sorted(_parse_exclude_values(hm)))
         if hm_excl_r and hm.metric_type in ("mean", "frequency_distribution"):
             metric_lines.append(f"# Leaves out the answers this metric excluded: {hm_excl_r}")
+        # #1636: a GROUPED metric is computed per group, never written as the
+        # pooled number under its label. The app groups a column metric by its
+        # grouping variable(s) only (`metrics.resolve_dataset_column`), and a
+        # variable-group metric by those or by dataset.
+        hm_is_column = hm.input_source_type == "dataset_column"
+        hm_grouped = hm.metric_type in ("mean", "frequency_distribution") and (
+            hm.grouping_column_id is not None
+            or (not hm_is_column and hm.grouping_mode == "dataset")
+        )
+        if hm_grouped and hm_is_column:
+            if hm_grp_r is None or (hm.grouping_column_id_2 is not None and hm_grp2_r is None):
+                # The grouping variable is not in this export (a rating score
+                # withheld while blind, #1615, or a type the script does not
+                # carry). No pooled number stands in for the groups — D3's rule.
+                metric_lines.append(
+                    "# Skipped: grouped in Mixed Measures by a variable this export"
+                    " does not carry."
+                )
+                metric_lines.append("")
+                continue
+            hm_groups = _metric_group_values(db, hm)
+            if not hm_groups:
+                metric_lines.append("# Skipped: no group holds a value, as in Mixed Measures.")
+                metric_lines.append("")
+                continue
+            groups_r = _r_string_vector(hm_groups)
+            by = hm_grp_r if hm_grp2_r is None else f"{hm_grp_r}_{hm_grp2_r}"
+            grp_args = f"data${hm_grp_r}, {groups_r}"
+            if hm_grp2_r is not None:
+                grp_args += f", g2 = data${hm_grp2_r}"
+            if hm_excl_r:
+                # Judged by the answer's TEXT (a factor's label), as the app does.
+                grp_args += f", drop = .mm_is_excluded({_text_vector_r(hm_r)}, {hm_excl_r})"
+            if hm.metric_type == "mean":
+                obj = f"mean_{hm_r}_by_{by}"
+                metric_lines.append(
+                    f"{obj} <- .mm_group_summary({_numeric_vector_r(hm_r)}, {grp_args})"
+                )
+            else:
+                obj = f"freq_{hm_r}_by_{by}"
+                metric_lines.append(
+                    f"{obj} <- .mm_group_table({_text_vector_r(hm_r)}, {grp_args})"
+                )
+            metric_lines.append(f"print({obj})")
+            metric_lines.append("")
+            continue
+        if hm_grouped:
+            # A variable group's grouped metric pools its members per group across
+            # datasets; the script has no grouped shape for that, so it says so —
+            # the materials path's rule for the same metric (#821b).
+            metric_lines.append(
+                "# NOTE: this metric is grouped in Mixed Measures;"
+                " the pooled (ungrouped) mean is emitted here."
+                if hm.metric_type == "mean" else
+                "# NOTE: this metric is grouped in Mixed Measures;"
+                " the pooled (ungrouped) frequencies are emitted here."
+            )
         if hm.metric_type == "mean":
             # #821b: `hm_r` is `domains$X` for a dataset_domain input, so these
             # two lines used to read `data$domains$X` — NULL, warned about, NA.
@@ -3311,8 +3458,11 @@ def export_r_data(
     #1530 D95/D97: with ``coder_ids`` narrower than the coders who engaged the
     shared material, the three intercoder-agreement files and their R sections are
     left out (`setup.R` says so where they stand) and the archive's NAME ends
-    ``_coder-<name>``. The data CSV holds no coding and is unchanged; the codebook
-    comment keeps every coder's usage counts, as the Codebook page does (#454)."""
+    ``_coder-<name>``. The data CSV holds no coding, but the participant table's
+    rating columns combine every coder's ratings, so a scope that leaves out a
+    coder whose ratings the table can carry leaves them out too, and `setup.R`
+    says how many (#1608, D198); the codebook comment keeps every coder's usage
+    counts, as the Codebook page does (#454)."""
 
     # ── Step 1: Validate & load metadata ─────────────────────────────────
     project = _get_project_or_404(db, project_id, user.id)
@@ -3335,8 +3485,15 @@ def export_r_data(
     # Filter qualifying columns per dataset
     qualifying_datasets: list[tuple] = []
     skipped_datasets: list[str] = []
+    ratings_left_out = 0
+    withheld_all: set[int] = set()  # #1615
     for ds in datasets:
-        qual_cols = [c for c in ds.columns if c.column_type in _R_EXPORT_TYPES]
+        # #1608 — while blind, the participant table's rating columns stay out.
+        withheld = withheld_rating_column_ids(db, ds, scope)
+        ratings_left_out += len(withheld)
+        withheld_all |= withheld
+        qual_cols = [c for c in ds.columns
+                     if c.column_type in _R_EXPORT_TYPES and c.id not in withheld]
         if qual_cols:
             qual_cols.sort(key=lambda c: (c.display_order or 999999, c.sequence_order))
             qualifying_datasets.append((ds, qual_cols))
@@ -3436,6 +3593,17 @@ def export_r_data(
     domain_metrics = sorted(
         scale_score_metrics(db, project_id).values(), key=lambda m: m.id,
     )
+    # #1615 — a variable group holding a withheld rating column: its stored scale score
+    # was computed over every coder's ratings, so it leaves the data CSV with them, and
+    # the script does not rebuild it over the items that remain (the app's number and
+    # the script's would silently differ). Every saved analysis reading one goes too.
+    # Judged by the analysis doors' ONE rule (`rating_withholding.domain`: any member).
+    withholding = rating_withholding(db, project_id, scope) if withheld_all else None
+    rating_groups = frozenset(
+        did for (did,) in db.query(AnalysisDomain.id).filter(AnalysisDomain.project_id == project_id)
+        if withholding is not None and withholding.domain(db, did)
+    ) if withholding else frozenset()
+    domain_metrics = [m for m in domain_metrics if m.input_source_id not in rating_groups]
 
     domain_score_cols: list[dict] = []
     domain_metric_ids: list[int] = []
@@ -3556,7 +3724,7 @@ def export_r_data(
                 .all()
             )
             for dom_id, member_id in members:
-                if member_id in col_meta:
+                if member_id in col_meta and dom_id not in rating_groups:  # #1615
                     meta = col_meta[member_id]
                     domain_members_map[dom_id].append(meta["r_name"])
                     domain_members_by_dataset_map[dom_id][meta["dataset"].name].append(
@@ -3604,7 +3772,7 @@ def export_r_data(
             .all()
         )
         for adm_dom_id, adm_member_id in all_dom_member_rows:
-            if adm_member_id in col_meta:
+            if adm_member_id in col_meta and adm_dom_id not in rating_groups:  # #1615
                 meta = col_meta[adm_member_id]
                 all_domain_members_map[adm_dom_id].append(meta["r_name"])
                 all_domain_members_by_dataset_map[adm_dom_id][meta["dataset"].name].append(
@@ -3633,6 +3801,12 @@ def export_r_data(
         )
         .all()
     )
+    # #1615 — α over a rating group's REMAINING items is not the app's α (the section
+    # reads its members itself). A test over a metric needs the metric's columns, so the
+    # withheld ones already skip it below ("could not resolve").
+    stat_tests = [st for st in stat_tests
+                  if not (st.test_type in ("cronbachs_alpha", "split_half")
+                          and st.target_id in rating_groups)]
 
     # Quantitative materials (skip qual_ prefixed)
     r_materials = (
@@ -3947,6 +4121,8 @@ def export_r_data(
         identifier_cols=identifier_cols,
         irr_reasons=irr_reasons,
         agreement_left_out_for=agreement_left_out_for,
+        ratings_left_out=ratings_left_out,
+        rating_groups_left_out=len(rating_groups),
     )
 
     # ── Step 10: ZIP & stream ────────────────────────────────────────────

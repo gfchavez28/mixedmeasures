@@ -1,11 +1,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # CI — build & test (the foundation workflow)
 #
-# WHAT IT DOES: on pushes to main and pull requests, spins up clean cloud Linux
-# machines and runs the same checks you run by hand — backend pytest, frontend
-# lint+vitest+build, and the electron unit tests — plus a schema-drift gate and
-# the dependency audits. No packaging or signing happens here (that's the
-# separate release workflow); this is the fast feedback loop.
+# WHAT IT DOES: spins up clean cloud Linux machines and runs the same checks you
+# run by hand — backend pytest, frontend lint+vitest+build, and the electron unit
+# tests — plus a schema-drift gate and the dependency audits. On the PUBLIC repo it
+# runs on pushes to main and pull requests; on the PRIVATE repo a push or pull
+# request tests nothing (#1669, COST below), so there it runs when hand-started,
+# weekly, and before every sync. No packaging or signing happens here (that's the
+# separate release workflow).
 #
 # WHICH TESTS RUN (#1095): a `plan` job runs first and each area job runs only if
 # it says so. The rule: test every area with a change since that area last PASSED
@@ -19,7 +21,13 @@
 #
 # COST: free on a PUBLIC repo with GitHub-hosted runners. On the PRIVATE repo it
 # draws on the Free plan's 2,000 minutes a month, which ran out on 2026-09-28 when
-# every push ran everything (#1095).
+# every push ran everything (#1095), and again by 2026-11-16 with the plan in place
+# (59 push runs, ~30 minutes each, as both suites grew). So since #1669 a PUSH or a pull
+# request on the PRIVATE repository tests nothing: the `plan` job is skipped and every
+# area job with it, billing no minute. Every build runs both full suites on the
+# developer's machine before it commits; the private repo tests on a hand-started run,
+# the weekly run and the full run before each release. The PUBLIC repository's push run
+# (the release sync) is unchanged.
 #
 # ✅ ACTIONS SHA-PINNED 2026-06-14. Project policy (ROADMAP "Build pipeline") requires
 # every `uses:` action pinned to a FULL COMMIT SHA, never a mutable tag like `@v4`, so a
@@ -78,6 +86,11 @@ concurrency:
 jobs:
   # ── Plan: which areas this run tests (#1095) ─────────────────────────────────
   plan:
+    # #1669: a push or a pull request on the PRIVATE repository starts no test (see COST
+    # above). Skipped, the plan takes every area job with it (`needs.plan.result != 'skipped'`
+    # in each), so the run bills nothing. A hand-started run, the weekly call (whose event is
+    # `schedule`) and the public repository pass the gate and test every area.
+    if: ${{ !(github.event.repository.private && (github.event_name == 'push' || github.event_name == 'pull_request')) }}
     runs-on: ubuntu-24.04   # pinned like every job here (#1097); see `backend`
     timeout-minutes: 5
     permissions:
@@ -103,18 +116,23 @@ jobs:
 
   # ⚠️ Each area job runs UNLESS the plan says exactly `false`, so a plan that crashed (no
   # outputs) tests everything — the fail-safe direction. `!cancelled()` lets a failed plan
-  # still reach them. Doc gates fails if a job's condition loses either half.
+  # still reach them. A plan SKIPPED by its gate (#1669) is not a crash: the area job skips
+  # too, or a private push would test everything. Doc gates fails if a job's condition
+  # loses any of the three.
   # ── Backend: pytest + schema-drift gate + production-dep audit ──────────────
   backend:
     needs: plan
-    if: ${{ !cancelled() && needs.plan.outputs.backend != 'false' }}
+    if: ${{ !cancelled() && needs.plan.result != 'skipped' && needs.plan.outputs.backend != 'false' }}
     # PINNED, never ubuntu-latest (#1097): the R oracles are anchored to noble's R 4.3.3,
     # and ubuntu-latest moves to 26.04 over 2026-10-19 → 11-19, where every apt name below
     # still resolves — to R 4.5.2. The install step now ASSERTS the version too. Moving off
     # 24.04 is a deliberate re-anchor, made here and in release.yml's verify job together.
     # Never ubuntu-22.04: it preinstalls CRAN R 4.6.1, which apt will not downgrade.
     runs-on: ubuntu-24.04
-    timeout-minutes: 25          # +5 for the R toolchain install (#642)
+    # 35 since 2026-11-16 (#1666's sibling): the 11-16 weekly backend job took 20 min 25 s
+    # of the old 25 (it was 20 + 5 for the R toolchain install, #642). A job timeout skips
+    # even the `!cancelled()` HARD gate below, so keep the margin; re-measure at close-outs.
+    timeout-minutes: 35
     defaults:
       run:
         working-directory: backend
@@ -234,9 +252,13 @@ jobs:
   # ── Frontend: lint + vitest + production build + dep audit ──────────────────
   frontend:
     needs: plan
-    if: ${{ !cancelled() && needs.plan.outputs.frontend != 'false' }}
+    if: ${{ !cancelled() && needs.plan.result != 'skipped' && needs.plan.outputs.frontend != 'false' }}
     runs-on: ubuntu-24.04   # pinned like every job here (#1097); see `backend`
-    timeout-minutes: 20
+    # #1666: 20 cancelled both 2026-11-16 runs — unit tests 16–17 min on this repo's
+    # runners (7,099 tests), then the build and BOTH audits never ran (a job timeout
+    # skips even the `!cancelled()` HARD gate). Compare the measured job time with this
+    # limit at each close-out; the suite grows every build.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: frontend
@@ -295,7 +317,7 @@ jobs:
   # ── Electron shell: headless unit tests ─────────────────────────────────────
   electron:
     needs: plan
-    if: ${{ !cancelled() && needs.plan.outputs.electron != 'false' }}
+    if: ${{ !cancelled() && needs.plan.result != 'skipped' && needs.plan.outputs.electron != 'false' }}
     runs-on: ubuntu-24.04   # pinned like every job here (#1097); see `backend`
     timeout-minutes: 15
     defaults:

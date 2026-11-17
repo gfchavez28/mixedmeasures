@@ -91,7 +91,7 @@ function renderReader(source: string, lens: CoderLens | null, over: Record<strin
           documents={[{ id: 8, name: 'Handbook' }] as never}
           observations={[{ id: 9, name: 'Playground' }] as never}
           selectedSourceId={source} onSourceSelect={() => {}} source="all"
-          coderLens={lens} blind={lens != null}
+          coderLens={lens} viewerId={ALICE} blind={lens != null}
           {...over}
         />
       </MemoryRouter>

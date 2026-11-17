@@ -350,10 +350,13 @@ Being honest about scope:
   by identity, and the person's ID and the names the project knew them by as one-way
   codes, which is not anonymisation — so merging or importing a copy, linking records
   or speakers, or importing a transcript whose speaker carries their ID does not bring
-  them back, nor does a transcript whose speaker carries one of those names, and
-  re-using their ID asks first. Linking records and merging a copy recognise the ID
-  only, so a colleague's copy that knew them by another name can still bring their
-  words in. (A withdrawal made in an earlier version kept the ID only.) **That is the limit that
+  them back, nor does a transcript whose speaker carries one of those names — even
+  written with different capitals or spacing, or with accents encoded differently —
+  and re-using their ID asks first. Linking records and merging a copy recognise the ID
+  only, with its accents encoded either way but its capitals counting (`P01` and `p01`
+  can be two people), so a colleague's copy that knew them by another name can still
+  bring their words in. (A withdrawal made in an earlier version recognises the names it
+  kept only as they were written, and the oldest versions kept the ID only.) **That is the limit that
   matters: it cannot
   find the person's name inside *other* people's turns, or inside free-text
   answers, notes or memos.** Those need someone who knows the project. A full

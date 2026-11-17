@@ -97,7 +97,8 @@ from ..services.staleness import (
     mark_regrouped_metrics_stale,
 )
 from ..services.column_retype import plan_rederived_cells, write_rederived_cells  # #1079 (b)
-from .helpers import _get_project_or_404
+from ..services.participant_scores import withheld_rating_column_ids  # #1615
+from .helpers import _get_project_or_404, parse_int_list
 
 logger = logging.getLogger(__name__)
 
@@ -1109,9 +1110,21 @@ async def column_frequencies(
     column_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST; the Variables view and the subgroup filter send it
+    # while blind.
+    coder_ids: str | None = None,
 ):
-    """Get value frequency distribution for a column."""
-    _get_column_or_404(db, project_id, dataset_id, column_id, user.id)
+    """Get value frequency distribution for a column.
+
+    🔴 #1615: a participant score's distribution IS the scores (one participant: one
+    value), so a column `withheld_rating_column_ids` withholds under ``coder_ids`` answers
+    with no values and ``withheld_while_blind`` — the same rule as the Data view (D198).
+    """
+    column = _get_column_or_404(db, project_id, dataset_id, column_id, user.id)
+    if column_id in withheld_rating_column_ids(db, column.dataset, parse_int_list(coder_ids)):
+        return ColumnFrequenciesResponse(
+            column_id=column_id, frequencies=[], total=0, withheld_while_blind=True,
+        )
 
     freqs = get_value_frequencies(db, column_id)
 

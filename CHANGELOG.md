@@ -18,6 +18,270 @@ features, and 1.3.1, 1.5.2 and 1.5.4–1.5.7 changed existing behaviour.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-19
+
+### Upgrade notes
+
+- **The first start strips old edit wording that deleted sources left in the audit trail.**
+  Before this release, deleting a conversation, dataset, record or column kept the old and
+  new wording of every edit made to its turns and answers in the audit trail (and the Excel
+  *Audit Trail* sheet), where a later withdrawal could not reach it. The first start removes
+  that wording; each entry stays, marked as from a deleted source, so the trail still shows
+  that an edit happened. (#1546)
+- **Project files saved by this version open only in this version or later.** The `.mmproject`
+  format moves to version 8 for the joint display. Mixed Measures 1.6.0 and earlier refuse such
+  a file with a message rather than importing it without the display. After updating, the
+  database cannot be opened by 1.6.0 either: reinstalling 1.6.0 shows a message asking for the
+  newest version, and changes nothing.
+- **The first start upgrades the record of every withdrawal made in an earlier version.**
+  From the participant's ID, which the audit trail keeps, it adds what this version
+  remembers: the ID with its accents encoded either way, and the ID as a name in other
+  capitals or spacing. The other names an earlier withdrawal kept are still recognised only as
+  they were written, since the audit trail does not hold them. (#1605)
+- **The first start rebuilds nine tables so that a deleted item's number is never given to a
+  new one.** On a test project with 1.2 million interview turns it added about 4 seconds to
+  that start, or about 11 seconds for an encrypted database. Numbers the app recorded before
+  the update are protected too; a few kinds it never recorded can be given out once more.
+  (#1639)
+
+### Changed
+
+- **Deleting a conversation, dataset, record or column removes the wording its edits left in
+  the audit trail.** The entries stay, marked as from a deleted source. (#1546)
+
+### Fixed
+
+- **A joint display could show another code's or variable's numbers after the one it named was
+  deleted, because the next new one took its number.** Codes, variables, sources, datasets,
+  saved results, quotes and participants now never reuse a deleted one's number, so a display
+  shows a deleted one as no longer in the project. Deleting a variable or a dataset now says so
+  before you confirm, and a display whose grouping variable was deleted says that, instead of
+  failing in general terms. (#1639)
+- **A joint display bound to a code merged away in the codebook showed it at 0 in every
+  group.** As on every other analysis screen, a merged or deactivated code is now left out of
+  the display's numbers, and the row says why — naming the code its coding went to — in the
+  display, its report and every export. (#1649)
+- **Choosing more than 500 sources for a joint display's strand no longer stops the display
+  from computing**, and the builder stops at the 100 constructs a display can hold and says
+  why. (#1644)
+- **A withdrawal no longer strips another person's edit history or blanks another
+  participant's canvas quote** when one of the withdrawn person's turns or answers had
+  taken the number of a turn or answer deleted earlier — after an Unmerge, or after a
+  conversation was deleted and another imported. (#1547)
+- **A withdrawal now says how many quotes on a canvas it cannot place, and where they
+  are.** A canvas quote keeps its words after the quote, conversation or dataset it came
+  from is deleted, and nothing in it says whose words they are, so a withdrawal leaves it.
+  The participant's withdrawal summary, the withdrawal confirmation and the note after it
+  now count those quotes and name the canvas sections and snapshots that hold them, so
+  they can be read by hand. Before, they stayed without a word. (#1546)
+- **The saturation curve counts the sources you selected.** With interviews selected it
+  still counted every document and clip in the project; it now counts exactly the
+  interviews, documents and clips selected, says so when the selection holds none of them
+  (survey questions alone), and says that survey answers are not part of the curve. A
+  saturation chart already on a Canvas says once that an update changed it. (#1544)
+- **With colleagues' coding shown, a code chip offers Remove code only on a code you
+  applied.** On a colleague's chip — on the coding pages, the By Source and By Code lists
+  and the Quote Board — it could only ever remove your own coding, so it did nothing and
+  said nothing, and its Undo could add the code as yours. In the **+ Add code** list, a
+  code only a colleague applied is no longer marked as already applied, so you can apply
+  it yourself, and in blind mode the list no longer marks codes your colleagues applied.
+  (#1592)
+- **Comparing codes by group on a very large project takes less than half the time, and the
+  page no longer gives up after 30 seconds.** On a test project with 1.2 million interview
+  turns the comparison took about 48 seconds; the page stopped waiting at 30 and asked
+  again, so the work was done twice and never shown. It now takes about 21 seconds, and the
+  page waits for it as it does for an export. A project with more than 250,000 survey rows
+  linked to participants can now be compared (it would have failed). (#1548)
+- **Comparisons of three or more groups use the exact test at ordinary group sizes.** With
+  five groups of about 18 participants, the code-by-group comparison fell back to a
+  simulated p-value, which cannot go below 0.0001, although every table could be counted.
+  It now counts them, so the p-value is exact, the correction can use it fully, and the
+  table can say whether the code could ever reach significance. Large comparisons still use
+  the seeded simulation, and the method note says so. (#1548)
+- **The effect column of the code comparison reads true.** An effect of exactly 0 shows as
+  0.00, not a dash. An odds ratio below 1 is badged and sorted by its size (0.25 is as
+  large as 4). Where nobody, or everybody, in one group used the code, the odds ratio shows
+  "—" with the reason under the table, whichever group it is; before, it showed a dash with
+  no reason, or 0.00 read as a dash. (#1549)
+- **The Q–Q plot beside a group comparison shows the groups its tests use.** A group with
+  one value is left out of the F, Welch and Levene tests; the plot now leaves it out too and
+  names it. (#1549)
+- **A withdrawal now removes a Canvas quote taken across an undone merge even when one of
+  the two turns was edited afterwards.** Once a merge was undone, a quote spanning the point
+  where the two turns joined was found by putting the turns back together; it used their
+  words as they read now, so after a fix to either turn — a typo, say — the words no longer
+  lined up and the quote stayed on the Canvas, in its snapshots and in its exports. A
+  withdrawal now uses each turn's words as they were when the merge was made. (#1552)
+- **A withdrawal no longer removes a Canvas quote of two other people's words from an
+  undone merge.** When three or more turns had been merged and the merge was later undone,
+  a quote taken across the point where two other speakers' turns joined was removed when a
+  third person in that merge withdrew, as if it held their words. It now stays; a quote
+  that reaches the withdrawn person's own words is still removed. (#1613)
+- **While blind, participant rating scores are hidden from you.** A score in the
+  participant table combines every coder's ratings, so with two coders it showed what a
+  colleague had rated. While your colleagues' coding is hidden, the Data view hides the
+  table's rating columns and says how many, a participant's profile leaves them out, and
+  the datasets workbook and the R export's data leave them out and say so. 1.6.0 said
+  blind coding reaches the files; these scores were missed. (#1608)
+- **While blind, charts, tests and groupings leave rating scores out.** A participant
+  rating score combines every coder's ratings, so a chart, comparison, correlation,
+  cross-tab, Data Quality summary, saved test or record-by-variable matrix over one, or a
+  group made from a score band, could show exactly what a colleague had rated. While your
+  colleagues' coding is hidden, the Quantitative page and the Canvas charts over a score
+  leave it out and say how many they left out; the variable list hides scores and says how
+  many, a "group by" menu shows one greyed out with the reason, and a saved test over one
+  says it is hidden. A variable worked out from participant scores (a score band, say) no
+  longer forms groups or filters on the Qualitative page, and no longer fills a joint
+  display's survey row or the value beside its quotes; each says why. The Variables view's
+  observed values and a new computed variable's preview no longer show a score's values,
+  and the datasets workbook and the R export leave out the saved metrics built on a score.
+  The R export also leaves out a variable group holding a score whole, with its scale
+  score, rather than scoring it from the items left. (#1615)
+- **While blind, Text Coding's Cross-analysis no longer filters, cross-tabulates or groups
+  code density by a rating score** or a variable worked out from one; it says why instead.
+  Before, a filter such as "score at least 3" showed who passed on every coder's ratings,
+  and "above its mean" printed the mean. (#1615)
+- **While blind, a Canvas chart of coding grouped by a variable worked out from participant
+  scores says it cannot form groups**, as the Qualitative page does, on the Canvas and in
+  its Markdown, HTML and PDF exports (Word says only that the chart's data is unavailable).
+  A chart saved with a participant filter chosen from a rating score still shows the people
+  that filter picked. (#1615)
+- **A withdrawn participant is recognised when a transcript writes their name with different
+  capitals or spacing, or with its accents encoded differently.** Before, `MARÍA LÓPEZ`,
+  `maría lópez`, or the same name with its accents encoded the way some Mac and transcription
+  tools write them (it looks identical), made them a participant again with no warning. The
+  import now leaves such a speaker unlinked, like an exact match, and its warning says when
+  capitals or spacing were ignored. A name with different accents (`Maria`, `María`) is still
+  someone else's. Their ID is now recognised with its accents encoded either way when records
+  are linked, a participant is added by hand or a project file is imported; its capitals
+  still count, since `P01` and `p01` can be two people. (#1605)
+- **A withdrawal now names every kind of copy that still holds the person's data.** The
+  withdrawal confirmation, the note after it and the participant page listed backups,
+  safety copies and exported files, but not a project duplicated from this one before the
+  withdrawal — which keeps everything about the person — nor the copy of the whole database
+  taken before each update, kept in the backup folder that Settings does not list. All three
+  now name both. The confirmation and the note after it also name the other projects here
+  that hold a participant with the same ID, marking a copy of this project, and say how
+  many update copies there are and in which folder. The note on the withdrawal's record now
+  says that the audit trail records the withdrawal under the person's ID. (#1606)
+- **Links that said they would open in a new tab now open in the desktop app.** Seven links
+  inside the app — a participant's conversation, document and dataset on the Participants
+  page, the dataset in its record picker, a note's source in Memos & notes, and two in the
+  Quantitative page's variable picker — asked for a new tab, which the desktop app does not
+  open, so clicking them did nothing. They now open in the same window, and their names no
+  longer promise a new tab. The crosswalk's *Open in the Data view* link no longer reloads
+  the whole app. (#1625)
+- **The code-by-group comparison and the joint display now say how many participants have no
+  coding.** A participant with material in the sources compared but no coding there counts as
+  not using any code, so while coding is in progress every share is too low, and a group coded
+  less far looks as if it uses codes less. Each group's heading now gives the count, and a note
+  says what it means — under the comparison, in its CSV, its Canvas embed and export, and in
+  the joint display and its report. In blind mode or with a coder filter it counts the coding
+  of the coders shown. The shares and the test are unchanged. (#1626)
+- **Undoing a section delete on the Canvas brings the whole section back.** Ctrl+Z used to
+  bring back only the section's name and colour, at the end of the canvas: its writing, its
+  quotes and charts, its place, its nested sections and its links were gone. The undo now
+  puts it all back where it was. If the canvas has changed since — the section it was nested
+  under was deleted, say — it restores what still fits and says what it could not. The
+  delete confirmation no longer says the materials will be permanently deleted: they stay in
+  your project, and the delete can be undone. (#1301)
+- **Inserting two materials in a row keeps both.** The second insert used to replace the
+  first, and so did typing right after an insert, inserting while an embed was selected, or
+  pasting a second image. An insert now never replaces an embed, and the cursor ends after
+  it. (#1341)
+- **The Markdown export keeps a quote's paragraphs inside the quote.** Text went into the
+  file unescaped, so Markdown read people's words as formatting: a participant's second
+  paragraph printed outside their quote, as if the researcher had written it; a line
+  starting `2020.` became a numbered list; a `|` split a table column; and typed link
+  syntax could make a working link. Text is now made safe as it enters the file, with a
+  backslash only where Markdown would misread it, so the raw file stays readable. A quote's
+  attribution and tag sit on their own lines inside it. (#1422)
+- **@mentions and line breaks are no longer lost from Canvas exports.** An `@mention` and a
+  Shift+Enter line break vanished from all four formats ("as  shows", "line oneline two").
+  They now print as they read on screen, and searching the canvas finds a mention once its
+  section has been saved again. (#1457)
+- **The Word export keeps lists, quotes and links.** It ran a list's items and a quote's
+  paragraphs together, dropped bold and italic inside them, dropped a quote or chart placed
+  inside a list or a quote, counted every numbered list in the document as one, and turned
+  links into underlined words that went nowhere. Lists, nested lists, quotes, numbering,
+  underline and links now come through as written, each numbered list counting from its own
+  first number (in every format). A chart's note now prints under its table in Word too.
+  (#1458, #1420)
+- **The comparison table in a Canvas export now shows what the screen shows.** It printed
+  the test's internal name (`kruskal_wallis = 48.557`), each group's mean where the figure
+  shows medians, `p = 0.0000`, and no effect size. It now has the screen's columns — the
+  medians under a rank test, the test with its degrees of freedom, the p as shown, and the
+  effect size with its interval — for every comparison figure. On screen, the two-group
+  tooltip now names the test that ran (it said `t(1.0)` for an ANOVA), and under a rank
+  test the two-group column is headed *Test*. Effect sizes are named from the result
+  itself, never guessed from the test. (#1423, #1424)
+- **The R script computes a grouped saved metric for each group.** A saved metric the app
+  shows per group — a mean by team, say, or counts by site — was written into the R script
+  as one overall mean or table under the metric's heading, so the script printed a number
+  the app never showed. It now prints the mean and SD (or the counts) for each of the app's
+  groups, in the app's order, leaving out a record with no group as the app does. A metric
+  over a variable group still prints its overall number, and now says so; a metric grouped
+  by a variable the export does not carry is skipped with a reason. (#1636)
+- **The By Code list marks an answer counted as no response.** A coded survey answer that
+  the project counts as no response ("N/A", say) is listed under its code, and counted in
+  the code's total above the list, but left out of the Descriptives table's shares. It now
+  reads *Counted as no response*, so the two counts no longer differ without a reason. (#1640)
+- **A joint display says why a strand is not measured on a construct.** It said "no code bound"
+  for every case, even above the line naming the bound code a merge had moved away. It now
+  says which: nothing bound; what it binds is no longer in the project; what it binds is
+  inactive in the codebook; what it binds is in another dataset than the strand reads; or none
+  of a survey comments strand's questions is in the project, a case nothing on the screen said
+  before. The open construct, the Report view and every export say the same. (#1659)
+- **A rated code is shown once per construct, as *Rated*.** A participant's rating score is
+  taken over every rated passage of theirs in the project, from any source, so it was the same
+  number under every strand that bound the code — and under *Survey comments · rated* it
+  looked as if the comments had been rated. The display, its report and every export now show
+  it once, after the strands. (#1645)
+- **The case view's rule sentence follows the lines being edited.** An unfinished condition
+  printed as `Team is “”`, or was left out without a word; it is now left out and counted ("1
+  condition not finished"). And when no line was finished the sentence showed the saved rule
+  above lines that no longer held it. (#1661)
+- **The Participants page's delete button says the person's data stays.** It read *Delete …'s
+  participant record only*, but a delete also takes them off a joint display's lists of cases
+  that don't fit; it now reads *Delete …'s participant record but keep their data*, beside
+  *Remove …'s data (withdrawal request)*. (#1648)
+- **A joint display's case view leaves out a code merged away in the codebook.** It offered the
+  code as a column and in the rule, so after a merge a rule such as "did not use Workload"
+  selected every case with material — including the people who had used it. The case view now
+  leaves the code out, as the rest of the display does, and says where its coding went; a saved
+  rule that names it is kept but not run, and says why, in the case view, the open construct,
+  the Report view and every export. (#1664)
+- **A survey strand's new dataset starts the strand over.** Choosing another dataset for a
+  survey strand kept every construct's variables from the old one, where they could no longer
+  be unticked, and the display said they were "no longer in this project". The builder now
+  asks first, then clears them; a display saved before this says such variables are from
+  another dataset. (#1665)
+- **A pinned quote is counted against its own strand.** A pinned survey answer read "1 of 5
+  coded passages pinned", counted against the interviews' passages. Each strand's count is now
+  its own, in passages or answers, and a display made only of survey strands now offers *Pin a
+  quote*. (#1646)
+- **An unnamed strand's controls read "Remove Strand 1"**, where they read "Remove strand
+  strand 1". (#1647)
+- **A damaged canvas copy no longer stops a withdrawal or a delete without saying which.** When
+  a canvas section, snapshot or joint display could not be read, both Participants-page
+  confirms said only "Something went wrong" and kept their button disabled. They now name the
+  copy — for example *the canvas snapshot “Before the cleanup” of “Write-up”* — and still remove
+  nothing past it. The participant panel's *If this person withdraws* says the same instead of
+  disappearing, and a bulk delete says why it removed none. (#1667)
+- **The pin picker says "answers" for a survey comments strand.** It read "2 coded passages in
+  this group" above two survey answers; its count, its loading and empty lines and its list now
+  say answers. (#1668)
+- **Keyboard focus stays where the work is in a joint display.** Removing a construct, adding
+  slice 1's first strand, unpinning a quote, removing a fit and adding the last fit took away
+  the button that was pressed and left focus on the dialog or at the top of the page; each now
+  lands on the control that acts next. (#1660)
+- **A deleted or retyped *Also show* variable leaves each quote its speaker and source.** Every
+  pinned quote read "Its attribution could not be read", in the display and every export,
+  though only that variable's value was missing. Quotes now keep who said them and where, the
+  display says why the value is gone, and the builder shows the variable it still holds. A
+  grouping variable deleted while the pin picker or the case view is open is now named the way
+  the display names it. (#1653)
+
 ## [1.6.0] - 2026-11-08
 
 ### Upgrade notes
@@ -3996,7 +4260,8 @@ plus a Linux AppImage, are attached to the release on the
 - At-rest database encryption (SQLCipher) and a layered backup system in packaged
   desktop builds.
 
-[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/gfchavez28/mixedmeasures/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.8...v1.6.0
 [1.5.8]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.7...v1.5.8
 [1.5.7]: https://github.com/gfchavez28/mixedmeasures/compare/v1.5.6...v1.5.7

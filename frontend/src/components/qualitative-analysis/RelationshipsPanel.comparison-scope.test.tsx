@@ -29,7 +29,7 @@ function renderContent(demoFilters: DemographicFilter[], groupBy: string | null)
     <MemoryRouter>
       <RelationshipsContent
         pid={1} qa={qa} codes={[]} filterParams={{}} cooccurrenceParams={{}} demoFilters={demoFilters} participantFilterLabel={undefined}
-        cooccurrenceN={null} comparisonData={undefined} comparisonLoading={false}
+        ratingsFollowCoderIds={false} cooccurrenceN={null} comparisonData={undefined} comparisonLoading={false}
         comparisonN={null} onCooccurrenceDataLoad={vi.fn()}
       />
     </MemoryRouter>,

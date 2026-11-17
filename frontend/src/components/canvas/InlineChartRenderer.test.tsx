@@ -16,6 +16,8 @@ import { render, screen, cleanup, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import InlineChartRenderer from './InlineChartRenderer'
+import { CURRENT_FIGURE_EPOCH } from './figure-baseline'
+import { SATURATION_ANSWERS_NOTE, SATURATION_NO_PASSAGE } from '@/lib/qual-comparison'
 import type { SourceFrequenciesResponse } from '@/lib/api'
 
 vi.mock('@/lib/api', () => ({
@@ -366,6 +368,39 @@ describe('the slab-2 kinds (saturation · co-occurrence · comparisons)', () => 
     expect('code_ids' in sent).toBe(false)
     expect('text_column_ids' in sent).toBe(false)
     expect('participant_ids' in sent).toBe(false)
+  })
+
+  it('#1544: a saved selection is walked exactly — an unselected passage kind is sent as none', async () => {
+    renderEmbed(qualConfig({ chart_type: 'saturation', conversation_ids: [7], observation_ids: [] }))
+
+    await waitFor(() => expect(codeAnalysisApi.saturation).toHaveBeenCalled())
+    const sent = vi.mocked(codeAnalysisApi.saturation).mock.calls[0][1] as Record<string, unknown>
+    expect(sent).toMatchObject({ conversation_ids: '7', document_ids: '', observation_ids: '' })
+  })
+
+  it('#1544: a saved questions-only selection draws an empty curve that says why', async () => {
+    vi.mocked(codeAnalysisApi.saturation).mockResolvedValue(
+      { ...saturation(), points: [], total_unique_codes: 0, total_sources: 0 } as never,
+    )
+    renderEmbed(qualConfig({ chart_type: 'saturation', text_column_ids: [4], observation_ids: [] }))
+
+    expect(await screen.findByText(SATURATION_NO_PASSAGE)).toBeInTheDocument()
+    const sent = vi.mocked(codeAnalysisApi.saturation).mock.calls[0][1] as Record<string, unknown>
+    expect(sent).toMatchObject({ conversation_ids: '', document_ids: '', observation_ids: '' })
+  })
+
+  it('#1544: questions saved beside a clip — the curve says the answers are not part of it', async () => {
+    renderEmbed(qualConfig({ chart_type: 'saturation', text_column_ids: [4] }))
+    expect(await screen.findByText(SATURATION_ANSWERS_NOTE)).toBeInTheDocument()
+  })
+
+  it('#1544: a saturation embed reports its figure, under the newest generation', async () => {
+    const onFigure = vi.fn()
+    renderEmbed(qualConfig({ chart_type: 'saturation' }), { onFigure })
+
+    await waitFor(() => expect(onFigure.mock.calls.some(([f]) => f != null)).toBe(true))
+    const figure = onFigure.mock.calls.map(([f]) => f).filter(Boolean).pop()
+    expect(figure).toMatchObject({ headline: '1 source, 2 codes', epoch: CURRENT_FIGURE_EPOCH })
   })
 
   it('draws co-occurrence, which fetches for itself', async () => {

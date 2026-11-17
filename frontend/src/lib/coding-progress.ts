@@ -211,3 +211,53 @@ export function isCodeAppliedByActiveCoder(
   }
   return appliedCodeIds.includes(codeId)
 }
+
+/**
+ * #1592 — WHOSE codings a chip row's controls act on. Every remove door deletes only the
+ * CALLER's own application (`routers/coding.py::remove_code`; `DELETE /text-coding/code`
+ * since #879), and answers 200 when there is none — so a *Remove code* button on a
+ * colleague's chip, or on an unattributed one, removed nothing and said nothing, and the
+ * host's history recorded a removal whose undo then APPLIED the code as the viewer's.
+ * `InlineCodeActions` takes this as a REQUIRED prop, so every mount decides.
+ *
+ * `coderId` is the viewer (`useAuth().user.id`); `null` (not known) offers no remove. Each
+ * chip's coder comes from the per-application `appliedCodeDetails`, or — for a mount that
+ * shows DISTINCT codes (By Source, By Code, the Quote Board) — from `applications`, who
+ * applied each code on this item. ⚠️ There is no "cannot tell" arm: every mount's payload
+ * names each code's coder (the By Code lists and the Quote Board gained
+ * `applied_code_details` for this), and a mount that passes neither offers no remove at all
+ * — `inline-code-actions-viewer-1592.test.ts` fails it.
+ */
+export type ChipViewer = { coderId: number | null; applications?: readonly CodeApplicationIdentity[] }
+
+/**
+ * #1592 — may this chip's *Remove code* act? Only on the viewer's own application: a
+ * colleague's coding is changed in Reconciliation, never from the chip (the grid's own
+ * cell is the only one with a remove — the shape this copies). `perApplication` is true
+ * when `row` is one (code, coder) application, false when it is a distinct code.
+ */
+export function viewerMayRemoveChip(
+  row: Pick<CodeChipRow, 'codeId' | 'userId'>,
+  viewer: ChipViewer,
+  perApplication: boolean,
+): boolean {
+  if (viewer.coderId == null) return false
+  if (perApplication) return row.userId === viewer.coderId
+  return !!viewer.applications?.some(a => a.code_id === row.codeId && a.user_id === viewer.coderId)
+}
+
+/**
+ * #1592 — has the VIEWER applied `codeId` here? What the `+ Add code` list marks applied
+ * (and disables). It read the bare per-application ids — any coder's — so a code only a
+ * colleague applied showed a check and could not be added, and while blind that check
+ * showed a colleague's coding the chips hide. The same question the chord toggles ask
+ * (`isCodeAppliedByActiveCoder`), over the applications this mount knows.
+ */
+export function viewerHoldsCode(
+  codeId: number,
+  viewer: ChipViewer,
+  details: readonly CodeApplicationIdentity[] | undefined,
+  appliedCodeIds: readonly number[],
+): boolean {
+  return isCodeAppliedByActiveCoder(details ?? viewer.applications, appliedCodeIds, codeId, viewer.coderId)
+}

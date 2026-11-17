@@ -12,10 +12,11 @@ import {
   AlertCircle,
   PilcrowLeft,
   ImageIcon,
+  Table2,
 } from 'lucide-react'
 
 export type SlashCommand = {
-  type: 'text' | 'heading' | 'section' | 'excerpt' | 'chart' | 'memo' | 'divider' | 'callout' | 'image'
+  type: 'text' | 'heading' | 'section' | 'excerpt' | 'chart' | 'memo' | 'divider' | 'callout' | 'image' | 'joint'
   label: string
   description: string
   icon: ReactNode
@@ -36,7 +37,8 @@ export type SlashCommand = {
  * `slash-commands.test.ts` fails if a command type is on neither side.
  */
 export const DEFERRED_SLASH_TYPES: ReadonlySet<SlashCommand['type']> = new Set([
-  'excerpt', 'chart', 'memo', 'image',
+  // `joint` opens the joint display's builder, which the researcher can cancel (row 56).
+  'excerpt', 'chart', 'memo', 'image', 'joint',
 ])
 
 /** Commands that finish during the keystroke that fires them. */
@@ -54,4 +56,5 @@ export const COMMANDS: SlashCommand[] = [
   { type: 'divider', label: 'Divider',     description: 'Horizontal rule',       icon: <Minus className="w-4 h-4" /> },
   { type: 'callout', label: 'Callout stat', description: 'Highlight number',     icon: <AlertCircle className="w-4 h-4" /> },
   { type: 'image',   label: 'Image',        description: 'Upload an image',       icon: <ImageIcon className="w-4 h-4" /> },
+  { type: 'joint',   label: 'Joint display', description: 'Strands side by side', icon: <Table2 className="w-4 h-4" /> },
 ]

@@ -19,8 +19,8 @@ function payload(): DemographicComparisonResponse {
   return {
     groups: ['Board', 'Staff'],
     group_totals: {
-      Board: { n: 8, participants: 8, total_segments: 40, total_word_count: 0 },
-      Staff: { n: 8, participants: 8, total_segments: 40, total_word_count: 0 },
+      Board: { n: 8, participants: 8, total_segments: 40, total_word_count: 0, without_coding: 0 },
+      Staff: { n: 8, participants: 8, total_segments: 40, total_word_count: 0, without_coding: 0 },
     },
     codes: [
       { code_id: 1, code_name: 'Strong', category_name: null,
@@ -44,7 +44,7 @@ function payload(): DemographicComparisonResponse {
     basis: { unit: 'participant', correction: 'holm', family_size: 3, family_reachable: 2,
              tarone_family_size: 2, alpha: 0.05, tested_groups: ['Board', 'Staff'], test_omitted_reason: null },
     scope: { conversations: 1, documents: 0, text_columns: 0, observations_left_out: 0,
-             unassigned_passages: 0, participants_without_group: 0 },
+             unassigned_passages: 0, participants_without_group: 0, no_coding_scope: 'every' },
   }
 }
 
@@ -54,7 +54,7 @@ function threeGroups(statistic: number | null): DemographicComparisonResponse {
   return {
     groups: ['Board', 'Staff', 'Volunteer'],
     group_totals: Object.fromEntries(['Board', 'Staff', 'Volunteer'].map(g =>
-      [g, { n: 4, participants: 4, total_segments: 4, total_word_count: 0 }])),
+      [g, { n: 4, participants: 4, total_segments: 4, total_word_count: 0, without_coding: 0 }])),
     codes: [{
       code_id: 1, code_name: 'X', category_name: null,
       by_group: { Board: cell(3), Staff: cell(1), Volunteer: cell(0) }, delta_proportion: null,
@@ -66,7 +66,7 @@ function threeGroups(statistic: number | null): DemographicComparisonResponse {
              tarone_family_size: 1, alpha: 0.05, tested_groups: ['Board', 'Staff', 'Volunteer'],
              test_omitted_reason: null },
     scope: { conversations: 1, documents: 0, text_columns: 0, observations_left_out: 0,
-             unassigned_passages: 0, participants_without_group: 0 },
+             unassigned_passages: 0, participants_without_group: 0, no_coding_scope: 'every' },
   }
 }
 

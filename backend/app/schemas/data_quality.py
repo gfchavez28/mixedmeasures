@@ -40,6 +40,9 @@ class MissingSummaryResponse(BaseModel):
     total_cells: int
     total_missing: int
     overall_pct_missing: float
+    #: #1615 — how many of the variables asked for were left out because the viewer
+    #: is blind and each is a participant rating score (or computed from one).
+    withheld_rating_variables: int = 0
 
 
 class PatternRow(BaseModel):
@@ -55,6 +58,9 @@ class MissingPatternsResponse(BaseModel):
     total_rows: int
     n_unique_patterns: int
     truncated: bool
+    #: #1615 — how many of the variables asked for were left out because the viewer
+    #: is blind and each is a participant rating score (or computed from one).
+    withheld_rating_variables: int = 0
 
 
 class McarEligibility(BaseModel):
@@ -83,3 +89,6 @@ class McarTestResult(BaseModel):
 class McarTestResponse(BaseModel):
     eligibility: McarEligibility
     result: McarTestResult | None = None
+    #: #1615 — how many of the variables asked for were left out because the viewer
+    #: is blind and each is a participant rating score (or computed from one).
+    withheld_rating_variables: int = 0

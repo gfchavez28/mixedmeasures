@@ -42,7 +42,7 @@ function clipExcerpt(over: Partial<QuotedExcerptItem> = {}): QuotedExcerptItem {
     document_id: null, document_name: null,
     observation_id: 7, observation_name: 'Classroom',
     dataset_id: null, dataset_name: null, column_id: null, column_name: null,
-    applied_code_ids: [], applied_codes: [],
+    applied_code_ids: [], applied_codes: [], applied_code_details: [],
     excerpt_note: null, context_before: null, context_before_speaker: null,
     created_at: '2026-07-18T00:00:00+00:00',
     ...over,
@@ -52,6 +52,7 @@ function clipExcerpt(over: Partial<QuotedExcerptItem> = {}): QuotedExcerptItem {
 function renderCard(excerpt: QuotedExcerptItem) {
   return render(
     <QuoteCard
+      viewerId={1}
       excerpt={excerpt}
       projectId={1}
       density="quote"

@@ -114,7 +114,9 @@ export function ExportDialog({ open, onOpenChange, projectId, projectName }: Exp
   // never the claim `blind`), every file carrying the human coding layer is asked for the
   // viewer's own coding, as the analysis page asks its charts (#499). The codebook's usage
   // counts stay every coder (#454 — the Codebook page shows them), and the .mmproject,
-  // .mmcodebook/.qdc, the datasets workbook and the record matrix are not coding views (D95).
+  // .mmcodebook/.qdc are not coding views (D95). The datasets workbook IS, through the
+  // participant table's rating columns (#1608), and so is the record matrix (#1615 — a metric
+  // over a rating score is a colleague's judgement): both take the scope.
   const { user } = useAuth()
   const { multiHumanCoder } = useCoders()
   const { blind, withholding, settled, toggleReveal } = useBlindMode(projectId)
@@ -232,7 +234,8 @@ export function ExportDialog({ open, onOpenChange, projectId, projectName }: Exp
 
       // Datasets Excel
       if (state.datasetsExcel) {
-        pending.push(exportApi.datasetsExcel(projectId))
+        // #1608 — the participant table's rating columns roll up every coder's ratings.
+        pending.push(exportApi.datasetsExcel(projectId, coderScope))
         await delay(200)
       }
 
@@ -276,7 +279,9 @@ export function ExportDialog({ open, onOpenChange, projectId, projectName }: Exp
 
       // Quantitative - Record Matrix
       if (state.rowMatrix) {
-        pending.push(Promise.resolve(metricsApi.rowMatrix(projectId, undefined, 'csv')))
+        // #1615: the viewer alone while blind — a metric over a rating score is left out, and
+        // the file says so (the server's words).
+        pending.push(Promise.resolve(metricsApi.rowMatrix(projectId, undefined, 'csv', coderScope)))
       }
 
       // Statistical Software - R Data Export

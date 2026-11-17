@@ -23,7 +23,13 @@ from pathlib import Path
 
 import pytest
 
-from app.services import comparison_basis, magnitude_rollup, metrics, reliability_intervals
+from app.services import (
+    comparison_basis,
+    comparisons,
+    magnitude_rollup,
+    metrics,
+    reliability_intervals,
+)
 
 CI_LABEL_TS = (
     Path(__file__).resolve().parents[2]
@@ -39,9 +45,12 @@ CI_LABEL_TS = (
 #: did not previously cover. Row 45 (iii) added a THIRD: the participant
 #: score's interval over a person's own passages lives in `magnitude_rollup`,
 #: beside the number it qualifies. #1323's D3 added a FOURTH: the code-by-group
-#: comparison's Δ interval (Newcombe, unadjusted) lives in `comparison_basis`.
+#: comparison's Δ interval (Newcombe, unadjusted) lives in `comparison_basis`. The joint
+#: display (D168.3) added a FIFTH: Cohen's d's Hedges & Olkin interval lives in
+#: `comparisons`, beside `_cohens_d_ci`, the one implementation.
 #: A new module that mints a `CI_METHOD_*` or a `CI_UNAVAILABLE_*` MUST be added here.
-_VOCABULARY_MODULES = (metrics, reliability_intervals, magnitude_rollup, comparison_basis)
+_VOCABULARY_MODULES = (metrics, reliability_intervals, magnitude_rollup, comparison_basis,
+                       comparisons)
 
 
 def _server_methods() -> dict[str, str]:
@@ -94,6 +103,7 @@ def test_the_server_declares_its_vocabulary_as_constants():
     assert "alpha_bootstrap_units" in found.values()
     assert "passage_level_t" in found.values()
     assert "newcombe_hybrid_score" in found.values()
+    assert "hedges_olkin_d" in found.values()
 
     reasons = _server_unavailable_reasons()
     assert len(reasons) >= 5, f"found only {sorted(reasons)}"

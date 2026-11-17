@@ -52,8 +52,9 @@ export const exportApi = {
     downloadFromApi(withCoderScope(`/projects/${projectId}/export/csv`, coderIds), 'export.csv', {
       label: 'The CSV export',
     }),
-  datasetsExcel: (projectId: number) =>
-    downloadFromApi(`/projects/${projectId}/export/datasets-excel`, 'datasets.xlsx', {
+  /** #1608 — `coderIds` (sent while blind) leaves the participant table's rating columns out. */
+  datasetsExcel: (projectId: number, coderIds?: string) =>
+    downloadFromApi(`/projects/${projectId}/export/datasets-excel${coderIds ? `?coder_ids=${encodeURIComponent(coderIds)}` : ''}`, 'datasets.xlsx', {
       label: 'The datasets Excel export',
     }),
   codebook: (projectId: number) =>

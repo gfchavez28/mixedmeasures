@@ -70,6 +70,13 @@ interface ContentByCodeProps {
    * keeps the whole unit's codes as context. REQUIRED, so a new mount has to decide.
    */
   chipsFollowCoderIds: boolean
+  /**
+   * #1592 — the viewer (`useAuth().user.id`). A chip offers *Remove code* only where the viewer
+   * holds that code on the passage — each unit's `applied_code_details` says who applied what —
+   * because the remove door deletes the caller's application alone (on a colleague's chip it
+   * removed nothing, silently). REQUIRED, so a new mount decides; `null` offers no remove.
+   */
+  viewerId: number | null
 }
 
 export default function ContentByCode({
@@ -92,6 +99,7 @@ export default function ContentByCode({
   blind = false,
   onReveal,
   chipsFollowCoderIds,
+  viewerId,
 }: ContentByCodeProps) {
   const [search, setSearch] = useState('')
   // eslint-disable-next-line react-hooks/set-state-in-effect -- reset search when selected code changes
@@ -385,6 +393,7 @@ export default function ContentByCode({
             focusedCodeId={focusedCodeId}
             onFocusCode={onFocusCode}
             onCodeChange={onCodeChange}
+            viewerId={viewerId}
           />
         </div>
       )}
@@ -413,6 +422,7 @@ export default function ContentByCode({
             focusedCodeId={focusedCodeId}
             onFocusCode={onFocusCode}
             onCodeChange={onCodeChange}
+            viewerId={viewerId}
           />
         </div>
       )}
@@ -438,6 +448,7 @@ export default function ContentByCode({
             focusedCodeId={focusedCodeId}
             onFocusCode={onFocusCode}
             onCodeChange={onCodeChange}
+            viewerId={viewerId}
           />
         </div>
       )}
@@ -463,6 +474,7 @@ export default function ContentByCode({
             focusedCodeId={focusedCodeId}
             onFocusCode={onFocusCode}
             onCodeChange={onCodeChange}
+            viewerId={viewerId}
           />
         </div>
       )}
@@ -590,6 +602,7 @@ function SegmentsSection({
   focusedCodeId,
   onFocusCode,
   onCodeChange,
+  viewerId,
 }: {
   /** #963 Tier 3 — the ANSWERED payload, owned by the parent (see its comment). */
   data: CodeSegmentsWithContextResponse
@@ -604,6 +617,8 @@ function SegmentsSection({
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
+  /** #1592 — whose chips may offer a remove (see `ContentByCode`'s prop). */
+  viewerId: number | null
 }) {
   const [collapsedConvs, setCollapsedConvs] = useState<Set<number>>(new Set())
 
@@ -727,6 +742,9 @@ function SegmentsSection({
                               codeMap={codeMap}
                               allCodes={allCodes}
                               codesStatus={codesStatus}
+                              // #1592: a remove only where the viewer holds the code — the payload
+                              // names who applied each (`applied_code_details`).
+                              viewer={{ coderId: viewerId, applications: seg.applied_code_details }}
                               onCodeChange={onCodeChange}
                               excludeCodeId={codeId}
                               onFocusCode={onFocusCode}
@@ -834,6 +852,7 @@ function CommentsSection({
   focusedCodeId,
   onFocusCode,
   onCodeChange,
+  viewerId,
 }: {
   projectId: number
   codeId: number
@@ -850,6 +869,8 @@ function CommentsSection({
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
+  /** #1592 — whose chips may offer a remove (see `ContentByCode`'s prop). */
+  viewerId: number | null
 }) {
   const [collapsedDatasets, setCollapsedDatasets] = useState<Set<number>>(new Set())
 
@@ -990,6 +1011,17 @@ function CommentsSection({
                             </span>
                           )}
                           <span className="text-[11px] text-mm-text-faint">{comment.column_name}</span>
+                          {/* #1640: the coding stays listed — the header and badges count it
+                              (a usage count, #1526 D80) — and says why the Descriptives
+                              table's shares leave it out. The server decides it. */}
+                          {comment.counted_as_no_response && (
+                            <span
+                              className="text-[11px] text-mm-text-muted"
+                              data-testid="text-counted-as-no-response"
+                            >
+                              Counted as no response
+                            </span>
+                          )}
                         </div>
                         <p className="text-sm">{searchLower ? highlightText(comment.value_text, search ?? '') : comment.value_text}</p>
                         <div className="flex items-center gap-2 mt-1 flex-wrap">
@@ -1002,6 +1034,9 @@ function CommentsSection({
                               codeMap={codeMap}
                               allCodes={allCodes}
                               codesStatus={codesStatus}
+                              // #1592: a remove only where the viewer holds the code — the payload
+                              // names who applied each (`applied_code_details`).
+                              viewer={{ coderId: viewerId, applications: comment.applied_code_details }}
                               onCodeChange={onCodeChange}
                               excludeCodeId={codeId}
                               onFocusCode={onFocusCode}
@@ -1059,6 +1094,7 @@ function DocumentSegmentsSection({
   focusedCodeId,
   onFocusCode,
   onCodeChange,
+  viewerId,
 }: {
   /** #963 Tier 3 — the ANSWERED payload, shared with the two sibling sections. */
   data: CodeSegmentsWithContextResponse
@@ -1073,6 +1109,8 @@ function DocumentSegmentsSection({
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
+  /** #1592 — whose chips may offer a remove (see `ContentByCode`'s prop). */
+  viewerId: number | null
 }) {
   const [collapsedDocs, setCollapsedDocs] = useState<Set<number>>(new Set())
 
@@ -1184,6 +1222,9 @@ function DocumentSegmentsSection({
                                 codeMap={codeMap}
                                 allCodes={allCodes}
                                 codesStatus={codesStatus}
+                                // #1592: a remove only where the viewer holds the code — the payload
+                                // names who applied each (`applied_code_details`).
+                                viewer={{ coderId: viewerId, applications: seg.applied_code_details }}
                                 onCodeChange={onCodeChange}
                                 excludeCodeId={codeId}
                                 onFocusCode={onFocusCode}
@@ -1354,6 +1395,7 @@ function ObservationClipsSection({
   focusedCodeId,
   onFocusCode,
   onCodeChange,
+  viewerId,
 }: {
   /**
    * #963 Tier 3 — the ANSWERED payload, owned by the parent.
@@ -1375,6 +1417,8 @@ function ObservationClipsSection({
   focusedCodeId?: number | null
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
+  /** #1592 — whose chips may offer a remove (see `ContentByCode`'s prop). */
+  viewerId: number | null
 }) {
   const [collapsedObs, setCollapsedObs] = useState<Set<number>>(new Set())
 
@@ -1517,6 +1561,9 @@ function ObservationClipsSection({
                                 codeMap={codeMap}
                                 allCodes={allCodes}
                                 codesStatus={codesStatus}
+                                // #1592: a remove only where the viewer holds the code — the payload
+                                // names who applied each (`applied_code_details`).
+                                viewer={{ coderId: viewerId, applications: seg.applied_code_details }}
                                 onCodeChange={onCodeChange}
                                 excludeCodeId={codeId}
                                 onFocusCode={onFocusCode}

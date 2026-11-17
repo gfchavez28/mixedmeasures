@@ -38,7 +38,7 @@ const qq = (over: Partial<QQSummary> = {}): QQSummary => ({
   ppcc: 0.9958,
   line_slope: 3.05,
   line_intercept: -0.12,
-  singleton_group_count: 0,
+  singleton_groups: [],
   plotting_position: 'r_ppoints_blom_hazen',
   reference_line: 'qqline_quartiles_type7',
   undefined_reason: null,
@@ -132,12 +132,13 @@ describe('QQPlotChart', () => {
       expect(container.querySelector('.sr-only')!.textContent).not.toMatch(/1900/)
     })
 
-    it('declares singleton groups ONCE, in the caption', () => {
+    it('names the groups of one it left out ONCE, in the caption (#1549 b)', () => {
       const { container } = render(
-        <QQPlotChart qq={qq({ singleton_group_count: 3 })} />,
+        <QQPlotChart qq={qq({ singleton_groups: ['North', 'East'] })} />,
       )
-      expect(container.querySelector('figcaption')!.textContent).toMatch(/3 groups/)
-      expect(container.querySelector('.sr-only')!.textContent).not.toMatch(/3 groups/)
+      expect(container.querySelector('figcaption')!.textContent).toMatch(
+        /North and East have only one value each, so they are left out of this plot/)
+      expect(container.querySelector('.sr-only')!.textContent).not.toMatch(/North/)
     })
 
     it('does not repeat the straightness figure across the two channels', () => {

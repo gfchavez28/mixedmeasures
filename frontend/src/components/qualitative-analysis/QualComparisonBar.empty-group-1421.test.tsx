@@ -30,8 +30,8 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 const data: DemographicComparisonResponse = {
   groups: ['Interviewed', 'Survey only'],
   group_totals: {
-    Interviewed: { n: 1, participants: 1, total_segments: 4, total_word_count: 4 },
-    'Survey only': { n: 0, participants: 0, total_segments: 0, total_word_count: 0 },
+    Interviewed: { n: 1, participants: 1, total_segments: 4, total_word_count: 4, without_coding: 0 },
+    'Survey only': { n: 0, participants: 0, total_segments: 0, total_word_count: 0, without_coding: 0 },
   },
   codes: [{
     code_id: 1, code_name: 'Cost', category_name: null,

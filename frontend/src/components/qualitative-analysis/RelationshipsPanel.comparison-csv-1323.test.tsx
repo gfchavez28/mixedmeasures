@@ -31,7 +31,7 @@ afterEach(() => { cleanup(); csv.mockReset() })
 const FILTER = { subtype: 'role', label: 'Role', values: [] } as unknown as DemographicFilter
 const DATA = { groups: ['A', 'B'], group_totals: {}, codes: [] } as unknown as DemographicComparisonResponse
 
-function exportWith(qaOver: Record<string, unknown>) {
+function exportWith(qaOver: Record<string, unknown>, ratingsFollowCoderIds = false) {
   const qa = {
     relView: 'comparisons', groupBy: 'role', comparisonChartMode: 'table',
     selectedCodeIds: new Set(), selectedConversationIds: new Set(), selectedTextColumnIds: new Set(),
@@ -43,7 +43,7 @@ function exportWith(qaOver: Record<string, unknown>) {
     <MemoryRouter>
       <RelationshipsContent
         pid={1} qa={qa} codes={[]} filterParams={{}} cooccurrenceParams={{}} demoFilters={[FILTER]} participantFilterLabel={undefined}
-        cooccurrenceN={null} comparisonData={DATA} comparisonLoading={false}
+        ratingsFollowCoderIds={ratingsFollowCoderIds} cooccurrenceN={null} comparisonData={DATA} comparisonLoading={false}
         comparisonN={null} onCooccurrenceDataLoad={vi.fn()}
       />
     </MemoryRouter>,
@@ -69,5 +69,12 @@ describe('the comparison CSV sends what the screen counted', () => {
     const params = exportWith({})
     expect('conversation_ids' in params).toBe(false)
     expect(params.exclude_facilitator).toBe('true')
+    expect('ratings_follow_coder_ids' in params).toBe(false)   // #1615: not blind, not sent
+  })
+
+  // #1615 (r3-2): this copy of the export, like the page's, asks the server to refuse a grouping
+  // worked out from participant scores while blind — a lead's coder FILTER alone must not.
+  it('#1615: while blind the CSV sends ratings_follow_coder_ids, as the page’s copy does', () => {
+    expect(exportWith({}, true).ratings_follow_coder_ids).toBe('true')
   })
 })

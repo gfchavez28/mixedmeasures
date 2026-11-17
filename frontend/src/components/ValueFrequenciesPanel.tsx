@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import type { ColumnFrequenciesResponse, ValueFrequency } from '@/lib/api'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import { VALUE_LABEL_SEED_MAX_CODES } from '@/lib/dataset-constants'
+import { WITHHELD_VALUES_NOTICE } from '@/lib/blind-rating-columns'
 
 /**
  * The Variables view's observed-value summary (#809).
@@ -47,7 +48,7 @@ import { VALUE_LABEL_SEED_MAX_CODES } from '@/lib/dataset-constants'
 export function ValueFrequenciesPanel({
   data,
 }: {
-  data: Pick<ColumnFrequenciesResponse, 'frequencies' | 'total'> | undefined
+  data: Pick<ColumnFrequenciesResponse, 'frequencies' | 'total' | 'withheld_while_blind'> | undefined
 }) {
   const distinct = data?.frequencies.length ?? 0
 
@@ -76,6 +77,17 @@ export function ValueFrequenciesPanel({
   const open = choice ?? distinct <= VALUE_LABEL_SEED_MAX_CODES
   const setOpen = (next: boolean) => setChoice(next)
 
+  // #1615 — an empty answer for THIS reason is not "no values": say so, where they would be.
+  if (data?.withheld_while_blind) {
+    return (
+      <section className="mb-6" aria-labelledby="value-frequencies-heading">
+        <h3 id="value-frequencies-heading" className="text-sm font-semibold text-mm-text">
+          Observed values
+        </h3>
+        <p className="mt-1 text-xs text-mm-text-muted">{WITHHELD_VALUES_NOTICE}</p>
+      </section>
+    )
+  }
   if (!data || distinct === 0) return null
 
   const pct = (f: ValueFrequency) =>

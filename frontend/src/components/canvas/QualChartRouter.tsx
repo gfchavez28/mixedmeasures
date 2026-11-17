@@ -99,7 +99,9 @@ export default function QualChartRouter({
   }
 
   if (kind === 'saturation') {
-    return saturation ? <SaturationCurve data={saturation} /> : null
+    // #1544: the saved question selection is read for the note, never sent.
+    const answersSelected = (params.request.text_column_ids ?? []).length > 0
+    return saturation ? <SaturationCurve data={saturation} answersSelected={answersSelected} /> : null
   }
 
   if (kind === 'comparison_table') {

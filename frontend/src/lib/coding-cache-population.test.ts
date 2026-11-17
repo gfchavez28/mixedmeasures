@@ -47,6 +47,7 @@ const CLASSIFICATION: Record<string, Row> = {
   'text-column-readonly': D, 'canvas-qual-chart': D, 'canvas-qual-saturation': D,
   'canvas-qual-comparison': D, 'rating-queue': D, 'text-filtered-freq': D,
   'text-crosstab': D, 'text-density': D, 'text-length': D,
+  'joint-display': D, 'joint-display-passages': D, 'joint-display-cases': D,
   'metrics': D, 'canvas-chart': D,
   // ── local: a workbench's own active list ──
   'segments': { kind: 'local', hosts: ['pages/CodingWorkbench.tsx'], gap: GAP_ELSEWHERE },
@@ -92,6 +93,11 @@ const CLASSIFICATION: Record<string, Row> = {
   'record-context': not("a record's demographics and other answers, no codes"),
   'text-config': not('Text Coding view state'), 'text-coding-columns': not('coding-import column list'),
   'project-storage': not('disk use'), 'project-export-ceiling': not('export limits'),
+  'joint-display-pin-facts': not("a pin's attribution: who said it and where, no codes"),
+  // Session C (D165): a saved result beside a construct — slice 1 shapes QUANTITATIVE ones only
+  // (`joint-display-results.ts::isDisplayResult`), so its table is dataset values, as
+  // `group-comparison`'s is; a qualitative one is named and never read.
+  'joint-display-result': not('dataset values: a saved quantitative result beside a construct'),
 }
 
 const OBSERVERS = new Set(['useQuery', 'useInfiniteQuery', 'useSuspenseQuery', 'useQueries', 'fetchQuery', 'prefetchQuery', 'ensureQueryData', 'queryOptions'])

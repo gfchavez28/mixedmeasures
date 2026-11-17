@@ -50,7 +50,8 @@ from ..services.staleness import (
 )
 from ..services.audit import log_action
 
-from .helpers import _get_project_or_404
+from .helpers import _get_project_or_404, parse_int_list
+from ..services.rating_withholding import rating_withholding  # #1615
 from .equivalence import (
     _validate_columns_belong_to_project,
     _assert_columns_unique_per_dataset,
@@ -579,6 +580,8 @@ async def create_score_metric(
     domain_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Idempotently create (or retry compute for) the ungrouped scale-score
     metric for a variable group.
@@ -632,8 +635,11 @@ async def create_score_metric(
     db.commit()
     db.refresh(metric)
 
+    # #1615: the scale score of a group holding a rating score is computed (it is
+    # the shared metric), and its numbers are not returned to a blind caller.
+    withheld = rating_withholding(db, project_id, parse_int_list(coder_ids)).metric(db, metric)
     return {
-        "metric": _build_metric_response(metric, db),
+        "metric": _build_metric_response(metric, db, withheld=withheld),
         "computed": computed,
     }
 

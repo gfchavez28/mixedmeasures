@@ -23,7 +23,13 @@ from sqlalchemy import text
 
 from app.main import app
 from app.database import engine, SessionLocal, Base
-from app.services.project_portability import import_project, CURRENT_FORMAT_VERSION
+from app.services.project_portability import (
+    CURRENT_FORMAT_VERSION,
+    JSONL_ENTITY_KEYS,
+    JSONL_FORMAT_VERSION,
+    _entity_entry_name,
+    import_project,
+)
 from app.services.codebook_exchange import import_codebook_native
 from app.models import Project
 
@@ -54,6 +60,12 @@ def _older_mmproject_bytes(version: int = 1, app_version: str = "1.0.0") -> byte
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("manifest.json", json.dumps(manifest))
         zf.writestr("project.json", "{}")
+        # From v7 the five data-scaled entities are members of their own, and a file
+        # missing one is refused as incomplete — so an older file of THAT shape carries
+        # them (empty), as every real v7 export does. (v7 became "older" with v8.)
+        if version >= JSONL_FORMAT_VERSION:
+            for key in JSONL_ENTITY_KEYS:
+                zf.writestr(_entity_entry_name(key), "")
     return buf.getvalue()
 
 

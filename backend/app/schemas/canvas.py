@@ -22,6 +22,11 @@ class CanvasExportDocxRequest(BaseModel):
     """
     chart_images: dict[str, str] = Field(default_factory=dict)
     chart_tables: dict[str, Any] = Field(default_factory=dict)
+    #: A joint display's REPORT table (D174), keyed by the node's ``displayKey``:
+    #: ``{"title", "message", "headers", "rows", "span_rows", "note", "appendix"}`` —
+    #: the one `lib/joint-display-report.ts` builds for every format. Loosely typed for
+    #: the same reason as ``chart_tables``: the router drops a malformed entry.
+    display_tables: dict[str, Any] = Field(default_factory=dict)
 
 
 class CanvasCreate(BaseModel):
@@ -70,6 +75,47 @@ class ThemeUpdate(BaseModel):
     parent_theme_id: int | None = None
 
 
+class ThemeRelationshipRestore(BaseModel):
+    """One link a theme delete cascaded away (#1301) — the response row's shape."""
+    id: int | None = None
+    source_theme_id: int
+    target_theme_id: int
+    relationship_type: str = Field(..., min_length=1, max_length=30)
+    label: str | None = Field(None, max_length=255)
+    weight: int = Field(1, ge=1, le=100)
+    is_bidirectional: bool = False
+    line_style: str | None = Field(None, max_length=20)
+    line_color: str | None = Field(None, max_length=7)
+
+
+class ThemeRestore(BaseModel):
+    """What deleting a theme destroyed (#1301): `services/canvas.py::theme_restore_record`,
+    handed out by the delete and sent back by its undo. Bounded as `ThemeCreate` is."""
+    id: int | None = None
+    name: str = Field(..., min_length=1, max_length=255)
+    section_type: str = Field(default="theme", max_length=10)
+    description: str | None = Field(None, max_length=5000)
+    color: str | None = Field(None, max_length=7, pattern=r"^#[0-9A-Fa-f]{6}$")
+    doc_order: int
+    table_column_order: int | None = None
+    viz_x: float | None = None
+    viz_y: float | None = None
+    parent_theme_id: int | None = None
+    content: dict | None = None
+    child_ids: list[int] = Field(default_factory=list, max_length=10_000)
+    relationships: list[ThemeRelationshipRestore] = Field(default_factory=list, max_length=10_000)
+    #: The delete's own audit entry, set by the delete endpoint — the withdrawal gate measures
+    #: "since" from it (absent → fails closed).
+    deleted_audit_id: int | None = None
+
+
+class ThemeRestoreLost(BaseModel):
+    """What could not come back because the canvas changed after the delete (#1301)."""
+    parent: bool = False
+    children: int = 0
+    relationships: int = 0
+
+
 class ThemeReorderRequest(BaseModel):
     theme_ids: list[int] = Field(..., min_length=1)
 
@@ -104,6 +150,11 @@ class CanvasThemeResponse(BaseModel):
 
 
 # ── Relationship schemas ────────────────────────────────────────────────────
+
+
+class ThemeRestoreResponse(BaseModel):
+    theme: CanvasThemeResponse
+    not_restored: ThemeRestoreLost
 
 
 class ThemeRelationshipCreate(BaseModel):

@@ -1075,6 +1075,7 @@ class TestTheWritersGatherSkipsTargetsThatCannotDecide:
         return gather_target_votes(
             db, self.PID, segment_scope=SEGMENT_SCOPE_CONSENSUS_ELIGIBLE, min_voters=n,
             group_units=True,  # the writer's form (this fixture has no groups)
+            coder_ids=None,
         )
 
     def test_the_filter_keeps_exactly_the_targets_that_can_decide(self, db_session):
@@ -1241,7 +1242,7 @@ class TestTheWritersGatherSkipsTargetsThatCannotDecide:
         for bad in (0, -1, True, 1.5):
             with pytest.raises(ValueError, match="min_voters"):
                 gather_target_votes(db_session, 1, segment_scope="project", min_voters=bad,
-                                    group_units=True)
+                                    group_units=True, coder_ids=None)
 
 
 # ── #958 · the shared gather STREAMS ─────────────────────────────────────────
@@ -1309,7 +1310,7 @@ class TestTheGatherStreams:
 
         def stream(pid):
             votes = gather_target_votes(db, pid, segment_scope=SEGMENT_SCOPE_PROJECT, min_voters=2,
-                                        group_units=True)
+                                        group_units=True, coder_ids=None)
             return lambda: sum(1 for _ in votes.ballots())
 
         # Warm SQLAlchemy's statement caches on BOTH sizes first: they grow with
@@ -1319,7 +1320,7 @@ class TestTheGatherStreams:
         small, large = self._peak(stream(971)), self._peak(stream(972))
         held = self._peak(lambda: list(
             gather_target_votes(db, 972, segment_scope=SEGMENT_SCOPE_PROJECT,
-                                min_voters=2, group_units=True).ballots()
+                                min_voters=2, group_units=True, coder_ids=None).ballots()
         ))
         # The fixture could have disagreed: HOLDING the large project's ballots
         # costs many times what streaming it does (#707a).
@@ -1342,7 +1343,7 @@ class TestTheGatherStreams:
         monkeypatch.setattr(mr, "GATHER_STREAM_BATCH", 50)
 
         # Warm the statement caches on both sizes (see the gather test above).
-        mr.compute_magnitude_rollup(db, 973), mr.compute_magnitude_rollup(db, 974)
-        small = self._peak(lambda: mr.compute_magnitude_rollup(db, 973))
-        large = self._peak(lambda: mr.compute_magnitude_rollup(db, 974))
+        mr.compute_magnitude_rollup(db, 973, coder_ids=None), mr.compute_magnitude_rollup(db, 974, coder_ids=None)
+        small = self._peak(lambda: mr.compute_magnitude_rollup(db, 973, coder_ids=None))
+        large = self._peak(lambda: mr.compute_magnitude_rollup(db, 974, coder_ids=None))
         assert large < 2 * small, (small, large)

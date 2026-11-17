@@ -594,7 +594,7 @@ describe('#817 — a comparison exports the comparison', () => {
           { group: 'Under 45', n: 120, mean: 2.31 },
           { group: '45 and over', n: 98, mean: 1.88 },
         ],
-        test: { test_type: 'one_way_anova', statistic: 690.88, df: 1, p: 0.0001,
+        test: { test_type: 'one_way_anova', statistic: 690.88, df: 1, df2: 216, p: 0.0001,
                 effect_size: 0.06, effect_size_type: 'eta_squared' },
         test_omitted_reason: null,
       }],
@@ -616,7 +616,8 @@ describe('#817 — a comparison exports the comparison', () => {
     const tables = await fetchChartTables(themeWithChart(comparisonConfig), 4, LENS)
     const md = tables.get(1)?.md ?? ''
     expect(md).toContain('Under 45 n')
-    expect(md).toContain('690.880')
+    // #1423: the strip's words for the test, never its wire id.
+    expect(md).toContain('F(1, 216) = 690.88')
     expect(md).toContain('Trust scale A')
   })
 
@@ -629,7 +630,7 @@ describe('#817 — a comparison exports the comparison', () => {
     const arm3 = { ...comparisonConfig, show_scatter: true, corr_type: 'spearman' }
     const tables = await fetchChartTables(themeWithChart(arm3), 4, LENS)
     expect(comparisonsApi.groupComparison).toHaveBeenCalled()
-    expect(tables.get(1)?.md ?? '').toContain('690.880')
+    expect(tables.get(1)?.md ?? '').toContain('F(1, 216) = 690.88')
   })
 
   it('prints the REASON when a row has no test, never a blank cell', async () => {
@@ -670,7 +671,9 @@ describe('#817 — a comparison exports the comparison', () => {
     } as never)
     const tables = await fetchChartTables(themeWithChart(comparisonConfig), 4, LENS)
     const md = tables.get(1)?.md ?? ''
-    expect(md).toContain('0.0355 (exact p)')
+    // #1423: the table's p (`formatP`), never `toFixed(4)`.
+    expect(md).toContain('.035 (exact p)')
+    expect(md).not.toContain('0.0355')
     expect(md).toContain('Score: C has only one value, so it is shown without an SD and left out of the tests.')
     expect(md).not.toContain('Other: ')
   })

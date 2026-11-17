@@ -1,5 +1,6 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from datetime import datetime
+from typing import Literal
 from .common import UTCTimestamp, strip_optional_text, strip_required_text
 
 # Trim a participant identifier; reject whitespace-only (#556a).
@@ -202,6 +203,55 @@ class WithdrawalDocumentTouchpoint(BaseModel):
     notes: int = 0
 
 
+class WithdrawalCanvasPlace(BaseModel):
+    """#1546 D158 — one canvas section or snapshot holding quotes a withdrawal cannot
+    place. The researcher's own names only, never the words."""
+
+    canvas_id: int
+    canvas_name: str
+    #: The section's id, or the snapshot's.
+    id: int
+    name: str
+    quotes: int
+
+
+class WithdrawalUnplacedCanvasQuotes(BaseModel):
+    """#1546 D158 — canvas quotes whose source is gone, so nothing says whose words they
+    hold: the withdrawal LEAVES them, and a person reads them. `quotes` counts every
+    embed, a snapshot's copy included."""
+
+    quotes: int
+    sections: list[WithdrawalCanvasPlace]
+    snapshots: list[WithdrawalCanvasPlace]
+
+
+class WithdrawalOtherProject(BaseModel):
+    """#1606 D234 — another project here holding a participant with the same ID. The
+    researcher's project name only, never what it holds."""
+
+    project_id: int
+    name: str
+    #: "copy" — duplicated FROM this project; "source" — this project was duplicated
+    #: from it; null — no Duplicate links them.
+    copy_relation: Literal["copy", "source"] | None
+
+
+class WithdrawalOtherProjects(BaseModel):
+    """#1606 D234 — copies first, then by name, capped; `total` counts every one."""
+
+    projects: list[WithdrawalOtherProject]
+    total: int
+
+
+class WithdrawalPreUpdateCopies(BaseModel):
+    """#1606 D235 — the install's copies of the whole database taken before updates.
+    `count` is null when the folder could not be read (never 0, which says none).
+    `folder` is this computer's path: returned to the page, never stored."""
+
+    count: int | None
+    folder: str
+
+
 class WithdrawalReportResponse(BaseModel):
     """Everything in the project that traces back to one participant.
 
@@ -227,3 +277,14 @@ class WithdrawalReportResponse(BaseModel):
     # not provably: the withdrawal never deletes them, and the count is NOT part of
     # `total_items`. A count only — never which records.
     unlinked_records_with_identifier: int = 0
+    # #1546 D158 — REQUIRED (#1123's rule): a disclosure the wire can drop is one the
+    # confirm can lose. Not part of `total_items`; the withdrawal leaves these.
+    canvas_quotes_unplaced: WithdrawalUnplacedCanvasQuotes
+    # Joint display slice 2 (r3-6) — REQUIRED (#1123's rule), NOT part of `total_items`:
+    # picked "cases that don't fit" naming them, which the withdrawal removes with their
+    # reasons (`canvas_embed_scrub.count_misfit_cases`).
+    canvas_misfit_cases: int
+    # #1606 D234/D235 — REQUIRED (#1123's rule), NOT part of `total_items`: where their
+    # data still is that this withdrawal does not reach.
+    other_projects_with_identifier: WithdrawalOtherProjects
+    pre_update_copies: WithdrawalPreUpdateCopies

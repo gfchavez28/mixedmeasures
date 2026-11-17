@@ -84,6 +84,7 @@ import { variableRulesRefusal } from '@/lib/dataset-constants'
 import { invalidateColumnDictionary } from '@/lib/dataset-cache'
 import { extractApiError } from '@/lib/api'
 import { useHistory } from '@/hooks/useHistory'
+import { useBlindScope } from '@/hooks/useBlindScope'
 
 // Column types where a numeric encoding (value_numeric) is meaningful — used to
 // warn before a category_group primary clears it (#581).
@@ -1414,11 +1415,15 @@ export default function RecodeWorkbench() {
   })
   const definitions = useMemo(() => definitionsQuery.data ?? [], [definitionsQuery.data])
 
-  // Fetch frequencies for selected column
+  // Fetch frequencies for selected column. #1615: a participant score's distribution IS
+  // the scores, so while blind mode withholds the request carries the viewer's scope (in
+  // the key, waiting on `scopeReady` — fail closed) and the server sends no values for a
+  // rating column; the panel says why.
+  const { coderScope, scopeReady } = useBlindScope(pid)
   const frequenciesQuery = useQuery({
-    queryKey: ['column-frequencies', pid, did, selectedColumnId],
-    queryFn: () => recodeApi.getFrequencies(pid, did, selectedColumnId!),
-    enabled: !!pid && !!did && !!selectedColumnId,
+    queryKey: ['column-frequencies', pid, did, selectedColumnId, coderScope ?? 'every-coder'],
+    queryFn: () => recodeApi.getFrequencies(pid, did, selectedColumnId!, coderScope),
+    enabled: !!pid && !!did && !!selectedColumnId && scopeReady,
     retry: retryUnanswered,
   })
   const frequenciesData = frequenciesQuery.data

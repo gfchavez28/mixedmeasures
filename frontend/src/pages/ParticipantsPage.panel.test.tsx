@@ -48,6 +48,8 @@ vi.mock('@/lib/api', async () => ({
   retryUnanswered: () => false,
 }))
 vi.mock('@/layouts/ProjectLayout', () => ({ useProjectLayout: () => ({ projectId: 1 }) }))
+// #1608 — the profile's read follows blind mode (`useBlindScope`); here it is every coder's.
+vi.mock('@/hooks/useBlindScope', () => ({ useBlindScope: () => ({ coderScope: undefined, scopeReady: true }) }))
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 import ParticipantsPage from './ParticipantsPage'
@@ -97,7 +99,11 @@ const docAbout = (name: string, id = 11) => [{ id, name, source_format: 'txt' }]
 const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   participant_id: 0, identifier: '', display_name: null, role: null, has_demographics: false,
   speaker_names: [], conversations: [], datasets: [], documents: [], total_items: 1,
-  unlinked_records_with_identifier: 0, ...over,
+  unlinked_records_with_identifier: 0,
+  canvas_quotes_unplaced: { quotes: 0, sections: [], snapshots: [] },
+  canvas_misfit_cases: 0,  // joint display slice 2 (r3-6)
+  other_projects_with_identifier: { projects: [], total: 0 },
+  pre_update_copies: { count: 0, folder: '/home/r/backups' }, ...over,
 })
 
 let lastClient: QueryClient
@@ -327,7 +333,11 @@ describe('#1091 — what else the panel must survive', () => {
   })
 
   it('withdrawing the person whose panel is open closes it', async () => {
-    withdraw.mockResolvedValue({ identifier: 'P001', backup_filename: 'b.mmbackup', documents_unlinked: 0 })
+    withdraw.mockResolvedValue({
+      identifier: 'P001', backup_filename: 'b.mmbackup', documents_unlinked: 0,
+      other_projects_with_identifier: { projects: [], total: 0 },
+      pre_update_copies: { count: 0, folder: '/home/r/backups' },
+    })
     renderPage(people())
     await screen.findByText('P001')
     fireEvent.click(row('P001'))
@@ -351,7 +361,11 @@ describe('#1091 — what else the panel must survive', () => {
    * the full population is `ParticipantsPage.withdrawal-cache.test.tsx`.
    */
   it('#1320: a withdrawal drops cached canvas content and quote and search caches', async () => {
-    withdraw.mockResolvedValue({ identifier: 'P001', backup_filename: 'b.mmbackup', documents_unlinked: 0 })
+    withdraw.mockResolvedValue({
+      identifier: 'P001', backup_filename: 'b.mmbackup', documents_unlinked: 0,
+      other_projects_with_identifier: { projects: [], total: 0 },
+      pre_update_copies: { count: 0, folder: '/home/r/backups' },
+    })
     renderPage(people())
     await screen.findByText('P001')
     const reset = [['canvas', 1, 4], ['snapshot-detail', 1, 4, 9]]
@@ -622,6 +636,32 @@ describe('#1136 — the withdrawal section says what the software does', () => {
     await within(panel).findByText(/trace back to this participant/)
     expect(within(panel).queryByText(/no erase function|removed by hand/)).toBeNull()
     expect(within(panel).getByText(/cannot find their name in other people’s turns/)).toBeInTheDocument()
+  })
+
+  it('#1546 (D158): counts the canvas quotes it would leave, and where they are', async () => {
+    renderPage([person(1, { display_name: 'Jane Doe' })])
+    withdrawalReport.mockResolvedValue(report({
+      participant_id: 1,
+      canvas_quotes_unplaced: {
+        quotes: 1, sections: [],
+        snapshots: [{ canvas_id: 1, canvas_name: 'Main', id: 9, name: 'Draft 1', quotes: 1 }],
+      },
+    }))
+    await screen.findByText('Jane Doe')
+    fireEvent.click(row('Jane Doe'))
+    const panel = await screen.findByRole('complementary', { name: 'Participant details' })
+    expect(await within(panel).findByText(
+      /^1 quote on a canvas comes from .* It stays — read it yourself: the snapshot “Draft 1” of “Main”\.$/,
+    )).toBeInTheDocument()
+  })
+
+  it('POSITIVE CONTROL: with none, the panel says nothing of the canvas', async () => {
+    renderPage([person(1, { display_name: 'Jane Doe' })])
+    await screen.findByText('Jane Doe')
+    fireEvent.click(row('Jane Doe'))
+    const panel = await screen.findByRole('complementary', { name: 'Participant details' })
+    await within(panel).findByText(/trace back to this participant|Nothing else in this project/)
+    expect(within(panel).queryByText(/quotes? on a canvas comes? from/)).toBeNull()
   })
 })
 

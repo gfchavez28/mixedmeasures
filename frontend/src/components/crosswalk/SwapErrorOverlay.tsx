@@ -23,6 +23,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Link } from 'react-router'
 import { Button } from '@/components/ui/button'
 import type { ProjectColumnInfo } from './crosswalk-types'
 
@@ -81,12 +82,14 @@ export function SwapErrorOverlay({
                       {col.column_type}
                     </span>
                   </span>
-                  <a
-                    href={`/projects/${projectId}/datasets/${col.dataset_id}?column=${col.id}`}
+                  {/* #1625 (D241): a router link — the plain `<a href>` reloaded the
+                      whole app (every cache and the undo history). */}
+                  <Link
+                    to={`/projects/${projectId}/datasets/${col.dataset_id}?column=${col.id}`}
                     className="text-xs text-mm-blue underline underline-offset-2 hover:text-mm-blue/80 whitespace-nowrap"
                   >
-                    Open in Dataset View
-                  </a>
+                    Open in the Data view
+                  </Link>
                 </li>
               ))}
             </ul>

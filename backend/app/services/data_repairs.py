@@ -16,8 +16,10 @@ swapped the files must still say so.
 until the lifespan finishes), so a repair must cost a settled install a few
 queries — never a scan of the data. #1069's is gated on column metadata for
 exactly that reason; #1230's walks one index (`audit_entries.project_id`) and
-writes only where a read found something; #1313's is one query over the
-variable-group metrics' stored results.
+writes only where a read found something; #1546's is one query per kind of edit entry,
+returning only the leftovers (200 ms at 100,000 live hand edits, measured), and writes
+only what they found; #1313's is one query over the variable-group metrics' stored
+results.
 """
 
 import logging
@@ -97,6 +99,31 @@ def repair_deleted_project_audit(session_factory) -> None:
         db.close()
 
 
+def repair_leftover_audit_words(session_factory) -> None:
+    """#1546 (D160) — the edit wording an older build's delete left in the audit trail.
+
+    Before #1546 a conversation, dataset, record or column delete kept its turns' and
+    answers' edit entries with their words, where no withdrawal could reach them.
+    `deleted_source_audit.repair_leftover_words` owns the rule (it keeps what a live
+    row's own history or a merge result's lifetime claims). SQL picks the candidates —
+    one query per kind, so a settled install loads no entry — and it writes only what
+    they found. Never raises.
+    """
+    from .deleted_source_audit import repair_leftover_words
+
+    db = session_factory()
+    try:
+        stripped = repair_leftover_words(db)
+        db.commit()
+        if stripped:
+            logger.info("Audit repair (#1546): stripped the words from %d entries of deleted sources", stripped)
+    except Exception:
+        db.rollback()
+        logger.exception("Audit repair (#1546) failed; skipping")
+    finally:
+        db.close()
+
+
 def repair_material_rc_keys(session_factory) -> None:
     """#1315 — the Relationships & Comparisons keys an older saver wrote on every tab.
 
@@ -163,6 +190,7 @@ def run_data_repairs(session_factory) -> None:
     repair_reverse_recodes(session_factory)
     repair_missing_value_numbers(session_factory)
     repair_deleted_project_audit(session_factory)
+    repair_leftover_audit_words(session_factory)
     repair_material_rc_keys(session_factory)
     repair_record_scores(session_factory)
     run_media_duration_backfill(session_factory)

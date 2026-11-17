@@ -291,10 +291,10 @@ describe('qualChartHasEnoughToFetch — the gate differs per kind', () => {
     expect(qualChartHasEnoughToFetch(timeline({ observation_ids: [], conversation_ids: [4] }))).toBe(true)
   })
 
-  it('asks for saturation with nothing selected — empty means ALL sources there', () => {
-    // Unlike source-frequencies, saturation has no `code_ids` and its source
-    // filters are truthiness-tested, so an empty config is a valid whole-project
-    // request — which is exactly what the analysis view sends by default.
+  it('asks for saturation with nothing selected — no source saved means ALL sources there', () => {
+    // Unlike source-frequencies, saturation has no `code_ids`, and a config with no
+    // source saved sends no list (#1544: `saturationParams`, the view's own builder),
+    // so an empty config is a valid whole-project request.
     const params = extractQualComputeParams(
       qualConfig({ chart_type: 'saturation', code_ids: [], observation_ids: [] }),
     )

@@ -23,8 +23,8 @@ function payload(over: Partial<DemographicComparisonResponse['basis']> = {}, tes
   return {
     groups: ['Board', 'Staff'],
     group_totals: {
-      Board: { n: 3, participants: 3, total_segments: 60, total_word_count: 60 },
-      Staff: { n: 3, participants: 3, total_segments: 60, total_word_count: 60 },
+      Board: { n: 3, participants: 3, total_segments: 60, total_word_count: 60, without_coding: 0 },
+      Staff: { n: 3, participants: 3, total_segments: 60, total_word_count: 60, without_coding: 0 },
     },
     codes: [{
       code_id: 1, code_name: 'X', category_name: null,
@@ -45,7 +45,7 @@ function payload(over: Partial<DemographicComparisonResponse['basis']> = {}, tes
     },
     scope: {
       conversations: 2, documents: 1, text_columns: 0, observations_left_out: 3,
-      unassigned_passages: 4, participants_without_group: 0,
+      unassigned_passages: 4, participants_without_group: 0, no_coding_scope: 'every',
     },
   }
 }

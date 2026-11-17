@@ -28,6 +28,7 @@ from ..schemas.conversation import (
 from ..auth import get_current_user
 from ..services import media_storage
 from ..services.audit import log_action
+from ..services.deleted_source_audit import strip_deleted_conversation_words
 from ..services.csv_import import preview_csv, import_csv_to_segments
 from ..services.dataset_import import CsvReadError
 from ..services.subtitle_import import (
@@ -51,7 +52,7 @@ router = APIRouter(prefix="/api/projects/{project_id}/conversations", tags=["con
 
 def ensure_participant_for_speaker(
     db: Session, project_id: int, speaker: Speaker, name: str
-) -> bool:
+) -> str | None:
     """Auto-create or link Participant for non-facilitator speakers.
 
     #534: matching is trim-then-exact on Participant.identifier — the same rule
@@ -60,17 +61,19 @@ def ensure_participant_for_speaker(
     duplicate participant. Case stays sensitive; a whitespace-only label
     identifies nobody and links nothing.
 
-    Returns True when the speaker was left UNLINKED because the project's
-    withdrawal record names the label (#1391 / #1472, D73–D74) — by the withdrawn
-    person's ID or by a name the project knew her by — so the import can say so.
-    An existing participant holding the identifier is matched first, so someone
-    reinstated under it (D12), or created by hand under one of her names, is linked.
+    Returns how the label matched — `tombstones.SPEAKER_MATCH_EXACT` or
+    `SPEAKER_MATCH_FOLDED` (#1605, D237) — when the speaker was left UNLINKED
+    because the project's withdrawal record names it (#1391 / #1472, D73–D74): by
+    the withdrawn person's ID or by a name the project knew her by. The import says
+    so, and says when capitals or spacing were ignored. Otherwise None. An existing
+    participant holding the identifier is matched first, so someone reinstated
+    under it (D12), or created by hand under one of her names, is linked.
     """
     if speaker.is_facilitator or speaker.participant_id is not None:
-        return False
+        return None
     name = name.strip()
     if not name:
-        return False
+        return None
     existing = db.query(Participant).filter(
         Participant.project_id == project_id,
         Participant.identifier == name,
@@ -83,8 +86,9 @@ def ensure_participant_for_speaker(
         from ..models.project import Project
         from ..services import tombstones
         project_uuid = db.query(Project.project_uuid).filter(Project.id == project_id).scalar()
-        if tombstones.load(db, project_uuid).withdrawn_speaker_label(name):
-            return True
+        match = tombstones.load(db, project_uuid).withdrawn_speaker_match(name)
+        if match is not None:
+            return match
         participant = Participant(
             project_id=project_id,
             identifier=name,
@@ -93,7 +97,7 @@ def ensure_participant_for_speaker(
         db.add(participant)
         db.flush()
         speaker.participant_id = participant.id
-    return False
+    return None
 
 
 def conversation_to_response(
@@ -388,8 +392,9 @@ async def import_csv(
     # Assign color indices based on speaker order in config
     speaker_cache = {}
     # #1391 / #1472 (D74) — the speakers the withdrawal record kept unlinked, by id
-    # (two labels mapped onto one name are one speaker).
-    withdrawn_speaker_ids: set[int] = set()
+    # (two labels mapped onto one name are one speaker), each with how its label
+    # matched (#1605, D237: the warning says when capitals or spacing were ignored).
+    withdrawn_speakers: dict[int, str] = {}
     for i, sm in enumerate(config.speaker_mappings):
         # Check if speaker exists
         existing = db.query(Speaker).filter(
@@ -403,8 +408,9 @@ async def import_csv(
             if sm.color is not None:
                 existing.color = sm.color
             speaker_cache[sm.normalized_name] = existing
-            if ensure_participant_for_speaker(db, project_id, existing, sm.normalized_name):
-                withdrawn_speaker_ids.add(existing.id)
+            match = ensure_participant_for_speaker(db, project_id, existing, sm.normalized_name)
+            if match is not None:
+                withdrawn_speakers[existing.id] = match
         else:
             speaker = Speaker(
                 project_id=project_id,
@@ -417,12 +423,14 @@ async def import_csv(
             db.add(speaker)
             db.flush()
             speaker_cache[sm.normalized_name] = speaker
-            if ensure_participant_for_speaker(db, project_id, speaker, sm.normalized_name):
-                withdrawn_speaker_ids.add(speaker.id)
-    if withdrawn_speaker_ids:
+            match = ensure_participant_for_speaker(db, project_id, speaker, sm.normalized_name)
+            if match is not None:
+                withdrawn_speakers[speaker.id] = match
+    if withdrawn_speakers:
         # First: it is about consent, the rest are about the file's timestamps.
-        from ..services.tombstones import withdrawn_speaker_warning
-        warnings = [withdrawn_speaker_warning(len(withdrawn_speaker_ids)), *warnings]
+        from ..services.tombstones import SPEAKER_MATCH_FOLDED, withdrawn_speaker_warning
+        folded = sum(1 for m in withdrawn_speakers.values() if m == SPEAKER_MATCH_FOLDED)
+        warnings = [withdrawn_speaker_warning(len(withdrawn_speakers), folded), *warnings]
 
     # Create segments
     for seg in segments:
@@ -539,6 +547,11 @@ async def delete_conversation(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     conversation_name = conversation.name
+
+    # #1546 (D157) — its turns' edit wording leaves the audit trail with them: after
+    # the delete nothing links those entries to the people who spoke, so a later
+    # withdrawal could not find them, and the next turn given an id inherited them.
+    strip_deleted_conversation_words(db, project_id, conversation.id)
 
     log_action(
         db,

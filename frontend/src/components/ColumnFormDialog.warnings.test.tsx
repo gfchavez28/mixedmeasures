@@ -12,6 +12,8 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 import { ColumnFormDialog } from './ColumnFormDialog'
 import { datasetsApi } from '@/lib/api'
 
+// #1615 — the preview reads the blind scope; not blind here.
+vi.mock('@/hooks/useBlindScope', () => ({ useBlindScope: () => ({ coderScope: undefined, scopeReady: true }) }))
 vi.mock('@/lib/api', () => ({
   datasetsApi: { previewComputedColumn: vi.fn() },
 }))

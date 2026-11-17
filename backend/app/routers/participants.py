@@ -36,9 +36,14 @@ from ..schemas.participant import (
     WithdrawalReportResponse,
 )
 from ..services.tombstones import reinstate_if_withdrawn, withdrawn_identifier_refusal
-from ..services.withdrawal_report import build_withdrawal_report
+from ..services.withdrawal_report import build_withdrawal_report, copies_elsewhere
 from ..services.withdrawal_redaction import apply_withdrawal
-from ..services.canvas_embed_scrub import CanvasScrubError
+from ..services.canvas_embed_scrub import (
+    ACT_DELETE,
+    ACT_REPORT,
+    CanvasScrubError,
+    scrub_misfit_cases,
+)
 from ..services.backup import DatabaseBusyError, create_backup
 from ..config import get_documents_dir, get_media_dir, get_backup_dir, get_settings
 from ..auth import get_current_user
@@ -52,7 +57,8 @@ from ..services.participant_dataset import (
 
 logger = logging.getLogger(__name__)
 from ..services.participant_linking import auto_fill_role_from_linked_row
-from .helpers import _get_project_or_404, visible_segment_filter
+from .helpers import _get_project_or_404, parse_int_list, visible_segment_filter
+from ..services.participant_scores import withheld_rating_column_ids
 
 router = APIRouter(tags=["participants"])
 
@@ -138,7 +144,7 @@ def participant_to_response(
 
 
 def _build_linked_demographics(
-    participant: Participant, db: Session
+    participant: Participant, db: Session, coder_ids: list[int] | None = None,
 ) -> list[LinkedDemographicValue]:
     """Query linked-row column values across all of the participant's linked
     rows.
@@ -180,6 +186,13 @@ def _build_linked_demographics(
         )
         .all()
     )
+    # #1608 — a person's scores are the participant table's rating columns: while
+    # blind (``coder_ids``) the profile leaves them out, as the Data view does.
+    if coder_ids:
+        withheld: set[int] = set()
+        for dr in participant.dataset_rows:
+            withheld |= withheld_rating_column_ids(db, dr.dataset, coder_ids)
+        surfaced_cols = [c for c in surfaced_cols if c.id not in withheld]
     if not surfaced_cols:
         return []
 
@@ -223,11 +236,11 @@ def _build_linked_demographics(
 
 
 def _participant_to_detail(
-    participant: Participant, db: Session
+    participant: Participant, db: Session, coder_ids: list[int] | None = None,
 ) -> ParticipantDetailResponse:
     """Build full detail response with demographics."""
     base = participant_to_response(participant, db)
-    linked_demographics = _build_linked_demographics(participant, db)
+    linked_demographics = _build_linked_demographics(participant, db, coder_ids)
     return ParticipantDetailResponse(
         **base.model_dump(),
         linked_demographics=linked_demographics,
@@ -479,6 +492,8 @@ async def get_participant(
     participant_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1608 — bare default, LAST; the Participants page sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Get a single participant with full details including linked demographics."""
     _get_project_or_404(db, project_id, user.id)
@@ -486,7 +501,7 @@ async def get_participant(
     if not participant or participant.project_id != project_id:
         raise HTTPException(status_code=404, detail="Participant not found")
 
-    return _participant_to_detail(participant, db)
+    return _participant_to_detail(participant, db, parse_int_list(coder_ids))
 
 
 @router.patch(
@@ -789,11 +804,18 @@ async def get_withdrawal_report(
     if not participant:
         raise HTTPException(status_code=404, detail="Participant not found")
 
-    return build_withdrawal_report(db, participant).to_dict()
+    # #1667 (D340) — a canvas copy the report cannot read is REFUSED in a sentence that names it,
+    # as the delete and the withdrawal refuse it: the confirms show a refusal's words through
+    # `LoadState` and keep their act unavailable. Uncaught, it was a 500 — "Something went
+    # wrong" — and the researcher could not tell which copy stood in the way.
+    try:
+        return build_withdrawal_report(db, participant, act=ACT_REPORT).to_dict()
+    except CanvasScrubError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @router.delete("/api/projects/{project_id}/participants/{participant_id}")
-async def delete_participant(
+def delete_participant(  # def, not async: the misfit scrub walks the project's canvas — MUST_BE_SYNC
     project_id: int,
     participant_id: int,
     user: User = Depends(get_current_user),
@@ -811,6 +833,24 @@ async def delete_participant(
 
     project_id = participant.project_id
     participant_identifier = participant.identifier
+
+    # Joint display slice 2 (R11, r3-14): a joint display's "case that doesn't fit" names this
+    # person by id and carries the researcher's reason about them, so it goes with them. Since
+    # #1639 (D319, migration c3a7e1f9b5d8) `participants` never reissues a deleted id, so a case
+    # left behind would no longer describe someone else — but its reason is about this person,
+    # and D320's leftover (an id freed before that upgrade) can still be issued once. The
+    # withdrawal's own scrub removes them first
+    # (sections and snapshots); a display it cannot walk refuses the delete, because passing
+    # over it could leave a case behind (fail closed, as the withdrawal, #1320) — in the DELETE's
+    # words: nothing is being withdrawn here (#1651, D338).
+    try:
+        scrub_misfit_cases(db, project_id, participant.id, act=ACT_DELETE)
+    except CanvasScrubError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Could not delete this participant, so nothing was changed. {exc}",
+        )
 
     log_action(
         db,
@@ -874,6 +914,13 @@ def withdraw_participant(
     )
     if not participant:
         raise HTTPException(status_code=404, detail="Participant not found")
+
+    # #1606 (D234, D235) — where their data still is that this does not reach: other
+    # projects holding their ID, and the update copies. Read BEFORE anything changes,
+    # so a failure here changes nothing. Returned for the note after, and deliberately
+    # NOT stored in the audit entry below: it names this computer's folder, and the
+    # entry travels in every export (and the Excel Audit Trail sheet).
+    elsewhere = copies_elsewhere(db, project_id, participant.identifier)
 
     # The forced backup comes first and is not optional. If it cannot be taken,
     # the withdrawal does not happen — an irreversible removal with no recovery
@@ -942,4 +989,4 @@ def withdraw_participant(
     )
     db.commit()
 
-    return {**outcome.to_dict(), "backup_filename": backup_info.filename}
+    return {**outcome.to_dict(), "backup_filename": backup_info.filename, **elsewhere}

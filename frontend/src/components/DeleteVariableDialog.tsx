@@ -1,3 +1,4 @@
+import { DELETE_REACHES_DISPLAYS_TEXT } from '@/lib/joint-display-vocabulary'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -88,7 +89,7 @@ export function DeleteVariableDialog({
               <p>
                 This permanently removes the variable, every response recorded against it, and
                 any value labels, missing-value rules and recodes it carries. {recovery} This
-                cannot be undone.
+                cannot be undone. {DELETE_REACHES_DISPLAYS_TEXT}
               </p>
               {column && plan.sentence && <p>{plan.sentence}</p>}
             </div>

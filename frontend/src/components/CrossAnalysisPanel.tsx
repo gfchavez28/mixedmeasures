@@ -98,6 +98,17 @@ export default function CrossAnalysisPanel({
   )
   const coderIncludeArr = coderInclude ?? null
   const coderIncludeCsv = coderInclude ? coderInclude.join(',') : undefined
+  // #1615 (D273) — `coder_ids` is ALSO a lead's coder filter here, so the server reads it as the
+  // blind scope only with this flag, sent ONLY while withholding: a filter, cross-tab or density
+  // grouping on a variable worked out from participant scores is then refused (409, its sentence
+  // printed by the panel's failure notice). A non-blind request is byte-for-byte today's. 🔴 The
+  // flag is in the three keys below: a lead's own-coder filter sends the SAME `coder_ids` as
+  // blind mode, so without it the cache would serve her unrefused answer to the blind panel.
+  const ratingsFlag = withholding ? { ratings_follow_coder_ids: true } : {}
+  // #1615 / D96 — fail closed: withholding with no self id has no scope to send (the coder
+  // filter's path would send NONE, read as every coder, and the flag would then withhold
+  // nothing), so nothing is asked until the viewer is known.
+  const scopeReady = settled && (!withholding || self != null)
 
   const columnIdsStr = focalColumnIds.join(',')
 
@@ -123,7 +134,7 @@ export default function CrossAnalysisPanel({
 
   // Filtered frequencies query
   const freqQuery = useQuery({
-    queryKey: ['text-filtered-freq', projectId, columnIdsStr, filtersJSON, coderIncludeCsv, layerScope],
+    queryKey: ['text-filtered-freq', projectId, columnIdsStr, filtersJSON, coderIncludeCsv, layerScope, withholding],
     queryFn: () => textAnalysisApi.filteredFrequencies(projectId, {
       column_ids: focalColumnIds,
       // Enabled only when `comparedFilters` is a list (D103's one decision).
@@ -131,10 +142,11 @@ export default function CrossAnalysisPanel({
       include_overall: true,
       coder_ids: coderIncludeArr,
       layer_scope: layerScope,
+      ...ratingsFlag,
     }),
     // The four reads are server-scoped by the blind state: each waits for it (#964), and each
     // key carries the EFFECTIVE scope (`coderIncludeCsv`), so a reveal is a new key (#454).
-    enabled: filtersReady && settled,
+    enabled: filtersReady && scopeReady,
   })
   const freqData = freqQuery.data
   /**
@@ -152,14 +164,15 @@ export default function CrossAnalysisPanel({
 
   // Cross-tabulation query
   const crossTabQuery = useQuery({
-    queryKey: ['text-crosstab', projectId, columnIdsStr, crossColumnId, coderIncludeCsv, layerScope],
+    queryKey: ['text-crosstab', projectId, columnIdsStr, crossColumnId, coderIncludeCsv, layerScope, withholding],
     queryFn: () => textAnalysisApi.crossTabulation(projectId, {
       text_column_ids: focalColumnIds,
       cross_column_id: crossColumnId!,
       coder_ids: coderIncludeArr,
       layer_scope: layerScope,
+      ...ratingsFlag,
     }),
-    enabled: crossColumnId !== null && settled,
+    enabled: crossColumnId !== null && scopeReady,
   })
   const crossTabData = crossTabQuery.data
   /**
@@ -172,16 +185,21 @@ export default function CrossAnalysisPanel({
   const crossTabLoad = useListLoad(crossTabQuery)
 
   // Code density query
-  const { data: densityData, isLoading: densityLoading } = useQuery({
-    queryKey: ['text-density', projectId, columnIdsStr, densityGroupColumnId, coderIncludeCsv, layerScope],
+  const densityQuery = useQuery({
+    queryKey: ['text-density', projectId, columnIdsStr, densityGroupColumnId, coderIncludeCsv, layerScope, withholding],
     queryFn: () => textAnalysisApi.codeDensity(projectId, {
       column_ids: columnIdsStr,
       group_by_column_id: densityGroupColumnId ?? undefined,
       coder_ids: coderIncludeCsv,
       layer_scope: layerScope,
+      ...ratingsFlag,
     }),
-    enabled: focalColumnIds.length > 0 && settled,
+    enabled: focalColumnIds.length > 0 && scopeReady,
   })
+  const { data: densityData, isLoading: densityLoading } = densityQuery
+  // #1615 — a refused grouping (a score band while blind) is SAID, never an empty panel: the
+  // panel rendered nothing for a failed read, so the refusal vanished under its own menu.
+  const densityLoad = useListLoad(densityQuery)
 
   // Response length query
   const { data: lengthData, isLoading: lengthLoading } = useQuery({
@@ -191,7 +209,7 @@ export default function CrossAnalysisPanel({
       coder_ids: coderIncludeCsv,
       layer_scope: layerScope,
     }),
-    enabled: focalColumnIds.length > 0 && settled,
+    enabled: focalColumnIds.length > 0 && scopeReady,
   })
 
   // Get columns for cross-tab and density group-by selectors
@@ -234,7 +252,7 @@ export default function CrossAnalysisPanel({
   // "Filters: None" beside a visible filter is the claim the fix exists to stop.
   // Read off the LIVE list (the pills), not the debounced one, so the reason appears
   // as the filter does.
-  const exportBlocked = !settled || unfinishedFilter
+  const exportBlocked = !scopeReady || unfinishedFilter
   const handleExport = () => {
     // #1531: the file follows the panel, so it waits for the same scope (`aria-disabled`
     // below says so; this refusal is what it does — #754).
@@ -246,6 +264,7 @@ export default function CrossAnalysisPanel({
       filters_json: comparedFilters ? JSON.stringify(comparedFilters) : undefined,
       coder_ids: coderIncludeCsv,
       layer_scope: layerScope,
+      ...ratingsFlag,  // #1615 — a refusal reaches the download's toast as the server's sentence
     })
   }
   const exportReasonId = useId()
@@ -395,7 +414,16 @@ export default function CrossAnalysisPanel({
               </SelectContent>
             </Select>
           </div>
-          <CodeDensityPanel data={densityData ?? null} loading={densityLoading} />
+          {densityLoad.status === 'failed' ? (
+            <LoadState
+              load={densityLoad}
+              loadingLabel="Loading code density…"
+              failedTitle="The code density could not be loaded."
+              size="panel"
+            />
+          ) : (
+            <CodeDensityPanel data={densityData ?? null} loading={densityLoading} />
+          )}
         </div>
         <ResponseLengthPanel data={lengthData ?? null} loading={lengthLoading} />
       </div>

@@ -91,4 +91,20 @@ class CodeApplication(Base):
         # `ix_code_applications_code_id` (the column's own index) is kept; see the
         # migration's docstring.
         Index("ix_code_applications_code_user", "code_id", "user_id"),
+        # "Has this coder a RATING here?" (#1617, D224, migration `f2a6c8d4b1e7`) —
+        # `participant_scores.score_rater_ids`, the live rule a participant table with
+        # no recorded raters falls back to: 25.7–27.6 s → 0.6–3.4 ms on an encrypted
+        # copy of a 4.9M-coding project, because a coder's UNRATED codings are not in
+        # it. Code-first for the reason above: `(user_id, code_id)` was measured to
+        # walk the coder's ratings in every project on the install.
+        # 🔴 `magnitude` is the THIRD key column on purpose (D226): with `(code_id,
+        # user_id)` alone this index and `ix_code_applications_code_user` cost the same
+        # to SQLite (no statistics), so whichever was created LAST won — and
+        # `create_all` creates a table's indexes in set order, which changes with the
+        # process's hash seed. With it, the query's `magnitude IS NOT NULL` is a range
+        # on the index (`magnitude>?` in the plan), strictly cheaper, so this index is
+        # chosen in either order (`test_snapshot_raters_1617.py`). The predicate text
+        # must normalise like the migration's (`scripts/schema_diff_harness.py`).
+        Index("ix_code_applications_rated", "code_id", "user_id", "magnitude",
+              sqlite_where=text("magnitude IS NOT NULL")),
     )

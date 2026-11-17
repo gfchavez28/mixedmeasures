@@ -16,8 +16,13 @@ from .helpers import (
     _parse_ids,
     _fmt_p,
     _fmt_stat,
+    coder_scope_filename_suffix,
+    parse_int_list,
     sanitize_content_disposition,
 )
+from ..services.participant_scores import RATING_COLUMNS_WITHHELD_NOTE
+from ..services.rating_withholding import RatingWithholding, rating_withholding
+from ..services.undefined_stats import RATING_WITHHELD_BLIND
 from .export_helpers import csv_safe
 from ..schemas.comparison import GroupComparisonRequest, GroupComparisonResponse
 # `_resolve_test_type` is imported rather than mirrored ON PURPOSE: the CSV has
@@ -27,12 +32,37 @@ from ..schemas.comparison import GroupComparisonRequest, GroupComparisonResponse
 from ..services.comparisons import (
     P_METHOD_CSV_LABEL,
     TEST_OMITTED_CSV_TEXT,
+    _no_comparison,
     _resolve_test_type,
     compute_group_comparison,
     untested_groups_note,
 )
 
 router = APIRouter(tags=["comparisons"])
+
+
+def _comparison_without_ratings(
+    db: Session, project_id: int, withholding: RatingWithholding, *,
+    column_ids: list[int], domain_ids: list[int],
+    grouping_column_id: int, grouping_column_id_2: int | None, **kwargs,
+) -> dict:
+    """#1615 — the comparison a blind viewer may see: every variable that is a
+    participant rating score (or a variable group holding one) left out and
+    counted. A rating score as the GROUPING variable sorts people by their
+    every-coder score, so nothing is computed — `RATING_WITHHELD_BLIND` says why,
+    as it does when every variable asked for was left out."""
+    cols, n_cols = withholding.split_columns(column_ids)
+    doms, n_doms = withholding.split_domains(db, domain_ids)
+    n_grouping = withholding.column(grouping_column_id) + withholding.column(grouping_column_id_2)
+    withheld = n_cols + n_doms + n_grouping
+    if n_grouping or (withheld and not cols and not doms):
+        return {**_no_comparison(RATING_WITHHELD_BLIND), "withheld_rating_variables": withheld}
+    result = compute_group_comparison(
+        db=db, project_id=project_id, column_ids=cols, domain_ids=doms,
+        grouping_column_id=grouping_column_id, grouping_column_id_2=grouping_column_id_2,
+        **kwargs,
+    )
+    return {**result, "withheld_rating_variables": withheld}
 
 
 @router.post(
@@ -44,9 +74,12 @@ async def group_comparison(
     body: GroupComparisonRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Compute group comparisons for selected variables against a demographic grouping."""
     _get_project_or_404(db, project_id, user.id)
+    withholding = rating_withholding(db, project_id, parse_int_list(coder_ids))
 
     if not body.column_ids and not body.domain_ids:
         raise HTTPException(status_code=400, detail="Provide column_ids or domain_ids")
@@ -54,9 +87,10 @@ async def group_comparison(
         raise HTTPException(status_code=400, detail="Provide column_ids or domain_ids, not both")
 
     try:
-        result = compute_group_comparison(
-            db=db,
-            project_id=project_id,
+        result = _comparison_without_ratings(
+            db,
+            project_id,
+            withholding,
             column_ids=body.column_ids,
             domain_ids=body.domain_ids,
             grouping_column_id=body.grouping_column_id,
@@ -207,9 +241,13 @@ async def group_comparison_csv(
     nonparametric: bool = Query(False),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Export group comparison as CSV."""
     _get_project_or_404(db, project_id, user.id)
+    scope = parse_int_list(coder_ids)
+    withholding = rating_withholding(db, project_id, scope)
 
     col_ids = _parse_ids(column_ids)
     dom_ids = _parse_ids(domain_ids)
@@ -219,8 +257,8 @@ async def group_comparison_csv(
     excl = [g.strip() for g in exclude_groups.split(',') if g.strip()] if exclude_groups else []
 
     try:
-        result = compute_group_comparison(
-            db=db, project_id=project_id,
+        result = _comparison_without_ratings(
+            db, project_id, withholding,
             column_ids=col_ids, domain_ids=dom_ids,
             grouping_column_id=grouping_column_id,
             grouping_column_id_2=grouping_column_id_2,
@@ -256,6 +294,12 @@ async def group_comparison_csv(
     # the file without a word.
     if excl:
         writer.writerow([csv_safe(f"Scope: groups excluded: {', '.join(excl)}")])
+    if result.get("withheld_rating_variables"):
+        # #1615: the variables left out while blind, in the file's own Scope line.
+        writer.writerow([csv_safe(
+            f"Scope: {result['withheld_rating_variables']} rating variable(s) left out. "
+            f"{RATING_COLUMNS_WITHHELD_NOTE}"
+        )])
     writer.writerow([csv_safe(
         "Significance: * p < .05, ** p < .01, *** p < .001 "
         "(full ladder; the screen's display settings are not applied)"
@@ -325,7 +369,10 @@ async def group_comparison_csv(
     group_label = result.get("group_column_label", "comparison")
     # #389: sanitize the user-controlled group label (strips control chars /
     # quotes / anything outside \w-. ) before it lands in the header.
-    filename = f"group_comparison_{sanitize_content_disposition(group_label)}.csv"
+    filename = (
+        f"group_comparison_{sanitize_content_disposition(group_label)}"
+        f"{coder_scope_filename_suffix(db, scope)}.csv"   # #1615, #1530 D97
+    )
 
     return StreamingResponse(
         iter([output.getvalue()]),

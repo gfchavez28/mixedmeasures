@@ -1,7 +1,9 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
+const os = require('node:os')
 const path = require('node:path')
+const { spawnSync } = require('node:child_process')
 
 // Two ways the packaging config breaks with every gate green. Both are release-time
 // failures — they surface on the tool that BUILDS and SIGNS, in the middle of a cut.
@@ -243,4 +245,222 @@ test('release.yml uses the timestamp keys electron-builder 26 actually reads', (
     /--config\.win\.azureSignOptions\.Timestamp(Rfc3161|Digest)=/,
     'the capitalised v25 spelling lands in extraSigningArgs and is then overwritten by v26 defaults'
   )
+})
+
+// --- #1610: the two aggregating mac steps run every check under GitHub's own invocation ------
+//
+// GitHub runs `shell: bash` (the package job's default) as `bash --noprofile --norc -eo pipefail`,
+// and `set -uo pipefail` does not clear the -e. So a step that says "NOT -e: run every check,
+// aggregate, decide at the end" exited at its first failed check, before printing it: on the
+// unsigned path with nothing after the header line, on the signed path without the failing
+// check's output. Both steps now turn errexit off first. The Gatekeeper step is RUN here, the way
+// GitHub runs it, with stand-in tools; the update-zip step (ditto, plutil, zip, gh) is held by the
+// static check only. Not a skip when bash is missing: a skip is green.
+
+/** Every step of a workflow text, as { name, body } — `body` is the `run: |` block, de-indented. */
+function workflowSteps(text) {
+  return text.split('\n      - name: ').slice(1).map((chunk) => {
+    const lines = chunk.split('\n')
+    const name = lines[0].trim()
+    const at = lines.findIndex((l) => /^\s+run: \|\s*$/.test(l))
+    if (at === -1) return { name, body: null }
+    const first = lines.slice(at + 1).find((l) => l.trim() !== '')
+    const indent = first.match(/^\s*/)[0]
+    const body = []
+    for (const l of lines.slice(at + 1)) {
+      if (l.trim() === '') body.push('')
+      else if (l.startsWith(indent)) body.push(l.slice(indent.length))
+      else break
+    }
+    return { name, body: body.join('\n') }
+  })
+}
+
+/** The steps that promise "NOT -e", and those of them whose first command does not turn errexit off. */
+function errexitPromises(text) {
+  const named = workflowSteps(text).filter((s) => s.body?.includes('NOT -e'))
+  const broken = named.filter((s) => {
+    const firstCommand = s.body.split('\n').find((l) => l.trim() !== '' && !/^\s*#/.test(l))
+    return firstCommand?.trim() !== 'set +e'
+  })
+  return { named: named.map((s) => s.name), broken: broken.map((s) => s.name) }
+}
+
+const GATEKEEPER_STEP = 'Verify — codesign + notarization + Gatekeeper (macOS)'
+const UPDATE_ZIP_STEP = 'Verify — the update zip unpacks to the built app, as Squirrel.Mac unpacks it (macOS)'
+
+/**
+ * Run a step body as GitHub runs it, in a scratch folder holding release/Mixed Measures.app and
+ * .dmg, with stand-in codesign, spctl and stapler (scripts/stapler.js, through a stand-in node).
+ * stdout and stderr share one file, so the lines keep the order the step printed them in.
+ */
+function runMacStep(body, env) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-1610-'))
+  try {
+    const bin = path.join(dir, 'bin')
+    fs.mkdirSync(path.join(dir, 'release', 'Mixed Measures.app'), { recursive: true })
+    fs.writeFileSync(path.join(dir, 'release', 'Mixed Measures.dmg'), '')
+    fs.mkdirSync(bin)
+    const tool = (name, script) => fs.writeFileSync(path.join(bin, name), `#!/bin/bash\n${script}\n`, { mode: 0o755 })
+    tool('codesign', [
+      'case "$1" in',
+      '  --verify) if [ -n "${UNSIGNED:-}" ]; then echo "stand-in codesign --verify: not signed" >&2; exit 1; fi ;;',
+      '  --display) if [ -n "${UNSIGNED:-}" ]; then echo "stand-in codesign --display: not signed" >&2; exit 1; fi',
+      '    echo "Executable=/stand-in" >&2',
+      '    printf "Authority=%s\\n" "${AUTH1:-Developer ID Application: Stand-in (TEAM)}" "${AUTH2:-Developer ID Certification Authority}" "Apple Root CA" >&2',
+      '    echo "TeamIdentifier=TEAM" >&2 ;;',
+      '  *) echo "stand-in codesign: unexpected $*" >&2; exit 99 ;;',
+      'esac',
+    ].join('\n'))
+    tool('spctl', 'if [ -n "${FAIL_SPCTL:-}" ]; then echo "stand-in spctl: rejected"; exit 3; fi')
+    tool('node', [
+      'if [ "$1" = "scripts/stapler.js" ]; then',
+      '  if [ -n "${FAIL_STAPLER:-}" ]; then echo "stand-in stapler: no ticket for $3"; exit 65; fi',
+      '  echo "stand-in stapler: $3 validated"; exit 0',
+      'fi',
+      `exec ${JSON.stringify(process.execPath)} "$@"`,
+    ].join('\n'))
+    const script = path.join(dir, 'step.sh')
+    fs.writeFileSync(script, body)
+    const outFile = path.join(dir, 'out.txt')
+    const fd = fs.openSync(outFile, 'w')
+    let r
+    try {
+      r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', script], {
+        cwd: dir,
+        stdio: ['ignore', fd, fd],
+        env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, ...env },
+        timeout: 30_000,
+      })
+    } finally {
+      fs.closeSync(fd)
+    }
+    assert.ifError(r.error) // no bash → this FAILS, with the reason; it never skips
+    return { status: r.status, lines: fs.readFileSync(outFile, 'utf8').trimEnd().split('\n') }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+const UNSIGNED_NOTE = '  — expected on the unsigned path (no signing creds)'
+const MUST_PASS = '  (signed build MUST pass)'
+const header = (signed) => `app: release/Mixed Measures.app   dmg: release/Mixed Measures.dmg   signed=${signed}`
+
+test('the Gatekeeper step runs every check and prints each failure, under GitHub\'s `bash -eo pipefail` (#1610)', () => {
+  const body = workflowSteps(releaseYml).find((s) => s.name === GATEKEEPER_STEP)?.body
+  assert.ok(body, `release.yml has no step "${GATEKEEPER_STEP}"`)
+  const app = 'release/Mixed Measures.app'
+  const dmg = 'release/Mixed Measures.dmg'
+  for (const { scenario, env, status, lines } of [
+    {
+      scenario: 'unsigned, every check fails — each prints, warns, and the gate is informational',
+      env: { SIGNED: 'false', UNSIGNED: '1', FAIL_SPCTL: '1', FAIL_STAPLER: '1' },
+      status: 0,
+      lines: [
+        header('false'),
+        'stand-in codesign --verify: not signed',
+        `⚠️  codesign --verify --deep --strict${UNSIGNED_NOTE}`,
+        'stand-in codesign --display: not signed',
+        `⚠️  signature is Developer ID Application${UNSIGNED_NOTE}`,
+        'stand-in spctl: rejected',
+        `⚠️  spctl Gatekeeper assess (execute)${UNSIGNED_NOTE}`,
+        `stand-in stapler: no ticket for ${app}`,
+        `⚠️  stapler validate (.app notarization)${UNSIGNED_NOTE}`,
+        `stand-in stapler: no ticket for ${dmg}`,
+        `⚠️  stapler validate (.dmg)${UNSIGNED_NOTE}`,
+        'GATEKEEPER GATE: ✅ PASS (unsigned — informational)',
+      ],
+    },
+    {
+      scenario: 'signed, only spctl fails — its output and verdict print, the ticket checks still run',
+      env: { SIGNED: 'true', FAIL_SPCTL: '1' },
+      status: 1,
+      lines: [
+        header('true'),
+        '✅ codesign --verify --deep --strict',
+        '✅ signature is Developer ID Application',
+        'stand-in spctl: rejected',
+        `❌ spctl Gatekeeper assess (execute)${MUST_PASS}`,
+        `stand-in stapler: ${app} validated`,
+        '✅ stapler validate (.app notarization)',
+        `stand-in stapler: ${dmg} validated`,
+        '✅ stapler validate (.dmg)',
+        'GATEKEEPER GATE: ❌ FAIL',
+      ],
+    },
+    {
+      scenario: 'signed with a certificate that is not Developer ID — the check prints the signature\'s authorities',
+      env: { SIGNED: 'true', AUTH1: 'Apple Development: Stand-in (TEAM)', AUTH2: 'Apple Worldwide Developer Relations Certification Authority' },
+      status: 1,
+      lines: [
+        header('true'),
+        '✅ codesign --verify --deep --strict',
+        'Authority=Apple Development: Stand-in (TEAM)',
+        'Authority=Apple Worldwide Developer Relations Certification Authority',
+        'Authority=Apple Root CA',
+        `❌ signature is Developer ID Application${MUST_PASS}`,
+        '✅ spctl Gatekeeper assess (execute)',
+        `stand-in stapler: ${app} validated`,
+        '✅ stapler validate (.app notarization)',
+        `stand-in stapler: ${dmg} validated`,
+        '✅ stapler validate (.dmg)',
+        'GATEKEEPER GATE: ❌ FAIL',
+      ],
+    },
+    {
+      scenario: 'signed, everything passes — quiet checks, the enforced pass',
+      env: { SIGNED: 'true' },
+      status: 0,
+      lines: [
+        header('true'),
+        '✅ codesign --verify --deep --strict',
+        '✅ signature is Developer ID Application',
+        '✅ spctl Gatekeeper assess (execute)',
+        `stand-in stapler: ${app} validated`,
+        '✅ stapler validate (.app notarization)',
+        `stand-in stapler: ${dmg} validated`,
+        '✅ stapler validate (.dmg)',
+        'GATEKEEPER GATE: ✅ PASS (signed — enforced)',
+      ],
+    },
+  ]) {
+    const got = runMacStep(body, env)
+    assert.deepEqual(got.lines, lines, scenario)
+    assert.equal(got.status, status, `${scenario}: exit code`)
+  }
+})
+
+test('control: without `set +e` the same harness reproduces #1610 — the step exits before its second verdict', () => {
+  // Proof the harness above can fail: the defect it guards against must reproduce in it.
+  const body = workflowSteps(releaseYml).find((s) => s.name === GATEKEEPER_STEP)?.body
+  assert.ok(body, `release.yml has no step "${GATEKEEPER_STEP}"`)
+  const withoutFix = body.replace(/^set \+e\n/m, '')
+  assert.notEqual(withoutFix, body, 'the Gatekeeper step has no `set +e` line to remove')
+  const got = runMacStep(withoutFix, { SIGNED: 'false', UNSIGNED: '1', FAIL_SPCTL: '1', FAIL_STAPLER: '1' })
+  const verdicts = got.lines.filter((l) => /^(✅|⚠️|❌) /.test(l))
+  assert.notEqual(got.status, 0, 'without `set +e` the unsigned path should exit non-zero under -e')
+  assert.ok(verdicts.length < 2, `without \`set +e\` the step still reached ${verdicts.length} verdicts: ${got.lines.join(' | ')}`)
+  assert.ok(!got.lines.some((l) => l.startsWith('GATEKEEPER GATE:')), 'without `set +e` the step still reached its summary')
+})
+
+test('every release.yml step that says "NOT -e" turns errexit off before its first command (#1610)', () => {
+  const { named, broken } = errexitPromises(releaseYml)
+  // Population: the Gatekeeper and update-zip steps both promise it, so a rename or a
+  // reformat that hides them from the scan cannot pass vacuously.
+  assert.ok(named.includes(GATEKEEPER_STEP) && named.includes(UPDATE_ZIP_STEP), `the scan found only: ${named.join('; ')}`)
+  assert.ok(named.length >= 2)
+  assert.deepEqual(broken, [], 'these steps keep GitHub\'s -e: put `set +e` first')
+  // Falsifier: remove each `set +e` line in turn, and the scan must name exactly its step.
+  const lines = releaseYml.split('\n')
+  const at = lines.flatMap((l, i) => (/^\s+set \+e$/.test(l) ? [i] : []))
+  assert.ok(at.length >= 2, `release.yml has ${at.length} \`set +e\` lines`)
+  const seen = []
+  for (const i of at) {
+    const without = [...lines.slice(0, i), ...lines.slice(i + 1)].join('\n')
+    const { broken: b } = errexitPromises(without)
+    // A `set +e` in a step that promises nothing breaks nothing; one in a promising step, exactly it.
+    assert.ok(b.length <= 1, `removing line ${i + 1} broke more than one step: ${b.join('; ')}`)
+    seen.push(...b)
+  }
+  assert.deepEqual(seen.sort(), [...named].sort(), 'each promising step is caught when its own `set +e` goes')
 })

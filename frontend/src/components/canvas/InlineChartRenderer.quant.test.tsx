@@ -28,6 +28,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import InlineChartRenderer from './InlineChartRenderer'
 
+// #1615 — the quantitative reads take the blind scope from this hook; every coder here.
+vi.mock('@/hooks/useAnalysisScope', () => ({ useAnalysisScope: () => ({ coderIds: null, coderScope: undefined, scopeKey: 'every-coder', scopeReady: true }) }))
 vi.mock('@/lib/api', () => ({
   metricsApi: { quickCompute: vi.fn(), crossTabulation: vi.fn() },
   comparisonsApi: { groupComparison: vi.fn() },

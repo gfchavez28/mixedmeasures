@@ -3,9 +3,9 @@
 
 Build one SQLite DB by running the full `alembic upgrade head` chain and another by
 `Base.metadata.create_all()` from the ORM models, then diff their *structure* —
-tables, columns, indexes (including UNIQUE + partial `WHERE`), and CHECK-constraint
-text. The accepted gate is **zero structural diff**: the models and the migrations
-must describe the same schema.
+tables, columns, indexes (including UNIQUE + partial `WHERE`), CHECK-constraint
+text, and whether a table is AUTOINCREMENT (#1639). The accepted gate is **zero
+structural diff**: the models and the migrations must describe the same schema.
 
 Why it exists: the test suite builds its schema via `create_all()` (tests/conftest.py),
 so it never exercises the migration path — green tests are necessary but not
@@ -149,6 +149,11 @@ def introspect(db_path: Path) -> dict:
         tables[name] = {
             "columns": columns,
             "checks": _extract_checks(r["sql"]),
+            # #1639 (r2-1): PRAGMA does not surface AUTOINCREMENT either, and SQLAlchemy does
+            # not reflect it — so a later batch rebuild that forgets `sqlite_autoincrement`
+            # returns a table to reusing ids with nothing else looking wrong.
+            "autoincrement": bool(
+                re.search(r"\bAUTOINCREMENT\b", r["sql"] or "", flags=re.IGNORECASE)),
         }
 
     # Index signatures — name-agnostic, so a dropped partial WHERE or a lost
@@ -228,6 +233,11 @@ def diff_schemas(alembic: dict, models: dict) -> list[str]:
                     out.append(
                         f"[{t}.{col}] {attr}: alembic={av!r} models={bv!r}"
                     )
+        if a_tables[t]["autoincrement"] != b_tables[t]["autoincrement"]:
+            out.append(
+                f"[{t}] AUTOINCREMENT: alembic={a_tables[t]['autoincrement']!r} "
+                f"models={b_tables[t]['autoincrement']!r}"
+            )
         a_checks, b_checks = a_tables[t]["checks"], b_tables[t]["checks"]
         for ck in sorted(set(a_checks) - set(b_checks)):
             out.append(f"[{t}] CHECK only in alembic-chain: {ck}")

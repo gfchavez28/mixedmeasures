@@ -2656,6 +2656,8 @@ export default function ObservationWorkbench() {
                           codeMap={codeMap}
                           allCodes={codes}
                           codesStatus={codesLoad.status}
+                          // #1592: a remove only on the active coder's own chip.
+                          viewer={{ coderId: user?.id ?? null }}
                           onCodeChange={invalidateAfterCodeChange}
                           onFocusCode={handleFocusCode}
                           appliedCodeDetails={clip.applied_code_details}

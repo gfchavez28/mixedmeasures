@@ -43,7 +43,7 @@ const CODES = [
 const focal = (id: number, text: string) => ({
   id, sequence_order: id, speaker_name: 'P1', speaker_color_index: 0, speaker_color: null,
   is_facilitator: false, text, start_time: null, end_time: null, is_quoted: false, quote_ranges: [],
-  applied_code_ids: [10], preceding_context: [], following_context: [],
+  applied_code_ids: [10], applied_code_details: [{ code_id: 10, user_id: 1 }], preceding_context: [], following_context: [],
   participant_id: null, participant_name: null,
 })
 
@@ -75,6 +75,7 @@ function renderTab() {
     <QueryClientProvider client={qc}>
       <MemoryRouter>
         <ContentByCode
+          viewerId={1}
           projectId={1} codes={CODES} codesStatus={'ready' as ListStatus} frequencies={[]}
           selectedContentCodeId={10} onCodeSelect={() => {}} filterParams={{ source: 'all' }}
           source="all" hasConversations hasCommentColumns={false} hasDocuments hasObservations={false}

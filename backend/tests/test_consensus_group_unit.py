@@ -279,7 +279,7 @@ def test_the_sweep_recomputes_a_group_once_per_batch(db_session, monkeypatch):
 
 def _keys(db, *, group_units, min_voters, scope=SEGMENT_SCOPE_CONSENSUS_ELIGIBLE):
     votes = gather_target_votes(db, PID, segment_scope=scope, min_voters=min_voters,
-                                group_units=group_units)
+                                group_units=group_units, coder_ids=None)
     return [(b.kind, b.target_id) for b in votes.ballots()]
 
 
@@ -314,7 +314,7 @@ def test_a_group_ballot_has_no_single_target(db_session):
     _world(db)
     _apply(db, X, A, 1); _apply(db, X, B, 2)
     votes = gather_target_votes(db, PID, segment_scope=SEGMENT_SCOPE_CONSENSUS_ELIGIBLE,
-                                min_voters=1, group_units=True)
+                                min_voters=1, group_units=True, coder_ids=None)
     (ballot,) = list(votes.ballots())
     assert ballot.per_coder == {A: {X}, B: {X}}
     with pytest.raises(KeyError):
@@ -330,7 +330,7 @@ def test_group_units_has_no_default_and_refuses_nonsense(db_session):
     for bad in (None, 1, 0, "yes"):
         with pytest.raises(ValueError, match="group_units"):
             gather_target_votes(db_session, 1, segment_scope="project", min_voters=1,
-                                group_units=bad)
+                                group_units=bad, coder_ids=None)
 
 
 # ── D34 — the doors that change a group's consensus ──────────────────────────

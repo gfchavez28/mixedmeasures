@@ -99,6 +99,10 @@ class Excerpt(Base):
               unique=True, sqlite_where=text('segment_id IS NOT NULL AND start_offset IS NOT NULL')),
         Index('ix_excerpt_segment_time_range', 'segment_id', 'start_time', 'end_time',
               unique=True, sqlite_where=text('segment_id IS NOT NULL AND start_time IS NOT NULL')),
+        # #1639 (r2-1): a deleted row's id is never handed to the next row — a joint
+        # display (and every other stored reference) names rows by id with no FK.
+        # Migration `c3a7e1f9b5d8` makes the same table; `schema_diff_harness` compares.
+        {"sqlite_autoincrement": True},
     )
 
 
@@ -176,13 +180,22 @@ def excerpt_source_pair(excerpt) -> tuple[str, str]:
         dv = excerpt.dataset_value
         col = dv.column
         ds = col.dataset if col is not None else None
-        name = " › ".join(p for p in (
+        return "text", answer_source_name(
             ds.name if ds is not None else None,
             (col.column_name or col.column_text) if col is not None else None,
-        ) if p)
-        return "text", name
+        )
     # ck_excerpt_exactly_one_target forbids reaching here.
     return "", ""  # pragma: no cover - defensive
+
+
+def answer_source_name(dataset_name: str | None, column_name: str | None) -> str:
+    """An answer's source as every surface names it — "Dataset › Column".
+
+    Joint display slice 2 (r4-3): extracted so the pin picker's line for a suggested answer
+    and the quote's own `source_name` (which becomes the pin's `sourceContext` and its
+    attribution's source) cannot name one answer two ways.
+    """
+    return " › ".join(p for p in (dataset_name, column_name) if p)
 
 
 # ── Text resolution (#1316) ──────────────────────────────────────────────────

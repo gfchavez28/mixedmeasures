@@ -160,16 +160,43 @@ class TestDegenerate:
 
 
 class TestSingletonGroups:
-    def test_a_group_of_one_is_COUNTED_not_silently_absorbed(self):
-        """Its residual is exactly 0 by construction, not by evidence."""
-        s = qq_summary({"a": [7.0], "b": [1.0, 2.0, 3.0, 4.0]})
-        assert s["singleton_group_count"] == 1
+    """#1549 (b): the plot follows the parametric tests' groups (#1329's D51) —
+    a group of one is LEFT OUT and NAMED, never absorbed as a structural zero.
+    (Until 2026-11-12 these two tests pinned the opposite: kept in and counted,
+    when the F beside it already left the group out.)"""
 
-    def test_the_singleton_residual_is_present_rather_than_dropped(self):
-        # Dropping the group would diagnose a DIFFERENT model from the one the
-        # panel ran, so it stays in and is reported instead.
+    def test_a_group_of_one_is_NAMED_not_silently_absorbed(self):
         s = qq_summary({"a": [7.0], "b": [1.0, 2.0, 3.0, 4.0]})
-        assert s["n"] == 5
+        assert s["singleton_groups"] == ["a"]
+
+    def test_the_singleton_residual_is_left_out_as_the_tests_leave_it_out(self):
+        s = qq_summary({"a": [7.0], "b": [1.0, 2.0, 3.0, 4.0]})
+        assert s["n"] == 4  # b's four residuals; a's structural 0 is not drawn
+
+    def test_only_groups_of_one_are_left_out(self):
+        # A positive control on the boundary: two values is a testable group.
+        s = qq_summary({"a": [7.0, 9.0], "b": [1.0, 2.0, 3.0, 4.0]})
+        assert s["singleton_groups"] == [] and s["n"] == 6
+
+    def test_its_groups_are_the_parametric_tests_groups(self):
+        """The plot asks the function the F, Tukey, Welch and Levene ask, at their
+        minimum — so it cannot drift into a different model again."""
+        from app.services.testable_groups import (
+            MIN_VALUES_PER_GROUP_PARAMETRIC, split_testable,
+        )
+
+        grouped = {"a": [7.0], "b": [1.0, 2.0, 3.0, 4.0], "c": [], "d": [5.0, 8.0, 13.0]}
+        tested, left_out = split_testable(grouped, list(grouped), MIN_VALUES_PER_GROUP_PARAMETRIC)
+        s = qq_summary(grouped)
+        assert s["singleton_groups"] == left_out == ["a"]
+        assert s["n"] == sum(len(grouped[g]) for g in tested) == 7
+
+    def test_every_group_of_one_is_too_few_not_empty(self):
+        # Values were there; there was not enough of them. "Empty" would blame the data.
+        s = qq_summary({"a": [1.0], "b": [2.0], "c": [3.0]})
+        assert s["undefined_reason"] == "insufficient_n"
+        assert s["singleton_groups"] == ["a", "b", "c"]
+    # The comparison row (the pipeline's mouth): `test_qq_follows_the_tests_1549.py`.
 
 
 class TestWiredIntoTheComparisonPipeline:

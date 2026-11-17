@@ -162,7 +162,9 @@ from ..services.participant_dataset import (
     get_participant_dataset,
     managed_dataset_refusal,
 )
+from ..services.rating_withholding import rating_withholding  # #1615
 from ..services.participant_scores import (
+    withheld_rating_column_ids,
     PARTICIPANT_TABLE_BUSY_MESSAGE,
     ParticipantTableBusy,
     parse_managed_spec,
@@ -184,6 +186,7 @@ from ..services.computed_columns import (
     evaluate_computed_column,
 )
 from ..services.audit import log_action
+from ..services.deleted_source_audit import strip_deleted_answer_words
 from ..services.participant_linking import (
     LINK_STOPPED_ERROR,
     LINK_WRITE_BATCH,
@@ -203,7 +206,10 @@ router = APIRouter(
 )
 
 
-from .helpers import _get_project_or_404, _get_dataset_or_404, read_upload_with_limit, validate_encoding
+from .helpers import (
+    _get_project_or_404, _get_dataset_or_404, parse_int_list, read_upload_with_limit,
+    validate_encoding,
+)
 
 
 def _safe_json_loads(text: str | None, fallback=None):
@@ -1410,6 +1416,8 @@ async def delete_dataset(
         .all()
     ]
     delete_column_references(db, project_id, column_ids, validate_domains=True)
+    # #1546 (D157) — its answers' edit wording leaves the audit trail with them.
+    strip_deleted_answer_words(db, project_id, dataset_id=dataset.id)
 
     log_action(
         db,
@@ -1455,6 +1463,8 @@ async def delete_row(
         .all()
     ]
 
+    # #1546 (D157) — its answers' edit wording leaves the audit trail with them.
+    strip_deleted_answer_words(db, project_id, row_ids=[row.id])
     db.delete(row)
     db.flush()
 
@@ -1588,6 +1598,8 @@ async def get_dataset_data(
     offset: Annotated[int, Query(ge=0)] = 0,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1608 — bare default, LAST (direct-call tests); the grid sends it while blind.
+    coder_ids: str | None = None,
 ):
     """One PAGE of dataset data as a spreadsheet-like grid (#800).
 
@@ -1607,8 +1619,15 @@ async def get_dataset_data(
     linked on another page — refused by ``uq_dataset_rows_dataset_participant``,
     so a 409 rather than corruption, but an offer we should never have made. It
     is bounded by the number of LINKED participants, not by row count.
+
+    🔴 **#1608 — while blind, the participant table's rating columns are left out.**
+    They are one shared snapshot of every coder's ratings, so a viewer scoped to
+    ``coder_ids`` gets neither their headers nor their cells, and
+    ``withheld_rating_columns`` says how many (the grid says why). The rule:
+    `participant_scores.withheld_rating_column_ids`.
     """
     ds = _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    withheld = withheld_rating_column_ids(db, ds, parse_int_list(coder_ids))
 
     # Columns ordered by sequence, with recode definitions and equivalence group eager-loaded
     columns = (
@@ -1624,6 +1643,7 @@ async def get_dataset_data(
         )
         .all()
     )
+    columns = [c for c in columns if c.id not in withheld]  # #1608
 
     # The dataset's TOTAL row count — the page below cannot supply it.
     total_rows = (
@@ -1676,6 +1696,8 @@ async def get_dataset_data(
     for row in rows:
         values_dict: dict[str, DatasetValueCell] = {}
         for val in row.values:
+            if val.column_id in withheld:  # #1608 — never a withheld column's cell
+                continue
             values_dict[str(val.column_id)] = DatasetValueCell(
                 id=val.id,
                 value_text=val.value_text,
@@ -1718,6 +1740,7 @@ async def get_dataset_data(
         offset=offset,
         limit=limit,
         linked_participants=linked_participants,
+        withheld_rating_columns=len(withheld),
     )
 
 
@@ -2806,6 +2829,8 @@ async def delete_manual_column(
     # `_cascade_delete_column_refs`; the third caller is what made the duplicate
     # worth collapsing rather than extending.
     _cascade_delete_column_refs(db, project_id, column_id)
+    # #1546 (D157) — its answers' edit wording leaves the audit trail with them.
+    strip_deleted_answer_words(db, project_id, column_id=column_id)
 
     log_action(
         db,
@@ -2855,8 +2880,13 @@ async def get_domain_scores(
     dataset_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
-    """Return per-row domain aggregate scores for this dataset's domains."""
+    """Return per-row domain aggregate scores for this dataset's domains.
+
+    #1615: while blind, a variable group holding a participant rating score is left
+    out (each row's scale score averages every coder's ratings) and counted."""
     _get_project_or_404(db, project_id, user.id)
     _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
@@ -2868,9 +2898,11 @@ async def get_domain_scores(
         .distinct()
         .all()
     )
-    domain_ids = [r[0] for r in domain_ids_in_dataset]
+    domain_ids, withheld = rating_withholding(
+        db, project_id, parse_int_list(coder_ids)).split_domains(
+        db, [r[0] for r in domain_ids_in_dataset])
     if not domain_ids:
-        return {"domain_scores": []}
+        return {"domain_scores": [], "withheld_rating_variables": withheld}
 
     # Load domain metadata
     domains = (
@@ -2907,7 +2939,7 @@ async def get_domain_scores(
         scale_score_metrics(db, project_id, domain_ids).values(), key=lambda m: m.id,
     )
     if not metrics:
-        return {"domain_scores": []}
+        return {"domain_scores": [], "withheld_rating_variables": withheld}
 
     metric_ids = [m.id for m in metrics]
 
@@ -2948,7 +2980,7 @@ async def get_domain_scores(
             "scores": {str(k): v for k, v in score_pivot.get(m.id, {}).items()},
         })
 
-    return {"domain_scores": result}
+    return {"domain_scores": result, "withheld_rating_variables": withheld}
 
 
 @router.post("/{dataset_id}/columns/computed/preview")
@@ -2958,10 +2990,17 @@ async def preview_computed_column(
     req: ComputedColumnCreate,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST; the computed-column dialog sends it while blind.
+    coder_ids: str | None = None,
 ):
-    """Validate an expression and return a preview of first 5 rows without persisting."""
+    """Validate an expression and return a preview of first 5 rows without persisting.
+
+    🔴 #1615: a preview prints its source cells and its result, so an expression over a
+    column `withheld_rating_column_ids` withholds under ``coder_ids`` is still CHECKED
+    (valid, error, warnings, the R form) but sends no rows, and says why
+    (``values_withheld_while_blind``) — the Data view's rule (D198)."""
     _get_project_or_404(db, project_id, user.id)
-    _get_dataset_or_404(db, project_id, dataset_id, user.id)
+    dataset = _get_dataset_or_404(db, project_id, dataset_id, user.id)
 
     try:
         ast = parse_expression(req.expression)
@@ -2985,8 +3024,14 @@ async def preview_computed_column(
 
     from ..services.computed_columns import evaluate as eval_expr
 
+    # #1615 — the check above names no value; the rows below print them.
+    values_withheld = bool(
+        set(result.dependency_ids)
+        & withheld_rating_column_ids(db, dataset, parse_int_list(coder_ids))
+    )
+
     # Load first 5 rows
-    first_rows = (
+    first_rows = [] if values_withheld else (
         db.query(DatasetRow.id)
         .filter(DatasetRow.dataset_id == dataset_id)
         .order_by(DatasetRow.id)
@@ -3061,6 +3106,7 @@ async def preview_computed_column(
         "warnings": result.warnings,
         "preview_rows": preview_rows,
         "r_expression": r_code,
+        "values_withheld_while_blind": values_withheld,  # #1615
     }
 
 
@@ -3312,6 +3358,9 @@ async def delete_computed_column(
         )
 
     _cascade_delete_column_refs(db, project_id, column_id)
+    # #1546 (D157) — every door that deletes answers asks, even one whose cells no
+    # researcher edits by hand: an entry under a REUSED id is still someone's words.
+    strip_deleted_answer_words(db, project_id, column_id=column_id)
 
     log_action(
         db,

@@ -2,15 +2,17 @@ import type { ComparisonRow } from '@/lib/api'
 import { formatPValue, getSignificanceStars } from '@/lib/chart-data'
 import { pMethodShort } from '@/lib/p-method'
 import { untestedGroupsNote } from '@/lib/untested-groups'
+import { effectSizeText, testStatisticText } from '@/lib/group-comparison-display'
 import AssumptionNote from './AssumptionNote'
 
 interface ComparisonTestStripProps {
   rows: ComparisonRow[]
   sigLevels: { show_05: boolean; show_01: boolean; show_001: boolean }
-  nonparametric?: boolean
 }
 
-export default function ComparisonTestStrip({ rows, sigLevels, nonparametric }: ComparisonTestStripProps) {
+// #1424 D264: no `nonparametric` prop. It gated the interval, which now follows the
+// displayed number itself, and a prop that looks as if it controls the strip is a trap.
+export default function ComparisonTestStrip({ rows, sigLevels }: ComparisonTestStripProps) {
   const testRows = rows.filter(r => r.test)
   if (testRows.length === 0) return null
 
@@ -19,40 +21,13 @@ export default function ComparisonTestStrip({ rows, sigLevels, nonparametric }: 
       {testRows.map(row => {
         const t = row.test!
         const stars = getSignificanceStars(t.p, sigLevels)
-
-        let statLabel: string
-        let esLabel: string
-        let esValue: string
-        // The qualitative word must describe the number actually rendered.
-        let esWord: string | null = t.effect_size_label
-
-        if (t.test_type === 'mann_whitney_u') {
-          statLabel = `U`
-          esLabel = 'r'
-          esValue = t.effect_size.toFixed(2)
-        } else if (t.test_type === 'kruskal_wallis') {
-          statLabel = `H(${t.df.toFixed(0)})`
-          esLabel = '\u03B5\u00B2'
-          esValue = t.effect_size.toFixed(2)
-        } else if (t.test_type === 'one_way_anova') {
-          statLabel = `F(${t.df.toFixed(0)}${t.df2 != null ? ', ' + t.df2.toFixed(0) : ''})`
-          esLabel = '\u03C9\u00B2'
-          // #742: when \u03C9\u00B2 is what we show, its own label is what we say. The
-          // fallback keeps \u03B7\u00B2's label paired with \u03B7\u00B2's value, so the number and
-          // the word stay from the same statistic in both branches.
-          esValue = t.omega_squared != null ? t.omega_squared.toFixed(2) : t.effect_size.toFixed(2)
-          esWord = t.omega_squared != null ? t.omega_squared_label : t.effect_size_label
-        } else {
-          statLabel = `t(${t.df.toFixed(1)})`
-          esLabel = 'd'
-          esValue = t.effect_size.toFixed(2)
-        }
-
-        const ciStr = !nonparametric && t.effect_size_ci_lower != null && t.effect_size_ci_upper != null
-          ? ` [${t.effect_size_ci_lower.toFixed(2)}, ${t.effect_size_ci_upper.toFixed(2)}]`
-          : ''
-
-        const labelStr = esWord ? ` (${esWord})` : ''
+        // #1424 / #1423: the statistic and the effect size come from the resolvers
+        // the table and the Canvas export read (`lib/group-comparison-display.ts`).
+        // The effect size is NAMED from the wire's `effect_size_type`: this strip
+        // branched on `test_type`, an unknown test printing its number as `d`, and
+        // an ANOVA with no omega-squared printing eta-squared's number under the
+        // omega symbol. #742 holds there: the word is classified from the number
+        // shown, and the interval is that number's own (omega carries none).
         // #1326 STAT-12 (D58): the data chose this p's method.
         const method = pMethodShort(t.p_method)
         // #1329 (D51): a group shown in the chart and left out of this test.
@@ -90,11 +65,11 @@ export default function ComparisonTestStrip({ rows, sigLevels, nonparametric }: 
             >
               {row.label}
             </span>
-            <span>{statLabel} = {t.statistic.toFixed(2)}</span>
+            <span>{testStatisticText(t)}</span>
             <span className={t.p < 0.05 ? 'text-emerald-600 dark:text-emerald-400 font-medium' : ''}>
               {formatPValue(t.p)}{stars}{method && <span className="font-sans text-mm-text-faint"> ({method})</span>}
             </span>
-            <span>{esLabel} = {esValue}{ciStr}{labelStr}</span>
+            <span>{effectSizeText(t)}</span>
             {postHocNote && <span className="text-mm-text-faint">{postHocNote}</span>}
           </div>
           {untested && <p className="px-2 text-[11px] text-mm-text-muted font-sans">{untested}</p>}

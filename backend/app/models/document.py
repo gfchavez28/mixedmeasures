@@ -39,6 +39,10 @@ class Document(Base):
     participant_id = Column(Integer, ForeignKey("participants.id", ondelete="SET NULL"), nullable=True, index=True)
     # Track J · J3-2-0: stable cross-instance identity for merge matching
     uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
+    # #1639 (r2-1): a deleted row's id is never handed to the next row — a joint display
+    # (and every other stored reference) names rows by id with no FK. Migration
+    # `c3a7e1f9b5d8` makes the same table; `schema_diff_harness` compares.
+    __table_args__ = {"sqlite_autoincrement": True}
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 

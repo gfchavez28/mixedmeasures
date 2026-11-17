@@ -44,6 +44,7 @@ function renderTab(chipsFollowCoderIds: boolean) {
     <QueryClientProvider client={qc}>
       <MemoryRouter>
         <ContentByCode
+          viewerId={1}
           projectId={1} codes={CODES} codesStatus={'ready' as ListStatus} frequencies={[]}
           selectedContentCodeId={10} onCodeSelect={() => {}}
           filterParams={{ source: 'all', coder_ids: '2' }}

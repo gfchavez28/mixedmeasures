@@ -23,6 +23,8 @@ const { seen, recorder } = vi.hoisted(() => {
   })
   return { seen, recorder }
 })
+// #1615 — the quantitative reads take the blind scope from this hook; every coder here.
+vi.mock('@/hooks/useAnalysisScope', () => ({ useAnalysisScope: () => ({ coderIds: null, coderScope: undefined, scopeKey: 'every-coder', scopeReady: true }) }))
 vi.mock('@/components/charts/HorizontalBarChart', () => recorder('HorizontalBarChart'))
 vi.mock('@/components/charts/GroupedScalarBarChart', () => recorder('GroupedScalarBarChart'))
 vi.mock('@/components/charts/VerticalBarChart', () => recorder('VerticalBarChart'))

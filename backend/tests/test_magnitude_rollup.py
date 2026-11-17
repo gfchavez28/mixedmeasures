@@ -131,7 +131,7 @@ class TestTheTwoSteps:
         for coder in (1, 2):
             world["rate"](t3, world["scaled"], coder, 1.0)
 
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.target_ratings == (5.0, 2.0, 1.0)
         assert score.mean == pytest.approx(2.6667, abs=5e-4)
         assert score.mean != pytest.approx(2.4286, abs=5e-4)  # not mean-of-all
@@ -140,7 +140,7 @@ class TestTheTwoSteps:
     def test_the_score_states_its_basis(self, world):
         seg = world["turn"]()
         world["rate"](seg, world["scaled"], 1, 3.0)
-        assert _only(compute_magnitude_rollup(world["db"], 1)).basis == (
+        assert _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None)).basis == (
             MAGNITUDE_ROLLUP_BASIS_MEAN_OF_TARGET_RATINGS
         )
 
@@ -150,7 +150,7 @@ class TestTheTwoSteps:
         seg = world["turn"]()
         world["rate"](seg, world["scaled"], 1, 4.0)
         world["rate"](seg, world["scaled"], 2, 5.0)
-        assert _only(compute_magnitude_rollup(world["db"], 1)).mean == 4.5
+        assert _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None)).mean == 4.5
 
 
 class TestWhoseRatings:
@@ -160,7 +160,7 @@ class TestWhoseRatings:
         produces no scores at all."""
         seg = world["turn"]()
         world["rate"](seg, world["scaled"], 1, 4.0)
-        rollup = compute_magnitude_rollup(world["db"], 1)
+        rollup = compute_magnitude_rollup(world["db"], 1, coder_ids=None)
         assert _only(rollup).mean == 4.0
         assert rollup.excluded_ratings == {}
 
@@ -171,7 +171,7 @@ class TestWhoseRatings:
         seg = world["turn"]()
         world["rate"](seg, world["scaled"], 1, 4.0)
         world["rate"](seg, world["unscaled"], 2, None)  # coder 2 voted, chose differently
-        rollup = compute_magnitude_rollup(world["db"], 1)
+        rollup = compute_magnitude_rollup(world["db"], 1, coder_ids=None)
         assert rollup.scores == ()
         assert rollup.excluded_ratings == {EXCLUDED_NO_CODE_CONSENSUS: 1}
 
@@ -182,7 +182,7 @@ class TestWhoseRatings:
         world["rate"](seg, world["scaled"], 1, 4.0)
         world["rate"](seg, world["scaled"], 2, 2.0)
         world["rate"](seg, world["unscaled"], 3, None)
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.mean == 3.0
         assert score.n_ratings == 2
 
@@ -193,7 +193,7 @@ class TestWhoseRatings:
         world["rate"](shared, world["scaled"], 1, 2.0)
         world["rate"](shared, world["scaled"], 2, 2.0)
         world["rate"](solo, world["scaled"], 3, 5.0)
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert sorted(score.target_ratings) == [2.0, 5.0]
 
 
@@ -208,7 +208,7 @@ class TestTheNThatMustNotBeHidden:
         world["rate"](thick, world["scaled"], 1, 2.0)
         world["rate"](thick, world["scaled"], 2, 2.0)
 
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.n_targets == 2
         assert score.n_ratings == 3          # not 4 — an unrated application is not a rating
         assert score.min_raters_per_target == 1
@@ -220,14 +220,14 @@ class TestTheNThatMustNotBeHidden:
         rated, unrated = world["turn"](), world["turn"]()
         world["rate"](rated, world["scaled"], 1, 4.0)
         world["rate"](unrated, world["scaled"], 1, None)
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.mean == 4.0 and score.n_targets == 1
 
     def test_a_rating_of_zero_is_a_rating(self, world):
         """The falsy-zero class: on an interior-zero scale 0 is a real neutral."""
         seg = world["turn"]()
         world["rate"](seg, world["other_scale"], 1, 0.0)
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.mean == 0.0 and score.n_ratings == 1
 
     def test_a_flagged_target_is_counted(self, world):
@@ -238,7 +238,7 @@ class TestTheNThatMustNotBeHidden:
         world["rate"](contested, world["scaled"], 2, 5.0)
         world["rate"](agreed, world["scaled"], 1, 3.0)
         world["rate"](agreed, world["scaled"], 2, 4.0)   # one step — NOT flagged
-        assert _only(compute_magnitude_rollup(world["db"], 1)).n_flagged_targets == 1
+        assert _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None)).n_flagged_targets == 1
 
 
 class TestWhatIsExcludedAndDisclosed:
@@ -258,7 +258,7 @@ class TestWhatIsExcludedAndDisclosed:
         world["rate"](clip, world["scaled"], 1, 5.0)
         world["rate"](clip, world["scaled"], 2, 5.0)
 
-        rollup = compute_magnitude_rollup(db, 1)
+        rollup = compute_magnitude_rollup(db, 1, coder_ids=None)
         assert rollup.scores == ()
         assert rollup.excluded_ratings == {UNRESOLVED_OBSERVATION_CLIP: 2}
 
@@ -268,7 +268,7 @@ class TestWhatIsExcludedAndDisclosed:
         person on their own prompts is not the measure."""
         seg = world["turn"](facilitator_turn=True)
         world["rate"](seg, world["scaled"], 1, 5.0)
-        rollup = compute_magnitude_rollup(world["db"], 1)
+        rollup = compute_magnitude_rollup(world["db"], 1, coder_ids=None)
         assert rollup.scores == ()
         assert rollup.excluded_ratings == {EXCLUDED_FACILITATOR_TURN: 1}
 
@@ -279,7 +279,7 @@ class TestWhatIsExcludedAndDisclosed:
         restores the score."""
         seg = world["turn"]()
         world["rate"](seg, world["unscaled"], 1, 3.0)
-        rollup = compute_magnitude_rollup(world["db"], 1)
+        rollup = compute_magnitude_rollup(world["db"], 1, coder_ids=None)
         assert rollup.scores == ()
         assert rollup.excluded_ratings == {EXCLUDED_NO_DECLARED_SCALE: 1}
 
@@ -295,7 +295,7 @@ class TestWhatIsExcludedAndDisclosed:
         db.add(seg)
         db.flush()
         world["rate"](seg, world["scaled"], 1, 4.0)
-        rollup = compute_magnitude_rollup(db, 1)
+        rollup = compute_magnitude_rollup(db, 1, coder_ids=None)
         assert rollup.excluded_ratings == {"speaker_unlinked": 1}
 
     def test_a_merged_away_segments_rating_never_enters(self, world):
@@ -307,7 +307,7 @@ class TestWhatIsExcludedAndDisclosed:
         world["rate"](merged, world["scaled"], 1, 5.0)
         merged.merged_into_id = kept.id
         world["db"].flush()
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.target_ratings == (2.0,)
         assert score.n_targets == 1
 
@@ -317,7 +317,7 @@ class TestWhatIsExcludedAndDisclosed:
         seg = world["turn"]()
         world["rate"](seg, world["scaled"], 1, 4.0)
         world["rate"](seg, world["universal"], 2, None)
-        rollup = compute_magnitude_rollup(world["db"], 1)
+        rollup = compute_magnitude_rollup(world["db"], 1, coder_ids=None)
         assert _only(rollup).mean == 4.0        # coder 2 never voted → sole voter
         assert rollup.excluded_ratings == {}
 
@@ -342,7 +342,7 @@ class TestTheIntervalOverPassages:
         for coder in (1, 2):
             world["rate"](t3, world["scaled"], coder, 1.0)
 
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.ci_method == CI_METHOD_PASSAGE_LEVEL_T
         assert score.ci_level == 0.95
         assert score.ci_unavailable_reason is None
@@ -361,7 +361,7 @@ class TestTheIntervalOverPassages:
             world["rate"](seg, world["scaled"], 1, pair[0])
             world["rate"](seg, world["scaled"], 2, pair[1])
 
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.target_ratings == (3.0, 3.0, 3.0)
         assert score.target_sd == 0.0
         assert (score.ci_lower, score.ci_upper) == (3.0, 3.0)
@@ -374,7 +374,7 @@ class TestTheIntervalOverPassages:
         for value in (2.0, 4.0):
             world["rate"](world["turn"](), world["scaled"], 1, value)
 
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.n_targets == 2
         assert score.target_sd == pytest.approx(1.4142, abs=5e-4)
         assert (score.ci_lower, score.ci_upper) == (None, None)
@@ -384,7 +384,7 @@ class TestTheIntervalOverPassages:
 
     def test_one_passage_has_no_sd_and_no_interval(self, world):
         world["rate"](world["turn"](), world["scaled"], 1, 4.0)
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.target_sd is None
         assert (score.ci_lower, score.ci_upper) == (None, None)
         assert score.ci_unavailable_reason == CI_UNAVAILABLE_INSUFFICIENT_PASSAGES
@@ -395,7 +395,7 @@ class TestTheIntervalOverPassages:
         silently gets none (multicoder.md's one-coder question)."""
         for value in (1.0, 2.0, 3.0, 4.0):
             world["rate"](world["turn"](), world["scaled"], 1, value)
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.min_raters_per_target == 1
         assert score.ci_lower is not None and score.ci_upper is not None
         # mean 2.5, sd 1.291, se 0.6455, t(3) = 3.1824 → ±2.0542
@@ -429,7 +429,7 @@ class TestScalesAreNeverPooled:
         seg = world["turn"]()
         world["rate"](seg, world["scaled"], 1, 4.0)
         world["rate"](seg, world["other_scale"], 1, -2.0)
-        rollup = compute_magnitude_rollup(world["db"], 1)
+        rollup = compute_magnitude_rollup(world["db"], 1, coder_ids=None)
         assert len(rollup.scores) == 2
         by_code = {s.code_name: s for s in rollup.scores}
         assert by_code["Goal quality"].mean == 4.0
@@ -444,7 +444,7 @@ class TestAbsenceIsNotZero:
         participant with no coding, who is simply absent."""
         seg = world["turn"]()
         world["rate"](seg, world["scaled"], 1, None)
-        rollup = compute_magnitude_rollup(world["db"], 1)
+        rollup = compute_magnitude_rollup(world["db"], 1, coder_ids=None)
         assert rollup.scores == ()
         assert rollup.participants_coded_unrated == frozenset({world["person"].id})
 
@@ -455,7 +455,7 @@ class TestAbsenceIsNotZero:
         db.flush()
         seg = world["turn"]()
         world["rate"](seg, world["scaled"], 1, 3.0)
-        rollup = compute_magnitude_rollup(db, 1)
+        rollup = compute_magnitude_rollup(db, 1, coder_ids=None)
         assert rollup.participants_coded_unrated == frozenset()
         assert {s.participant_id for s in rollup.scores} == {world["person"].id}
 
@@ -463,7 +463,7 @@ class TestAbsenceIsNotZero:
         rated, unrated = world["turn"](), world["turn"]()
         world["rate"](rated, world["scaled"], 1, 3.0)
         world["rate"](unrated, world["scaled"], 1, None)
-        rollup = compute_magnitude_rollup(world["db"], 1)
+        rollup = compute_magnitude_rollup(world["db"], 1, coder_ids=None)
         assert rollup.participants_coded_unrated == frozenset()
 
 
@@ -483,7 +483,7 @@ class TestRoutesOtherThanSpeakers:
         world["rate"](doc_seg, world["scaled"], 1, 5.0)
         world["rate"](world["turn"](), world["scaled"], 1, 3.0)
 
-        score = _only(compute_magnitude_rollup(db, 1))
+        score = _only(compute_magnitude_rollup(db, 1, coder_ids=None))
         assert sorted(score.target_ratings) == [3.0, 5.0]
         assert score.mean == 4.0
 
@@ -500,7 +500,7 @@ class TestTheSharedGather:
     def test_an_unknown_scope_fails_closed(self, world):
         with pytest.raises(ValueError, match="unknown segment_scope"):
             gather_target_votes(world["db"], 1, segment_scope="whatever", min_voters=1,
-                                group_units=False)
+                                group_units=False, coder_ids=None)
 
     def test_the_two_scopes_differ_exactly_on_unfrozen_clips(self, world):
         """The property that makes the parameter load-bearing rather than
@@ -519,7 +519,7 @@ class TestTheSharedGather:
 
         def segments(scope):
             votes = gather_target_votes(db, 1, segment_scope=scope, min_voters=1,
-                                        group_units=False)
+                                        group_units=False, coder_ids=None)
             return {b.target_id for b in votes.ballots() if b.kind == "seg"}
 
         assert segments("consensus_eligible") == {turn.id}
@@ -576,7 +576,7 @@ class TestTheStreamedRollup:
 
         db = world["db"]
         self._mixed_world(world)
-        whole = compute_magnitude_rollup(db, 1)
+        whole = compute_magnitude_rollup(db, 1, coder_ids=None)
         # Non-vacuous: all three routes reached the score, and both kinds of
         # disclosure are present, so a dropped target in any arm would show.
         assert sorted(_only(whole).target_ratings) == [1.0, 2.0, 4.5, 5.0]
@@ -586,7 +586,7 @@ class TestTheStreamedRollup:
         for size in (1, 2, 3):
             monkeypatch.setattr(mr, "GATHER_STREAM_BATCH", size)
             monkeypatch.setattr(consensus, "GATHER_STREAM_BATCH", size)
-            assert compute_magnitude_rollup(db, 1) == whole, size
+            assert compute_magnitude_rollup(db, 1, coder_ids=None) == whole, size
 
 
 class TestTheVocabularyIsDeclared:
@@ -597,7 +597,7 @@ class TestTheVocabularyIsDeclared:
         seg = world["turn"](facilitator_turn=True)
         world["rate"](seg, world["scaled"], 1, 5.0)
         world["rate"](world["turn"](), world["unscaled"], 1, 3.0)
-        rollup = compute_magnitude_rollup(world["db"], 1)
+        rollup = compute_magnitude_rollup(world["db"], 1, coder_ids=None)
         assert rollup.excluded_ratings          # non-vacuous
         assert set(rollup.excluded_ratings) <= declared
 
@@ -635,7 +635,7 @@ class TestAGroupIsOnePassage:
         for _ in range(3):
             world["rate"](world["turn"](), world["scaled"], 1, 2.0)
 
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.n_targets == 4
         assert score.mean == pytest.approx(2.75)
         assert score.mean != pytest.approx(26 / 7, abs=1e-3)
@@ -650,7 +650,7 @@ class TestAGroupIsOnePassage:
             world["rate"](seg, world["scaled"], 1, 4.0)
         world["rate"](members[2], world["scaled"], 2, 2.0)
 
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.target_ratings == (3.0,)
         assert score.min_raters_per_target == 2
 
@@ -663,7 +663,7 @@ class TestAGroupIsOnePassage:
         world["rate"](members[1], world["scaled"], 1, 5.0)
         world["rate"](world["turn"](), world["scaled"], 1, 2.0)
 
-        rollup = compute_magnitude_rollup(world["db"], 1)
+        rollup = compute_magnitude_rollup(world["db"], 1, coder_ids=None)
         score = _only(rollup)
         assert score.target_ratings == (2.0,), "the contradictory group scores nothing"
 
@@ -676,7 +676,7 @@ class TestAGroupIsOnePassage:
         for seg in prompts + [answer]:
             world["rate"](seg, world["scaled"], 1, 4.0)
 
-        rollup = compute_magnitude_rollup(world["db"], 1)
+        rollup = compute_magnitude_rollup(world["db"], 1, coder_ids=None)
         assert _only(rollup).target_ratings == (4.0,)
         assert rollup.excluded_ratings == {EXCLUDED_FACILITATOR_TURN: 1}
 
@@ -684,7 +684,7 @@ class TestAGroupIsOnePassage:
         """CONTROL — passes before and after."""
         for value in (5.0, 2.0, 2.0):
             world["rate"](world["turn"](), world["scaled"], 1, value)
-        score = _only(compute_magnitude_rollup(world["db"], 1))
+        score = _only(compute_magnitude_rollup(world["db"], 1, coder_ids=None))
         assert score.n_targets == 3
         assert score.mean == pytest.approx(3.0)
 
@@ -707,7 +707,306 @@ class TestAGroupIsOnePassage:
         for seg in amara_turns + [ben_turn]:
             world["rate"](seg, world["scaled"], 1, 4.0)
 
-        rollup = compute_magnitude_rollup(db, 1)
+        rollup = compute_magnitude_rollup(db, 1, coder_ids=None)
         by_person = {s.participant_id: s for s in rollup.scores}
         assert by_person[world["person"].id].n_targets == 1
         assert by_person[ben.id].n_targets == 1
+
+
+class TestTheNarrowedRollup:
+    """D168 (a) — `compute_magnitude_rollup(code_ids=)`, the joint display's rated cells.
+
+    One rated code made a display read every coding in the project: 61–62 s on D12
+    (2026-11-12c), 57 s re-measured, against 10.7 s narrowed. Narrowed, the rollup reads
+    only the passages holding an asked code — and must give EXACTLY what the whole rollup
+    gives for that code. Two halves make it exact, and each can be wrong where the other
+    cannot see it:
+
+      * the GATHER keeps each passage's ballot WHOLE (its other codes are its other
+        voters) and, for a segment group, every turn of it (the fold is the ballot);
+      * the ROLLUP counts nothing but the asked codes.
+
+    So the oracle is the whole rollup itself, through two identities, on a fixture where
+    every wrong narrowing moves a number (the comments name the arm each line pins):
+
+      * scores: narrowed({c}) == the whole rollup's scores on c, for every code;
+      * disclosure: the narrowed exclusions summed over every code == the whole's.
+    """
+
+    def _world(self, world):
+        from app.models.code_equivalence_group import CodeEquivalenceGroup
+        from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
+        from app.models.segment_group import SegmentGroup
+
+        db, conv, rate, turn = world["db"], world["conv"], world["rate"], world["turn"]
+        c, d, u = world["scaled"], world["other_scale"], world["unscaled"]
+
+        def person(identifier):
+            p = Participant(project_id=1, identifier=identifier, display_name=identifier)
+            db.add(p)
+            db.flush()
+            s = Speaker(project_id=1, name=identifier, participant_id=p.id)
+            db.add(s)
+            db.flush()
+            return p, s
+
+        def said_by(speaker):
+            world["seq"] += 1
+            seg = Segment(conversation_id=conv.id, speaker_id=speaker.id,
+                          sequence_order=world["seq"], text=f"turn {world['seq']}")
+            db.add(seg)
+            db.flush()
+            return seg
+
+        def group(segs):
+            g = SegmentGroup(conversation_id=conv.id)
+            db.add(g)
+            db.flush()
+            for seg in segs:
+                seg.group_id = g.id
+            db.flush()
+
+        ben, ben_s = person("E-02")
+        cara, cara_s = person("E-03")
+        dee, dee_s = person("E-04")
+        eq = CodeEquivalenceGroup(project_id=1, label="Goal quality", canonical_code_id=c.id)
+        db.add(eq)
+        db.flush()
+        sibling = Code(project_id=1, numeric_id=13, name="Goal quality (alt)",
+                       code_equivalence_group_id=eq.id)
+        c.code_equivalence_group_id = eq.id
+        db.add(sibling)
+        db.flush()
+
+        rate(turn(), c, 1, 2.0)                                       # a sole voter
+        agreed = turn()
+        rate(agreed, c, 1, 4.0)
+        rate(agreed, c, 2, 5.0)                                       # two agree: 4.5
+        split = turn()
+        rate(split, c, 1, 1.0)
+        rate(split, d, 2, 1.0)            # the passage's OTHER code is its other voter
+        g1, g2 = turn(), turn()
+        group([g1, g2])
+        rate(g1, c, 1, 4.0)
+        rate(g2, d, 2, -1.0)              # a turn holding only D is a voter on the group
+        both = turn()
+        rate(both, c, 1, 3.0)
+        rate(both, d, 1, 1.0)             # one passage, two scored codes
+        fac = turn(facilitator_turn=True)
+        rate(fac, c, 1, 5.0)
+        rate(fac, d, 1, 2.0)              # disclosed once per code
+        cara_turn, ben_turn = said_by(cara_s), said_by(ben_s)
+        group([cara_turn, ben_turn])
+        rate(cara_turn, d, 1, 1.0)        # a group spanning two people: Cara holds only D
+        rate(ben_turn, c, 1, 4.0)
+        rate(said_by(dee_s), sibling, 1, None)   # holds C through its sibling, unrated
+        rate(turn(), u, 1, 3.0)                  # a rating with no declared scale
+        obs = Observation(project_id=1, name="Huddle")
+        ds = Dataset(project_id=1, name="Survey")
+        db.add_all([obs, ds])
+        db.flush()
+        clip = Segment(observation_id=obs.id, sequence_order=0, text="clip",
+                       start_time=0.0, end_time=2.0)
+        column = DatasetColumn(dataset_id=ds.id, column_code="Q", column_name="Q",
+                               column_text="Open", column_type="open_text",
+                               sequence_order=0, display_order=0)
+        row = DatasetRow(dataset_id=ds.id, participant_id=world["person"].id)
+        db.add_all([clip, column, row])
+        db.flush()
+        cell = DatasetValue(row_id=row.id, column_id=column.id, value_text="x")
+        db.add(cell)
+        db.flush()
+        rate(clip, c, 1, 3.0)                                         # disclosed: a clip
+        db.add(CodeApplication(dataset_value_id=cell.id, code_id=c.id, user_id=1,
+                               magnitude=1.0))                        # a third route
+        db.flush()
+        return {"c": c, "d": d, "u": u, "sibling": sibling, "ben": ben, "cara": cara,
+                "dee": dee}
+
+    @staticmethod
+    def _effective_codes(db):
+        from app.services.coding_layers import build_effective_code_map
+        effective = build_effective_code_map(db, 1)
+        return sorted({effective.get(cid, cid) for (cid,) in db.query(Code.id)})
+
+    def test_each_codes_scores_and_disclosure_are_the_whole_rollups(self, world):
+        from collections import Counter
+
+        db = world["db"]
+        w = self._world(world)
+        whole = compute_magnitude_rollup(db, 1, coder_ids=None)
+        # Non-vacuous, hand-derived: two codes scored for three people, four reasons.
+        amara = world["person"].id
+        assert {(s.participant_id, s.code_id): s.target_ratings for s in whole.scores} == {
+            (amara, w["c"].id): (2.0, 4.5, 3.0, 1.0),
+            (amara, w["d"].id): (1.0,),
+            (w["ben"].id, w["c"].id): (4.0,),
+            (w["cara"].id, w["d"].id): (1.0,),
+        }
+        assert whole.excluded_ratings == {
+            EXCLUDED_NO_CODE_CONSENSUS: 4, EXCLUDED_FACILITATOR_TURN: 2,
+            EXCLUDED_NO_DECLARED_SCALE: 1, UNRESOLVED_OBSERVATION_CLIP: 1,
+        }
+
+        disclosed = Counter()
+        codes = self._effective_codes(db)
+        assert len(codes) >= 4
+        for code in codes:
+            part = compute_magnitude_rollup(db, 1, coder_ids=None, code_ids=[code])
+            assert part.scores == tuple(s for s in whole.scores if s.code_id == code), code
+            disclosed.update(part.excluded_ratings)
+        assert dict(disclosed) == whole.excluded_ratings
+
+    def test_several_codes_at_once(self, world):
+        db = world["db"]
+        w = self._world(world)
+        whole = compute_magnitude_rollup(db, 1, coder_ids=None)
+        asked = {w["c"].id, w["d"].id}
+        part = compute_magnitude_rollup(db, 1, coder_ids=None, code_ids=sorted(asked))
+        assert part.scores == tuple(s for s in whole.scores if s.code_id in asked)
+        assert part.excluded_ratings == {
+            EXCLUDED_NO_CODE_CONSENSUS: 4, EXCLUDED_FACILITATOR_TURN: 2,
+            UNRESOLVED_OBSERVATION_CLIP: 1,
+        }
+
+    def test_a_passage_holding_the_code_through_its_sibling_reaches_its_person(self, world):
+        """Dee's only passage carries C's equivalence-group sibling, unrated: the whole
+        rollup names her coded-but-unrated, so the narrowed one must reach her too — a
+        ballot holds EFFECTIVE codes, so the narrowing reads the sibling's rows."""
+        db = world["db"]
+        w = self._world(world)
+        part = compute_magnitude_rollup(db, 1, coder_ids=None, code_ids=[w["c"].id])
+        assert part.participants_coded_unrated == frozenset({w["dee"].id})
+        assert compute_magnitude_rollup(db, 1, coder_ids=None).participants_coded_unrated == (
+            frozenset({w["dee"].id}))
+
+    def test_a_person_whose_turn_in_a_group_holds_none_of_the_codes_is_not_reached(self, world):
+        """Cara and Ben share a group: it is gathered whole for Ben's C, so Cara's fold —
+        D only — reaches the rollup too. She was coded, but not with C."""
+        db = world["db"]
+        w = self._world(world)
+        part = compute_magnitude_rollup(db, 1, coder_ids=None, code_ids=[w["c"].id])
+        assert w["cara"].id not in part.participants_coded_unrated
+        assert w["cara"].id not in {s.participant_id for s in part.scores}
+
+    def test_a_siblings_id_asks_for_its_canonical_code(self, world):
+        db = world["db"]
+        w = self._world(world)
+        by_sibling = compute_magnitude_rollup(db, 1, coder_ids=None, code_ids=[w["sibling"].id])
+        by_canonical = compute_magnitude_rollup(db, 1, coder_ids=None, code_ids=[w["c"].id])
+        assert by_sibling == by_canonical
+        assert by_sibling.scores                      # non-vacuous
+
+    def test_no_codes_asks_for_nothing(self, world):
+        """An empty list is NONE of the codes, never every code (#1297's reading)."""
+        db = world["db"]
+        self._world(world)
+        part = compute_magnitude_rollup(db, 1, coder_ids=None, code_ids=[])
+        assert part.scores == () and part.excluded_ratings == {}
+        assert part.participants_coded_unrated == frozenset()
+
+    def test_the_writers_form_refuses_a_narrowing(self, world):
+        """The writer decides every target; its group arm is not narrowed, so a narrowed
+        writer would decide a group from part of its votes."""
+        db = world["db"]
+        with pytest.raises(ValueError, match="per-turn stream only"):
+            gather_target_votes(db, 1, segment_scope="project", min_voters=1,
+                                group_units=True, coder_ids=None,
+                                target_codes=[world["scaled"].id])
+        gather_target_votes(db, 1, segment_scope="project", min_voters=1,  # control
+                            group_units=True, coder_ids=None, target_codes=None)
+
+    # ── The cost, in SQLite's own work (the #1021 technique) ─────────────────────
+
+    @staticmethod
+    def _passages(world, n):
+        """``n`` turns and ``n`` survey answers, under the same ids — the stream has a
+        segment arm and a value arm, and each is narrowed on its own."""
+        from sqlalchemy import insert
+
+        from app.models.dataset import Dataset, DatasetColumn, DatasetRow, DatasetValue
+
+        db, conv, speaker = world["db"], world["conv"], world["speaker"]
+        first = 10_000 + world["seq"] + 1
+        ids = list(range(first, first + n))
+        world["seq"] += n
+        db.execute(insert(Segment.__table__), [
+            {"id": i, "conversation_id": conv.id, "speaker_id": speaker.id,
+             "sequence_order": i, "text": "x"} for i in ids
+        ])
+        ds = Dataset(project_id=1, name=f"Survey {first}")
+        db.add(ds)
+        db.flush()
+        column = DatasetColumn(dataset_id=ds.id, column_code="Q", column_name="Q",
+                               column_text="Open", column_type="open_text",
+                               sequence_order=0, display_order=0)
+        db.add(column)
+        db.flush()
+        db.execute(insert(DatasetRow.__table__), [{"id": i, "dataset_id": ds.id} for i in ids])
+        db.execute(insert(DatasetValue.__table__), [
+            {"id": i, "row_id": i, "column_id": column.id, "value_text": "x"} for i in ids
+        ])
+        db.flush()
+        return ids
+
+    @staticmethod
+    def _code_every_passage(world, ids, n_codes):
+        """``n_codes`` more codes, each applied to every turn AND answer of ``ids`` by all
+        three coders — more CODINGS on the same passages."""
+        from sqlalchemy import insert
+
+        db = world["db"]
+        made = world.setdefault("other_codes", 0)
+        codes = [Code(project_id=1, numeric_id=100 + made + k, name=f"Other {made + k}")
+                 for k in range(n_codes)]
+        world["other_codes"] = made + n_codes
+        db.add_all(codes)
+        db.flush()
+        for target in ("segment_id", "dataset_value_id"):  # one key set per executemany
+            db.execute(insert(CodeApplication.__table__), [
+                {target: i, "code_id": code.id, "user_id": coder}
+                for i in ids for code in codes for coder in (1, 2, 3)
+            ])
+        db.flush()
+
+    @staticmethod
+    def _work(db, code_ids):
+        conn = db.connection().connection.driver_connection
+        ticks = [0]
+
+        def tick():
+            ticks[0] += 1
+            return 0
+
+        conn.set_progress_handler(tick, 100)
+        try:
+            rollup = compute_magnitude_rollup(db, 1, coder_ids=None, code_ids=code_ids)
+        finally:
+            conn.set_progress_handler(None, 100)
+        return rollup, ticks[0]
+
+    def test_the_cost_follows_the_asked_codes_not_the_projects_codings(self, world):
+        """Ten times the OTHER coding must not cost the narrowed rollup twice its work.
+        Counted by SQLite's progress handler, so a machine's speed cannot pass or fail
+        it — and paired with the whole rollup's work on the same two sizes, which must
+        grow, or the fixture could not have told a narrowed read from a full one.
+
+        ⚠️ The growth is in CODINGS on the same passages, not in passages. The rollup's
+        group-membership read (`group_of`) walks every segment of the project whatever
+        is asked — measured 2026-11-12d: 0.22–0.27 s over D12's 1.2M segments, a
+        residual left as it was — so more TURNS would grow it and fail this for a cost
+        D168 did not take on."""
+        db, scaled = world["db"], world["scaled"]
+        for value in (1.0, 2.0, 3.0, 4.0, 5.0):
+            world["rate"](world["turn"](), scaled, 1, value)
+        ids = self._passages(world, 200)
+        self._code_every_passage(world, ids, 1)     # 1,200 other codings, half on answers
+        small, small_work = self._work(db, [scaled.id])
+        _, small_whole = self._work(db, None)
+        self._code_every_passage(world, ids, 9)     # 12,000
+        large, large_work = self._work(db, [scaled.id])
+        _, large_whole = self._work(db, None)
+
+        assert small == large and _only(large).n_targets == 5   # it answered, unmoved
+        assert large_whole > 5 * small_whole, (small_whole, large_whole)  # discrimination
+        assert large_work < 2 * small_work, (small_work, large_work)

@@ -229,6 +229,16 @@ def _classify_effect_epsilon_squared(eps2: float) -> str:
     return _classify_effect_eta_squared(eps2)
 
 
+#: The `ci_method` of `_cohens_d_ci`'s interval: Hedges & Olkin's (1985) large-sample
+#: NORMAL approximation to the sampling distribution of Cohen's d, SE =
+#: √((n₁+n₂)/(n₁n₂) + d²/(2(n₁+n₂−2))). Minted for the joint display (D168.3), where
+#: the survey strand's d carries it; a fifth `ci_method` module
+#: (`test_ci_method_contract.py::_VOCABULARY_MODULES`). ⚠️ The group comparison's own
+#: d interval (`_run_t_test` below) is the same computation and does not yet state it
+#: on its wire.
+CI_METHOD_HEDGES_OLKIN_D = "hedges_olkin_d"
+
+
 def _cohens_d_ci(d: float, n1: int, n2: int) -> tuple[float, float]:
     """Compute 95% CI for Cohen's d using Hedges & Olkin formula.
 

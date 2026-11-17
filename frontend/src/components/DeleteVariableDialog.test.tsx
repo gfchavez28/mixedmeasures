@@ -75,6 +75,13 @@ describe('#1175 — the removal plan in the variable delete confirm', () => {
     expect(screen.getByRole('button', { name: 'Delete variable' })).toBeEnabled()
   })
 
+  it('#1639 (r1-4): says what the delete does to a joint display, in the description', async () => {
+    api.getColumnRemovalPlan.mockResolvedValue(plan())
+    const { dialog } = mount()
+    expect(dialog).toHaveAccessibleDescription(
+      /cannot be undone\. A joint display that uses it will show it as no longer in the project\./)
+  })
+
   it('an empty plan adds nothing — and Delete works (POSITIVE CONTROL for the wait)', async () => {
     api.getColumnRemovalPlan.mockResolvedValue(plan())
     const { onConfirm } = mount()

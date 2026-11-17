@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 
 from . import multiplicity as mt
-from .undefined_stats import NO_VARIANCE, finite_or_none
+from .undefined_stats import NO_VARIANCE, ZERO_CELL, finite_or_none
 
 # ── The unit ────────────────────────────────────────────────────────────────
 
@@ -82,8 +82,26 @@ TEST_FREEMAN_HALTON = "freeman_halton"
 TEST_FREEMAN_HALTON_MC = "freeman_halton_monte_carlo"
 TEST_METHODS = frozenset({TEST_FISHER_EXACT, TEST_FREEMAN_HALTON, TEST_FREEMAN_HALTON_MC})
 
-#: Above this many partial tables the exact enumeration hands over to Monte Carlo.
+#: Above this many TABLES with the observed margins the exact enumeration hands over
+#: to Monte Carlo. #1548 (c): counted from the margins BEFORE anything is built
+#: (`_freeman_halton_counts`) — it used to be compared with one step's UNPRUNED
+#: product, so 5 groups of 18–19 (44,170 tables) fell to Monte Carlo at 2,743,600.
+#: Every partial table the enumeration keeps extends to at least one whole table, so
+#: no step ever holds more than this many after its prune.
 FREEMAN_HALTON_MAX_TABLES = 200_000
+#: …and above this much WORK — the elements every step builds before its prune,
+#: summed — it hands over too, so a table under the cap whose groups are large cannot
+#: cost seconds a code (#1548 (a): a comparison tests every code). The groups are
+#: enumerated smallest first, each only up to the smaller margin, and the largest is
+#: never multiplied out (its count is fixed by the margin). MEASURED 2026-11-12 over
+#: 60,000 random margins (3–8 groups of 1–600): the largest work among cases under
+#: the table cap was 1.36M, about 45 ms; under this cap an exact test stays under
+#: ~70 ms a code, where the Monte Carlo estimate costs 5–10 ms.
+FREEMAN_HALTON_MAX_WORK = 2_000_000
+#: The memory guard: no single outer product holds more elements than this — a step
+#: is built in chunks of rows, each pruned before the next is made. (10 groups of 300
+#: once allocated a 27-million-element array before noticing, 0.7 s a code.)
+FREEMAN_HALTON_CHUNK = 200_000
 MONTE_CARLO_SEED = 1323
 MONTE_CARLO_RESAMPLES = 9_999
 
@@ -126,31 +144,92 @@ def freeman_halton_kx2(successes: list[int], sizes: list[int]) -> tuple[float, s
     return p, method
 
 
+def _freeman_halton_counts(sizes: list[int], x_total: int) -> tuple[float, float]:
+    """``(tables, work)`` for an enumeration over ``sizes`` (already in the order it
+    runs, the largest last) — from the margins alone, before anything is built.
+
+    ``tables`` is how many k×2 tables have these margins; ``work`` is how many
+    elements the enumeration builds, every step's outer product before its prune,
+    plus the last step (one per partial table: the largest group's count is fixed).
+    A count over partial SUMS — ``O(k × X)`` — never over tables. Floats on purpose:
+    only their size against the caps matters, and a count past 2**53 is past both.
+    """
+    import numpy as np
+
+    remaining = [sum(sizes[i + 1:]) for i in range(len(sizes))]
+    count = np.zeros(x_total + 1, dtype=np.float64)
+    count[0] = 1.0
+    kept = 1.0
+    work = 0.0
+    for i, n in enumerate(sizes[:-1]):
+        # The build tries x = 0..min(n, X) for every partial table kept so far.
+        work += kept * (min(n, x_total) + 1)
+        # new[s] = sum of count[s - x] for x in 0..n: a box sum, by cumulative sums.
+        c = np.concatenate(([0.0], np.cumsum(count)))
+        s = np.arange(x_total + 1)
+        count = c[s + 1] - c[np.maximum(s - n, 0)]
+        # The enumeration's own prune: a partial sum that can no longer reach X.
+        count[s + remaining[i] < x_total] = 0.0
+        kept = float(count.sum())
+        if kept > FREEMAN_HALTON_MAX_TABLES:
+            # Past the cap already (no later step can bring it back: every kept partial
+            # table extends to a whole one). Stopping here is also what keeps the counts
+            # finite — run on, many large groups would overflow a float.
+            return kept, work
+    work += kept
+    last = sizes[-1]
+    tables = float(count[max(0, x_total - last):x_total + 1].sum())
+    return tables, work
+
+
 def _freeman_halton(successes: list[int], sizes: list[int]):
     """``(p, method, support)`` — ``support`` is every p-value a table with these
     margins can produce, sorted (the discrete corrections' input); ``None`` past the
-    enumeration cap, where only a Monte Carlo p is known."""
+    enumeration cap, where only a Monte Carlo p is known.
+
+    #1548 (c): whether to count is decided from the MARGINS, before anything is built
+    (`_freeman_halton_counts` against ``FREEMAN_HALTON_MAX_TABLES`` and
+    ``FREEMAN_HALTON_MAX_WORK``) — never from one step's unpruned product. A table's
+    probability does not depend on the order of its groups, so they are enumerated
+    smallest first; the largest is never multiplied out, because once the others are
+    chosen its count is fixed by the margin (``X − s``). Nor does it depend on which
+    column is counted (``C(n, x) = C(n, n − x)``), so the smaller margin is: users, or
+    non-users when more than half used the code — no group's count can exceed it."""
     import numpy as np
 
     total = int(sum(sizes))
     x_total = int(sum(successes))
     log_obs = sum(_log_comb(n, x) for n, x in zip(sizes, successes))
-    remaining = [sum(sizes[i + 1:]) for i in range(len(sizes))]
+    x_total = min(x_total, total - x_total)
+    order = sorted(sizes)
+    tables, work = _freeman_halton_counts(order, x_total)
+    # Fail closed: a count that is not a number counts as too many.
+    if not (tables <= FREEMAN_HALTON_MAX_TABLES and work <= FREEMAN_HALTON_MAX_WORK):
+        return _freeman_halton_monte_carlo(successes, sizes), TEST_FREEMAN_HALTON_MC, None
+    remaining = [sum(order[i + 1:]) for i in range(len(order))]
 
     sums = np.zeros(1, dtype=np.int64)
     logw = np.zeros(1, dtype=np.float64)
-    for i, n in enumerate(sizes):
-        # Checked BEFORE the outer product is built: 10 groups of 300 would otherwise
-        # allocate a 27-million-element array before noticing (MEASURED: 0.7 s a code).
-        if sums.size * (n + 1) > FREEMAN_HALTON_MAX_TABLES:
-            return _freeman_halton_monte_carlo(successes, sizes), TEST_FREEMAN_HALTON_MC, None
-        xs = np.arange(n + 1, dtype=np.int64)
+    for i, n in enumerate(order[:-1]):
+        xs = np.arange(min(n, x_total) + 1, dtype=np.int64)
         lc = np.array([_log_comb(n, int(x)) for x in xs])
-        sums = (sums[:, None] + xs[None, :]).ravel()
-        logw = (logw[:, None] + lc[None, :]).ravel()
-        keep = (sums <= x_total) & (sums + remaining[i] >= x_total)
-        sums, logw = sums[keep], logw[keep]
-    logw = logw[sums == x_total]
+        # In chunks of rows, each pruned before the next is built: the memory guard.
+        step = max(1, FREEMAN_HALTON_CHUNK // xs.size)
+        kept_sums, kept_logw = [], []
+        for start in range(0, sums.size, step):
+            s = (sums[start:start + step, None] + xs[None, :]).ravel()
+            w = (logw[start:start + step, None] + lc[None, :]).ravel()
+            keep = (s <= x_total) & (s + remaining[i] >= x_total)
+            kept_sums.append(s[keep])
+            kept_logw.append(w[keep])
+        sums, logw = np.concatenate(kept_sums), np.concatenate(kept_logw)
+    # The largest group: its count is X − s, inside 0..n by the last prune.
+    # Only the counts that occur are weighed: the largest group may be the whole
+    # project's participants while two small groups leave a handful of tables.
+    last = order[-1]
+    counts, at = np.unique(x_total - sums, return_inverse=True)
+    lc_last = np.array([_log_comb(last, int(x)) for x in counts])
+    logw = logw + lc_last[at]
     log_norm = _log_comb(total, x_total)
     tol = math.log1p(1e-7)
     p = float(np.exp(logw[logw <= log_obs + tol] - log_norm).sum())
@@ -246,7 +325,8 @@ def presence_test(successes: list[int], sizes: list[int]) -> dict | None:
     users, n_total = sum(successes), sum(sizes)
     if users == 0 or users == n_total:
         return None
-    result: dict = {"statistic": None, "effect_size": None, "effect_size_label": None}
+    result: dict = {"statistic": None, "effect_size": None, "effect_size_label": None,
+                    "effect_size_undefined_reason": None}
     # The support (every attainable p, from the margins alone) feeds the discrete
     # corrections and the "cannot reach significance" marker; it never rides the wire.
     if len(sizes) == 2:
@@ -262,9 +342,18 @@ def presence_test(successes: list[int], sizes: list[int]) -> dict | None:
         b, d = sizes[0] - a, sizes[1] - c
         result["method"] = TEST_FISHER_EXACT
         result["p_value"] = float(fisher_exact([[a, b], [c, d]]).pvalue)
-        if b * c > 0:
+        # #1549 (a): the effect is an odds ratio whether or not it has a value, and
+        # it has none when a cell is zero — in a group nobody, or everybody, used the
+        # code — because the sample odds ratio is then 0 or infinite. BOTH directions:
+        # read the other way round (the groups' order is the labels' sort) a 0 is an
+        # infinity, so a number on one side and none on the other would say two things
+        # about one table. It was 0.0 one way (shown as "–", a real-zero bug) and absent
+        # with no reason the other.
+        result["effect_size_label"] = "odds_ratio"
+        if a * b * c * d > 0:
             result["effect_size"] = round((a * d) / (b * c), 4)
-            result["effect_size_label"] = "odds_ratio"
+        else:
+            result["effect_size_undefined_reason"] = ZERO_CELL
         return result
     result["method"] = method
     result["p_value"] = p
@@ -276,3 +365,52 @@ def presence_test(successes: list[int], sizes: list[int]) -> dict | None:
     result["effect_size"] = round(math.sqrt(chi2 / n_total), 4)
     result["effect_size_label"] = "cramers_v"
     return result
+
+
+# ── #1626 (D244): participants with no coding in scope — the words ──────────────
+# A participant with material and NO coding counts as "did not use" every code, which
+# is true only once their material has been coded. The result says how many there are
+# per group (`group_totals[g].without_coding`); the client renders the sentence through
+# `frontend/src/lib/coding-completeness.ts`, and the server's CSV writes the SAME
+# sentence — held equal by `tests/test_without_coding_1626.py`, which reads the TS.
+# "No coding" is never "not yet coded" alone: under deductive coding it can be a true
+# negative, so the note states both readings.
+NO_CODING_SCOPE_EVERY = "every"
+NO_CODING_SCOPE_CODERS = "coders"
+NO_CODING_SCOPE_CONSENSUS = "consensus"
+NO_CODING_SCOPE_MACHINE = "machine"
+NO_CODING_PHRASES = {
+    NO_CODING_SCOPE_EVERY: "no coding",
+    NO_CODING_SCOPE_CODERS: "no coding by the coders shown",
+    NO_CODING_SCOPE_CONSENSUS: "no consensus coding",
+    NO_CODING_SCOPE_MACHINE: "no coding by the model",
+}
+NO_CODING_NOTE_TAIL = (
+    "They count as not using any code. If their material has not been coded yet, these "
+    "shares are too low, and a group coded less far will look as if it uses codes less."
+)
+
+
+def no_coding_scope(coder_ids: list[int] | None, layer_scope: str | None) -> str:
+    """Which words name "no coding" for this request: the LAYER first (the consensus
+    layer and a model's are not "the coders shown"), then a coder scope (a coder filter
+    or blind mode), else every coder."""
+    if layer_scope == "consensus":   # coding_layers.LAYER_CONSENSUS
+        return NO_CODING_SCOPE_CONSENSUS
+    if layer_scope == "machine":     # coding_layers.LAYER_MACHINE
+        return NO_CODING_SCOPE_MACHINE
+    if coder_ids:
+        return NO_CODING_SCOPE_CODERS
+    return NO_CODING_SCOPE_EVERY
+
+
+def no_coding_note(counts: list[tuple[str, int]], scope: str) -> str | None:
+    """The note under a comparison, or ``None`` when no group has such a participant.
+    ``counts`` are (group, participants with no coding) in the result's group order;
+    every group is listed, a 0 included, so the reader sees where they are not."""
+    if not any(k > 0 for _g, k in counts):
+        return None
+    # Grouped digits, as the screen prints them (`toLocaleString('en-US')`): on the scale
+    # corpus a group held 74,611 such participants.
+    listed = ", ".join(f"{g}: {k:,}" for g, k in counts)
+    return f"Some participants have {NO_CODING_PHRASES[scope]} here ({listed}). {NO_CODING_NOTE_TAIL}"

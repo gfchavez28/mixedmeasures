@@ -22,6 +22,7 @@ import MissingSummaryTable from '@/components/data-quality/MissingSummaryTable'
 import MissingBarChart from '@/components/data-quality/MissingBarChart'
 import MissingPatternMatrix from '@/components/data-quality/MissingPatternMatrix'
 import McarTestPanel from '@/components/data-quality/McarTestPanel'
+import { useAnalysisScope } from '@/hooks/useAnalysisScope'
 
 // ── Sidebar ──────────────────────────────────────────────────────────────────
 
@@ -175,6 +176,8 @@ export function DataQualityContent(props: DataQualityContentProps) {
     selectedDomainIds, selectedColumnIds,
     setUrlParam,
   } = props
+  // #1615 — the CSV follows the table: the viewer alone while blind.
+  const { coderScope, scopeReady } = useAnalysisScope(pid)
 
   if (!hasDqSelection) {
     return (
@@ -266,10 +269,12 @@ export function DataQualityContent(props: DataQualityContentProps) {
             size="sm"
             className="text-xs h-7"
             onClick={async () => {
+              if (!scopeReady) return
               const blob = await dataQualityApi.summaryCsv(pid, {
                 column_ids: dqColumnIds,
                 include_na_as_missing: dqIncludeNA,
                 include_empty_as_missing: dqIncludeEmpty,
+                coderScope,
               })
               const url = URL.createObjectURL(blob)
               const a = document.createElement('a')

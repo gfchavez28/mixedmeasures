@@ -87,6 +87,13 @@ interface ContentBySourceProps {
    * — that hide set names only the ACTIVE roster, so an archived colleague's chips showed.
    */
   coderLens: CoderLens | null
+  /**
+   * #1592 — the viewer's coder id (`useAuth().user.id`). REQUIRED: a chip here shows a
+   * distinct code, so its *Remove code* acts only when the viewer applied that code (the
+   * door deletes the caller's application alone) — each payload names every code's
+   * coder, so the readers can tell. `null` (not known) offers no remove.
+   */
+  viewerId: number | null
   /** The claim (`useBlindMode().blind`): drives the one notice. */
   blind: boolean
   /** Reveal colleagues' work (confirmed + logged by `BlindModeToggle`). */
@@ -121,6 +128,7 @@ export default function ContentBySource({
   onFocusCode,
   onCodeChange,
   coderLens,
+  viewerId,
   blind,
   onReveal,
 }: ContentBySourceProps) {
@@ -316,6 +324,7 @@ export default function ContentBySource({
           onFocusCode={onFocusCode}
           onCodeChange={onCodeChange}
           coderLens={coderLens}
+          viewerId={viewerId}
         />
       ) : parsedSource.type === 'document' ? (
         <DocumentReader
@@ -331,6 +340,7 @@ export default function ContentBySource({
           onFocusCode={onFocusCode}
           onCodeChange={onCodeChange}
           coderLens={coderLens}
+          viewerId={viewerId}
         />
       ) : parsedSource.type === 'observation' ? (
         <ObservationReader
@@ -346,6 +356,7 @@ export default function ContentBySource({
           onFocusCode={onFocusCode}
           onCodeChange={onCodeChange}
           coderLens={coderLens}
+          viewerId={viewerId}
         />
       ) : (
         <CommentColumnReader
@@ -361,6 +372,7 @@ export default function ContentBySource({
           onFocusCode={onFocusCode}
           onCodeChange={onCodeChange}
           coderLens={coderLens}
+          viewerId={viewerId}
         />
       )}
     </div>
@@ -384,6 +396,7 @@ function ConversationReader({
   onFocusCode,
   onCodeChange,
   coderLens,
+  viewerId,
 }: {
   projectId: number
   conversationId: number
@@ -398,6 +411,7 @@ function ConversationReader({
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
   coderLens: CoderLens | null
+  viewerId: number | null
 }) {
   const segmentsQuery = useQuery({
     queryKey: ['conversation-segments-readonly', projectId, conversationId],
@@ -502,6 +516,8 @@ function ConversationReader({
                       codeMap={codeMap}
                       allCodes={allCodes}
                       codesStatus={codesStatus}
+                      // #1592: a remove only where the viewer applied the code.
+                      viewer={{ coderId: viewerId, applications: seg.applied_code_details }}
                       onCodeChange={onCodeChange}
                       onFocusCode={onFocusCode ?? onCodeClick}
                     />
@@ -555,6 +571,7 @@ function DocumentReader({
   onFocusCode,
   onCodeChange,
   coderLens,
+  viewerId,
 }: {
   projectId: number
   documentId: number
@@ -568,6 +585,7 @@ function DocumentReader({
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
   coderLens: CoderLens | null
+  viewerId: number | null
 }) {
   const documentQuery = useQuery({
     queryKey: ['document-segments-readonly', projectId, documentId],
@@ -651,6 +669,8 @@ function DocumentReader({
                         codeMap={codeMap}
                         allCodes={allCodes}
                         codesStatus={codesStatus}
+                        // #1592: a remove only where the viewer applied the code.
+                        viewer={{ coderId: viewerId, applications: seg.codes.map(c => ({ code_id: c.id, user_id: c.user_id })) }}
                         onCodeChange={onCodeChange}
                         onFocusCode={onFocusCode ?? onCodeClick}
                       />
@@ -702,6 +722,7 @@ function CommentColumnReader({
   onFocusCode,
   onCodeChange,
   coderLens,
+  viewerId,
 }: {
   projectId: number
   columnId: number
@@ -715,6 +736,7 @@ function CommentColumnReader({
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
   coderLens: CoderLens | null
+  viewerId: number | null
 }) {
   /**
    * #844 — the second caller of the texts endpoint, and it had TWO problems
@@ -834,6 +856,8 @@ function CommentColumnReader({
                           codeMap={codeMap}
                           allCodes={allCodes}
                           codesStatus={codesStatus}
+                          // #1592: a remove only where the viewer applied the code.
+                          viewer={{ coderId: viewerId, applications: comment.applied_code_details ?? [] }}
                           onCodeChange={onCodeChange}
                           onFocusCode={onFocusCode ?? onCodeClick}
                         />
@@ -905,6 +929,7 @@ function ObservationReader({
   onFocusCode,
   onCodeChange,
   coderLens,
+  viewerId,
 }: {
   projectId: number
   observationId: number
@@ -918,6 +943,7 @@ function ObservationReader({
   onFocusCode?: (codeId: number) => void
   onCodeChange?: () => void
   coderLens: CoderLens | null
+  viewerId: number | null
 }) {
   const clipsQuery = useQuery({
     queryKey: ['observation-segments', projectId, observationId],
@@ -994,6 +1020,8 @@ function ObservationReader({
                         codeMap={codeMap}
                         allCodes={allCodes}
                         codesStatus={codesStatus}
+                        // #1592: a remove only where the viewer applied the code.
+                        viewer={{ coderId: viewerId, applications: clip.applied_code_details }}
                         onCodeChange={onCodeChange}
                         onFocusCode={onFocusCode ?? onCodeClick}
                       />

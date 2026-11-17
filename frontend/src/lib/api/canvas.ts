@@ -1,6 +1,7 @@
 import api from './client'
 import { EXPORT_TIMEOUT_MS } from './download'
 import { safeFilename } from '../filename'
+import type { DocxDisplayTable } from '@/lib/joint-display-report'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -92,6 +93,48 @@ export interface ThemeUpdateRequest {
   parent_theme_id?: number | null
 }
 
+/**
+ * #1301 — everything a theme delete destroyed, as the SERVER read it before the delete
+ * (`services/canvas.py::theme_restore_record`). Opaque to the page: the delete hands it out
+ * and its undo sends it back unchanged, so the page's cache (which can trail an autosave) is
+ * never the source of what comes back.
+ */
+export interface ThemeRestoreRecord {
+  id: number
+  name: string
+  section_type: 'theme' | 'prose'
+  description: string | null
+  color: string | null
+  doc_order: number
+  table_column_order: number | null
+  viz_x: number | null
+  viz_y: number | null
+  parent_theme_id: number | null
+  content: Record<string, unknown> | null
+  child_ids: number[]
+  relationships: CanvasThemeRelationship[]
+  /** The delete's own audit entry — the restore's withdrawal gate measures from it. */
+  deleted_audit_id: number
+}
+
+export interface ThemeDeleteResult {
+  status: 'ok'
+  deleted_id: number
+  restore: ThemeRestoreRecord
+}
+
+/** What a restore could not put back, because the canvas changed after the delete. */
+export interface ThemeRestoreLost {
+  parent: boolean
+  children: number
+  relationships: number
+}
+
+export interface ThemeRestoreResult {
+  theme: CanvasTheme
+  not_restored: ThemeRestoreLost
+}
+
 // ── API ───────────────────────────────────────────────────────────────────
 
 export interface CanvasSnapshot {
@@ -168,7 +211,11 @@ export const canvasApi = {
     api.patch<CanvasTheme>(`${base(projectId)}/${canvasId}/themes/${themeId}`, data).then(r => r.data),
 
   deleteTheme: (projectId: number, canvasId: number, themeId: number) =>
-    api.delete(`${base(projectId)}/${canvasId}/themes/${themeId}`).then(r => r.data),
+    api.delete<ThemeDeleteResult>(`${base(projectId)}/${canvasId}/themes/${themeId}`).then(r => r.data),
+
+  /** #1301 — the undo of `deleteTheme`: one transaction on the server. */
+  restoreTheme: (projectId: number, canvasId: number, record: ThemeRestoreRecord) =>
+    api.post<ThemeRestoreResult>(`${base(projectId)}/${canvasId}/themes/restore`, record).then(r => r.data),
 
   reorderThemes: (projectId: number, canvasId: number, themeIds: number[]) =>
     api.patch(`${base(projectId)}/${canvasId}/themes/reorder`, { theme_ids: themeIds }).then(r => r.data),
@@ -215,14 +262,20 @@ export const canvasApi = {
 
   // Export. Optionally POSTs rasterized chart images (materialId → PNG data URL)
   // so charts embed as images, and the client's own data tables (materialId →
-  // headers + rows, `canvas-export.ts::docxChartTables`) for a chart with no
-  // image — the server derives no chart table of its own (#1406 D5).
+  // headers + rows + the note printed under the table, `canvas-export.ts::docxChartTables`)
+  // for a chart with no image — the server derives no chart table of its own (#1406 D5),
+  // and since the Word note fix it prints the note too (the type named headers and rows
+  // only, and the server read only those). A joint
+  // display sends its REPORT table the same way, keyed by its `displayKey`
+  // (`canvas-export.ts::docxDisplayTables`, D174) — no image, and the server
+  // writes only what it is sent.
   exportDocx: async (
     projectId: number,
     canvasId: number,
     chartPngs?: Map<number, string>,
-    chartTables?: Map<number, { headers: string[]; rows: string[][] }>,
+    chartTables?: Map<number, { headers: string[]; rows: string[][]; note?: string }>,
     filename = 'canvas',
+    displayTables?: Map<string, DocxDisplayTable>,
   ) => {
     const chart_images: Record<string, string> = {}
     if (chartPngs) {
@@ -231,13 +284,17 @@ export const canvasApi = {
         chart_images[String(mid)] = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
       }
     }
-    const chart_tables: Record<string, { headers: string[]; rows: string[][] }> = {}
+    const chart_tables: Record<string, { headers: string[]; rows: string[][]; note?: string }> = {}
     if (chartTables) {
       for (const [mid, table] of chartTables) chart_tables[String(mid)] = table
     }
+    const display_tables: Record<string, DocxDisplayTable> = {}
+    if (displayTables) {
+      for (const [key, table] of displayTables) display_tables[key] = table
+    }
     const { data } = await api.post<Blob>(
       `${base(projectId)}/${canvasId}/export-docx`,
-      { chart_images, chart_tables },
+      { chart_images, chart_tables, display_tables },
       {
         responseType: 'blob',
         // #833 — the project-scale export budget, not the 30 s client default.

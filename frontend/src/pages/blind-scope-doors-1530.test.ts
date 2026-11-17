@@ -20,13 +20,17 @@ import { stripComments } from '@/lib/strip-comments'
 import { sourceFiles, srcRel, SOURCE_SCAN_TIMEOUT_MS } from '@/test-support/source-tree'
 
 /** A call of a coding download or a passage read (a declaration is not a call). */
-const DOOR = /(?<!function )\b(exportApi\.[A-Za-z]+|textCodingApi\.exportCoded|textAnalysisApi\.exportCrossAnalysis|excerptsApi\.listQuoted|codeAnalysisApi\.(?:segmentsWithContext|textsWithContext)|exportCodeFrequenciesCsv|metricsApi\.rowMatrix[A-Za-z]*)\(/g
+const DOOR = /(?<!function )\b(exportApi\.[A-Za-z]+|textCodingApi\.exportCoded|textAnalysisApi\.(?:exportCrossAnalysis|filteredFrequencies|crossTabulation|codeDensity)|excerptsApi\.listQuoted|codeAnalysisApi\.(?:segmentsWithContext|textsWithContext|demographicFilters|sourceFrequencies|demographicComparison)|exportCodeFrequenciesCsv|metricsApi\.rowMatrix[A-Za-z]*|datasetsApi\.getData|participantsApi\.getDetail|jointDisplayApi\.(?:compute|passages|pinFacts|cases)|metricsApi\.(?:quickCompute|crossTabulation|analysisColumns)|comparisonsApi\.groupComparison(?:Csv)?|correlationsApi\.(?:correlationMatrix|scatterMatrix|correlationMatrixCsv|scatterDataCsv)|dataQualityApi\.(?:summary|patterns|mcarTest|summaryCsv)|statisticalTestsApi\.(?:list|compute)|recodeApi\.getFrequencies|datasetsApi\.previewComputedColumn)\(/g
 
 type Decision =
   | 'withholding: the viewer alone'        // D95/D98/D99/D102 — follows `withholding`
   | 'the page’s effective scope (#499)'   // already sent the blind-forced scope before 1.5.9
   | 'every coder by design (#454)'        // codebook usage counts
   | 'not a coding view (D95)'             // no coding layer in the file
+  | 'names only — no values (#1615)'      // the variable list read to NAME a saved result; marks unread
+  // D297: a saved qualitative chart replays its SAVED coder scope (`inline-chart-params.ts`'s
+  // recorded rule) and names the VIEWER apart (`ratings_viewer_id`) for the grouping gate alone.
+  | 'the figure’s saved scope; the viewer for ratings (#1615)'
   | 'UNDECIDED — every coder today'       // a door found and measured, awaiting the developer's decision (none today)
 
 /** `file → door → decision`. A door called twice in one file is one decision. */
@@ -39,8 +43,19 @@ const DOORS: Record<string, Record<string, Decision>> = {
     'exportApi.rData': 'withholding: the viewer alone',
     exportCodeFrequenciesCsv: 'withholding: the viewer alone',
     'exportApi.codebook': 'every coder by design (#454)',
-    'exportApi.datasetsExcel': 'not a coding view (D95)',
-    'metricsApi.rowMatrix': 'not a coding view (D95)',
+    // #1608: the participant table's rating columns roll up every coder's ratings — a door
+    // is a coding door when its VALUES derive from coding, whatever the view is called.
+    'exportApi.datasetsExcel': 'withholding: the viewer alone',
+    // #1608 (R3-3) left it UNDECIDED; #1615: a metric over a rating score is a colleague's
+    // judgement, so the matrix follows the dataset workbook.
+    'metricsApi.rowMatrix': 'withholding: the viewer alone',
+  },
+  // #1608 — the grid and the profile read the participant table's rating columns.
+  'pages/DatasetView.tsx': {
+    'datasetsApi.getData': 'withholding: the viewer alone',
+  },
+  'pages/ParticipantsPage.tsx': {
+    'participantsApi.getDetail': 'withholding: the viewer alone',
   },
   'pages/QualitativeAnalysisView.tsx': {
     exportCodeFrequenciesCsv: 'the page’s effective scope (#499)',
@@ -50,6 +65,20 @@ const DOORS: Record<string, Record<string, Decision>> = {
     // D98: the door's api now forwards the `coder_ids` its `filterParams` always carried.
     'exportApi.codedSegments': 'the page’s effective scope (#499)',
     'excerptsApi.listQuoted': 'withholding: the viewer alone',
+    // #1615 (r3-6): a demographic subtype holding a rating-derived column is left out of the
+    // filter options while blind (its values → participant ids would sort people by a score).
+    'codeAnalysisApi.demographicFilters': 'withholding: the viewer alone',
+    // #1615 (D273): the two reads that can GROUP people send `ratings_follow_coder_ids` while
+    // withholding — `coder_ids` is also a lead's coder filter here (#499).
+    'codeAnalysisApi.sourceFrequencies': 'the page’s effective scope (#499)',
+    'codeAnalysisApi.demographicComparison': 'the page’s effective scope (#499)',
+  },
+  // The Frequencies CSV's read (#1528): it FORWARDS its caller's request, which never groups
+  // (`codeFrequenciesFileRequest` takes no `group_by_subtype`), so no score can form its groups.
+  // Its two callers are decided as `exportCodeFrequenciesCsv`: the page (its effective scope) and
+  // the Export dialog (the viewer alone while withholding).
+  'lib/code-frequencies-export.ts': {
+    'codeAnalysisApi.sourceFrequencies': 'the page’s effective scope (#499)',
   },
   'components/qualitative-analysis/RelationshipsPanel.tsx': {
     'exportApi.demographicComparisonCsv': 'the page’s effective scope (#499)',
@@ -61,14 +90,68 @@ const DOORS: Record<string, Record<string, Decision>> = {
   'components/qualitative-analysis/QuoteBoardView.tsx': {
     'excerptsApi.listQuoted': 'withholding: the viewer alone',
   },
+  // #1615 — the filters, the cross-tab variable and the density grouping read a column the
+  // researcher picks: while withholding each sends `ratings_follow_coder_ids`, and a variable
+  // worked out from participant scores is refused (D273's flag — `coder_ids` is also a lead's
+  // filter here). The response length reads the focal texts only, so it is not a door.
   'components/CrossAnalysisPanel.tsx': {
     'textAnalysisApi.exportCrossAnalysis': 'withholding: the viewer alone',
+    'textAnalysisApi.filteredFrequencies': 'withholding: the viewer alone',
+    'textAnalysisApi.crossTabulation': 'withholding: the viewer alone',
+    'textAnalysisApi.codeDensity': 'withholding: the viewer alone',
   },
   'pages/TextCodingView.tsx': {
     'textCodingApi.exportCoded': 'withholding: the viewer alone',
   },
+  // #1615 — every read over a variable that can be a rating score (`lib/analysis-scope.ts`,
+  // `hooks/useAnalysisScope.ts`): the viewer alone while withholding; the server leaves the
+  // scores out and says so. The list MARKS them (C4) so a picker can hide them.
   'pages/AnalysisView.tsx': {
-    'metricsApi.rowMatrix': 'not a coding view (D95)',
+    'metricsApi.rowMatrix': 'withholding: the viewer alone',   // #1608 R3-3 → #1615
+    'metricsApi.analysisColumns': 'withholding: the viewer alone',
+    'metricsApi.crossTabulation': 'withholding: the viewer alone',
+    'comparisonsApi.groupComparison': 'withholding: the viewer alone',
+    'correlationsApi.correlationMatrix': 'withholding: the viewer alone',
+    'correlationsApi.scatterMatrix': 'withholding: the viewer alone',
+    'dataQualityApi.summary': 'withholding: the viewer alone',
+    'dataQualityApi.patterns': 'withholding: the viewer alone',
+    'dataQualityApi.mcarTest': 'withholding: the viewer alone',
+    'statisticalTestsApi.list': 'withholding: the viewer alone',
+    'statisticalTestsApi.compute': 'withholding: the viewer alone',
+  },
+  'hooks/useQuickCompute.ts': {
+    'metricsApi.quickCompute': 'withholding: the viewer alone',   // the scope rides `params.coderIds`
+  },
+  'components/ColumnPicker.tsx': {
+    'metricsApi.analysisColumns': 'withholding: the viewer alone',   // hides the marked scores
+  },
+  'components/analysis/CorrelationsComparisonsContent.tsx': {
+    'correlationsApi.correlationMatrixCsv': 'withholding: the viewer alone',
+    'correlationsApi.scatterDataCsv': 'withholding: the viewer alone',
+    'comparisonsApi.groupComparisonCsv': 'withholding: the viewer alone',
+  },
+  'components/analysis/DataQualityTab.tsx': {
+    'dataQualityApi.summaryCsv': 'withholding: the viewer alone',
+  },
+  'components/canvas/InlineChartRenderer.tsx': {
+    'metricsApi.quickCompute': 'withholding: the viewer alone',
+    'metricsApi.crossTabulation': 'withholding: the viewer alone',
+    'comparisonsApi.groupComparison': 'withholding: the viewer alone',
+    'codeAnalysisApi.sourceFrequencies': 'the figure’s saved scope; the viewer for ratings (#1615)',
+    'codeAnalysisApi.demographicComparison': 'the figure’s saved scope; the viewer for ratings (#1615)',
+  },
+  // The embed reads the list for its TITLE (a column's name), never a value.
+  'components/canvas/extensions/ChartEmbedView.tsx': {
+    'metricsApi.analysisColumns': 'names only — no values (#1615)',
+  },
+  // #1615 D279 (built): the builder offers variables to PICK — the viewer's list while
+  // withholding, so a menu greys a score out and the survey list hides and counts it.
+  // `useDisplayResults` names saved results only.
+  'components/canvas/joint-display/JointDisplayBuilder.tsx': {
+    'metricsApi.analysisColumns': 'withholding: the viewer alone',
+  },
+  'components/canvas/joint-display/useDisplayResults.ts': {
+    'metricsApi.analysisColumns': 'names only — no values (#1615)',
   },
   // Found by this scan at build session B (2026-11-05c): the Codebook page's peek showed the TEXT of
   // up to three passages coded with the selected code, by any coder. #454 decided the codebook's
@@ -76,6 +159,56 @@ const DOORS: Record<string, Record<string, Decision>> = {
   // passages should follow blind mode") and built.
   'components/codebook/CodebookPeekPanel.tsx': {
     'codeAnalysisApi.segmentsWithContext': 'withholding: the viewer alone',
+  },
+  // Joint display session B (D175): the display's counts and rated cells (D197 — the rollup takes
+  // the same `coder_ids`) and a pin's suggested passages, whose chips follow the scope (D102).
+  'components/canvas/extensions/JointDisplayView.tsx': {
+    'jointDisplayApi.compute': 'withholding: the viewer alone',
+    // #1615 (r3-5): a rating-derived attribution column's value is left out while blind.
+    'jointDisplayApi.pinFacts': 'withholding: the viewer alone',
+  },
+  'components/canvas/joint-display/PinPicker.tsx': {
+    'jointDisplayApi.passages': 'withholding: the viewer alone',
+  },
+  // Joint display slice 2, round 2 (r5): the case view's page and the count-only read of each
+  // row's misfit (the open construct, the Report view) — per-person coding under the compute's
+  // own scope (D175); a rule over a rating score is not run while blind (r3-3).
+  'components/canvas/joint-display/CaseView.tsx': {
+    'jointDisplayApi.cases': 'withholding: the viewer alone',
+  },
+  'components/canvas/joint-display/useMisfitReads.ts': {
+    'jointDisplayApi.cases': 'withholding: the viewer alone',
+  },
+  // Joint display session C (D174): the canvas export reads each display's numbers itself, under
+  // the export lens — whose `blind` is `useBlindMode`'s `withholding` (`CanvasView`, pinned by
+  // `machine-coverage-wiring.test.ts`) — so the file holds what the Report view shows.
+  'lib/canvas-export.ts': {
+    'jointDisplayApi.compute': 'withholding: the viewer alone',
+    'jointDisplayApi.pinFacts': 'withholding: the viewer alone',   // #1615, the Compact view's scope
+    // r5-8: the misfit note's count-only read, under the export lens as the numbers are.
+    'jointDisplayApi.cases': 'withholding: the viewer alone',
+    // #1615: the chart tables (Markdown, the Word fallback) under the export lens.
+    'metricsApi.quickCompute': 'withholding: the viewer alone',
+    'metricsApi.crossTabulation': 'withholding: the viewer alone',
+    'comparisonsApi.groupComparison': 'withholding: the viewer alone',
+    'metricsApi.analysisColumns': 'names only — no values (#1615)',
+    'codeAnalysisApi.sourceFrequencies': 'the figure’s saved scope; the viewer for ratings (#1615)',
+    'codeAnalysisApi.demographicComparison': 'the figure’s saved scope; the viewer for ratings (#1615)',
+  },
+  // #1615 (r4-1, r4-2): a score's observed values and a computed preview over one SHOW its values.
+  'pages/RecodeWorkbench.tsx': {
+    'recodeApi.getFrequencies': 'withholding: the viewer alone',
+  },
+  'components/ColumnFormDialog.tsx': {
+    'datasetsApi.previewComputedColumn': 'withholding: the viewer alone',
+  },
+  // Text Coding's Cross-analysis subgroup filter lists a column's values to filter by (#1615).
+  'components/SubgroupFilterPanel.tsx': {
+    'recodeApi.getFrequencies': 'withholding: the viewer alone',
+  },
+  // Renders only when `variableRulesRefusal` is null — never on a managed or computed column.
+  'components/ColumnDictionaryEditor.tsx': {
+    'recodeApi.getFrequencies': 'not a coding view (D95)',
   },
 }
 
@@ -103,6 +236,10 @@ describe('the client doors a blind coder can reach (#1530/#1531)', () => {
     // Predicate falsifier: a declaration is not a door, a call is.
     expect([...'export async function exportCodeFrequenciesCsv('.matchAll(DOOR)]).toEqual([])
     expect([...'void exportCodeFrequenciesCsv(pid, {'.matchAll(DOOR)].length).toBe(1)
+    // #1615: the scan sees the quantitative doors, and `computeAll` (counts only) is not one.
+    expect(FOUND['hooks/useQuickCompute.ts']?.has('metricsApi.quickCompute')).toBe(true)
+    expect(FOUND['pages/AnalysisView.tsx']?.has('dataQualityApi.mcarTest')).toBe(true)
+    expect([...'statisticalTestsApi.computeAll(pid, x)'.matchAll(DOOR)]).toEqual([])
   })
 
   it('every door is decided, and every decision names a door that exists', { timeout: SOURCE_SCAN_TIMEOUT_MS }, () => {
@@ -135,11 +272,113 @@ describe('the wiring a scan can see', () => {
     expect(dragEnd).toMatch(/mergeVisibleOrder\(customOrders\[targetSection\.key\] \?\? \[\], newOrderIds\)/)
   })
 
+  it('#1608: the grid, the profile and the datasets workbook send the viewer’s scope and wait to settle', () => {
+    // The rule (settled · withholding · a self id, fail closed) has one home.
+    const hook = read('hooks/useBlindScope.ts')
+    expect(hook).toMatch(/coderScope: withholding && self != null \? String\(self\) : undefined/)
+    expect(hook).toMatch(/scopeReady: settled && !\(withholding && self == null\)/)
+    const grid = read('pages/DatasetView.tsx')
+    expect(grid).toMatch(/const \{ coderScope, scopeReady \} = useBlindScope\(pid\)/)
+    expect(grid).toMatch(/queryFn: \(\) => datasetsApi\.getData\(pid, iid, \{ offset: pageOffset \}, coderScope\)/)
+    expect(grid).toMatch(/enabled: !!pid && !!iid && scopeReady/)
+    // Both spellings — the patches' `dataPageKey` and the query's literal key — carry the scope.
+    expect(grid).toMatch(/\(\) => \['dataset-data', pid, iid, pageOffset, coderScope \?\? 'every-coder'\] as const,/)
+    expect(grid).toMatch(/queryKey: \['dataset-data', pid, iid, pageOffset, coderScope \?\? 'every-coder'\],/)
+    const profile = read('pages/ParticipantsPage.tsx')
+    expect(profile).toMatch(/const \{ coderScope, scopeReady \} = useBlindScope\(projectId\)/)
+    expect(profile).toMatch(/queryKey: \['participant-detail', participantId, coderScope \?\? 'every-coder'\],\n\s*enabled: scopeReady,\n\s*queryFn: \(\) => participantsApi\.getDetail\(projectId, participantId, coderScope\)/)
+    expect(read('components/ExportDialog.tsx')).toMatch(/exportApi\.datasetsExcel\(projectId, coderScope\)/)
+  })
+
   it('the Codebook peek: its sample passages are the viewer’s own while withholding, and wait to settle', () => {
     const src = read('components/codebook/CodebookPeekPanel.tsx')
     expect(src).toMatch(/const sampleScope = withholding && self != null \? String\(self\) : undefined/)
     expect(src).toMatch(/queryKey: \['code-sample-segments', projectId, entityId, sampleScope \?\? ''\]/)
     expect(src).toMatch(/&& blindSettled && !\(withholding && self == null\)/)
+  })
+
+  it('joint display slice 2, round 2 (r5): every case read asks with the compute’s scope, keyed by its request, never with no viewer', () => {
+    // The ONE request builder starts from `computeRequest`, so it carries the compute's coder ids.
+    const model = read('lib/joint-display-cases.ts')
+    expect(model).toMatch(/const base = computeRequest\(display, scope\)/)
+    expect(model).toMatch(/coder_ids: base\.coder_ids,\s*layer_scope: base\.layer_scope,/)
+    // The view hands the dialog and the count read the compute's own `scope`, and D96's case.
+    const view = read('components/canvas/extensions/JointDisplayView.tsx')
+    expect(view).toMatch(/const noViewer = withholding && self == null/)
+    expect(view).toMatch(/kind: 'cases', displayKey, display, rowKey: row\.key,\s*groupBy: [^,]+, scope, noViewer,/)
+    const dialog = read('components/canvas/joint-display/CaseView.tsx')
+    expect(dialog).toMatch(/queryKey: \['joint-display-cases', projectId, request\],/)
+    expect(dialog).toMatch(/enabled: request != null && !noViewer,/)
+    const counts = read('components/canvas/joint-display/useMisfitReads.ts')
+    expect(counts).toMatch(/queryKey: \['joint-display-cases', projectId, request\],/)
+    expect(counts).toMatch(/enabled: enabled && !noViewer && request != null,/)
+    const exporter = read('lib/canvas-export.ts')
+    // D96 rides the compute's own gate: a case read only once the numbers were read.
+    expect(exporter).toMatch(/if \(data\) \{\s*await Promise\.all\(display\.rows\.filter\(hasMisfit\)/)
+  })
+
+  it('the joint display: the viewer alone while withholding, in the key, and nothing before it settles', () => {
+    const scope = read('lib/joint-display.ts')
+    expect(scope).toMatch(/if \(withholding\) return \{ coderIds: self != null \? \[self\] : \[\], layerScope: 'human', chipsFollow: true \}/)
+    const view = read('components/canvas/extensions/JointDisplayView.tsx')
+    expect(view).toMatch(/displayCoderScope\(withholding, self\)/)
+    expect(view).toMatch(/const scopeReady = settled && !\(withholding && self == null\)/)
+    expect(view).toMatch(/queryKey: \['joint-display', pid, request\],/)
+    expect(view).toMatch(/enabled: request != null && scopeReady,/)
+    const picker = read('components/canvas/joint-display/PinPicker.tsx')
+    // Joint display slice 2 (r4-1, R9): the picker's request is built by the model's one
+    // `pinPassagesRequest` (it carries the pin's strand's sources), so the scope line lives
+    // there now — and the picker must hand it the view's scope.
+    expect(scope).toMatch(/chips_follow_coder_ids: scope\.chipsFollow,/)
+    expect(picker).toMatch(/pinPassagesRequest\(display, strandKey, group, codeId, scope\)/)
+    expect(picker).toMatch(/queryKey: \['joint-display-passages', projectId, request\],/)
+    // Session C: the export asks with the SAME scope function, from the export lens, and never
+    // reads while withholding with no viewer to scope to (D96).
+    const exporter = read('lib/canvas-export.ts')
+    expect(exporter).toMatch(/const scope = displayCoderScope\(timelineLens\.blind, timelineLens\.self\)/)
+    expect(exporter).toMatch(/else if \(timelineLens\.blind && timelineLens\.self == null\) \{/)
+    expect(exporter).toMatch(/withholding: timelineLens\.blind, self: timelineLens\.self/)
+  })
+
+  it('#1615: every quantitative read sends the viewer’s scope, keys on it, and waits for it', () => {
+    // One rule (`lib/analysis-scope.ts`), in both spellings, fail closed with no self id.
+    const rule = read('lib/analysis-scope.ts')
+    expect(rule).toMatch(/if \(!withholding\) return \{ coderIds: null, coderScope: undefined, scopeKey: 'every-coder' \}/)
+    expect(rule).toMatch(/if \(self == null\) return null/)
+    expect(rule).toMatch(/return coderIds \? \{ coder_ids: coderIds \} : \{\}/)
+    expect(read('hooks/useAnalysisScope.ts')).toMatch(/const scope = settled \? analysisScope\(withholding, self\) : null/)
+    const page = read('pages/AnalysisView.tsx')
+    expect(page).toMatch(/const \{ coderIds, coderScope, scopeKey, scopeReady \} = useAnalysisScope\(pid\)/)
+    for (const root of ['correlation-matrix', 'scatter-matrix', 'group-comparison', 'analysis-columns', 'statistical-tests', 'dq-summary', 'dq-patterns', 'analysis-cross-tab']) {
+      expect(page, root).toMatch(new RegExp(`queryKey: \\['${root}', pid[^\\]]*, scopeKey\\]`))
+    }
+    expect(page.match(/&& scopeReady,/g)?.length ?? 0).toBeGreaterThanOrEqual(7)
+    expect(page.match(/\.\.\.coderIdsField\(coderIds\),/g)?.length).toBe(7)   // corr · scatter · comparison · dq ×3 · cross-tab
+    expect(page).toMatch(/if \(!scopeReady\) return\s*\n\s*const columnIds/)   // quick compute never fires unscoped
+    expect(page).toMatch(/metricsApi\.rowMatrix\(Number\(pid\), ids, 'csv', coderScope\)/)
+    const picker = read('components/ColumnPicker.tsx')
+    expect(picker).toMatch(/queryKey: \['analysis-columns', projectId, scopeKey\],\n\s*queryFn: \(\) => metricsApi\.analysisColumns\(projectId, coderScope\),\n\s*enabled: scopeReady,/)
+    expect(picker).toMatch(/visibleAnalysisColumns\(columnsQuery\.data\)/)
+    // D279: the joint display builder reads the same list the same way (its behaviour:
+    // `JointDisplayBuilder.test.tsx`).
+    const builder = read('components/canvas/joint-display/JointDisplayBuilder.tsx')
+    expect(builder).toMatch(/queryKey: \['analysis-columns', projectId, scopeKey\],\n\s*queryFn: \(\) => metricsApi\.analysisColumns\(projectId, coderScope\),\n\s*enabled: scopeReady,/)
+    const embed = read('components/canvas/InlineChartRenderer.tsx')
+    expect(embed.match(/, scopeKey\],/g)?.length).toBe(5)   // three quantitative + two qualitative grouping reads
+    expect(embed.match(/!= null && scopeReady,/g)?.length).toBe(4)   // all three wait for the scope (+ the comparison)
+    expect(embed.match(/\.\.\.coderIdsField\(coderIds\) \}/g)?.length).toBe(3)
+    // #1615 (D297's Canvas path): the qualitative grouping reads name the VIEWER for the ratings
+    // question beside the figure's saved scope — never as `coder_ids` — and wait for it.
+    expect(embed).toMatch(/codeAnalysisApi\.sourceFrequencies\(projectId, \{ \.\.\.qualParams\.request, \.\.\.ratingsViewerField\(coderIds\) \}\)/)
+    expect(embed).toMatch(/codeAnalysisApi\.demographicComparison\(projectId, \{ \.\.\.comparisonRequest!, \.\.\.ratingsViewerField\(coderIds\) \}\)/)
+    expect(embed).toMatch(/enabled: qualEnabled && isSourceFrequencyChart && scopeReady,/)
+    expect(rule).toMatch(/return coderIds \? \{ ratings_viewer_id: coderIds\[0\] \} : \{\}/)
+    const exporter = read('lib/canvas-export.ts')
+    expect(exporter).toMatch(/const scope = analysisScope\(timelineLens\.blind, timelineLens\.self\)/)
+    expect(exporter.match(/\.\.\.coderIdsField\(coderIds\) \}/g)?.length).toBe(3)
+    expect(exporter).toMatch(/const viewer = analysisScope\(timelineLens\.blind, timelineLens\.self\)/)
+    expect(exporter.match(/\{ \.\.\.(?:params\.request|request), \.\.\.viewer \}/g)?.length).toBe(2)
+    expect(read('components/ExportDialog.tsx')).toMatch(/metricsApi\.rowMatrix\(projectId, undefined, 'csv', coderScope\)/)
   })
 
   it('the Text Coding export: the viewer alone while withholding, and nothing before the state settles', () => {

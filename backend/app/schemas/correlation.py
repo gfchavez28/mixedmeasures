@@ -51,6 +51,9 @@ class CorrelationMatrixResponse(BaseModel):
     #: OUT OF DATE (a member's cells moved since they were computed). Read, never
     #: recomputed, here; the client names them beside the recompute action.
     stale_domain_ids: list[int] = []
+    #: #1615 — how many of the variables asked for were left out because the viewer
+    #: is blind and each is a participant rating score (or computed from one).
+    withheld_rating_variables: int = 0
 
 
 class RegressionResult(BaseModel):
@@ -78,6 +81,9 @@ class ScatterDataResponse(BaseModel):
     #: OUT OF DATE (a member's cells moved since they were computed). Read, never
     #: recomputed, here; the client names them beside the recompute action.
     stale_domain_ids: list[int] = []
+    #: #1615 — how many of the variables asked for were left out because the viewer
+    #: is blind and each is a participant rating score (or computed from one).
+    withheld_rating_variables: int = 0
 
 
 class ScatterPair(BaseModel):
@@ -102,3 +108,6 @@ class ScatterMatrixResponse(BaseModel):
     #: OUT OF DATE (a member's cells moved since they were computed). Read, never
     #: recomputed, here; the client names them beside the recompute action.
     stale_domain_ids: list[int] = []
+    #: #1615 — how many of the variables asked for were left out because the viewer
+    #: is blind and each is a participant rating score (or computed from one).
+    withheld_rating_variables: int = 0

@@ -60,6 +60,7 @@ from .undefined_stats import (
     NO_VARIANCE,
     finite_or_none,
 )
+from .testable_groups import MIN_VALUES_PER_GROUP_PARAMETRIC, split_testable
 
 #: Below this a normal QQ plot says nothing a reader can act on, and `ppcc`
 #: is degenerate: any two points are exactly collinear, so the correlation is
@@ -122,14 +123,9 @@ def residuals_by_group(grouped: dict[str, list[float]]) -> tuple[list[float], in
     Returns ``(residuals, singleton_group_count)``.
 
     ⚠️ **A group of one contributes a residual of exactly 0**, because its mean
-    IS its single value. That is a property of estimating a mean from one point,
-    not evidence about normality, and a pile of exact zeros bends the middle of
-    the plot toward the line. They are still included, and the count is reported
-    so the caption says it out loud. ⚠️ The reason first given — *"dropping a
-    group would diagnose a different model from the one the panel ran"* — no
-    longer holds: since #1329 (1.5.9, D51) the panel's tests leave a one-value
-    group OUT (`testable_groups.split_testable`), as Levene now does. Whether this
-    diagnostic follows was not part of D51 — found 2026-11-02c, not filed.
+    IS its single value — a property of estimating a mean from one point, not
+    evidence about normality. Pure statistics: it counts them and keeps them.
+    `qq_summary`, the panel's diagnostic, never hands it one (#1549 (b)).
     """
     residuals: list[float] = []
     singletons = 0
@@ -149,18 +145,30 @@ def qq_summary(grouped: dict[str, list[float]]) -> dict | None:
     ``None`` only when there is nothing at all to describe; every other refusal
     carries a machine-readable reason, because a blank figure is
     indistinguishable from a broken tool (#566/#689).
+
+    🔴 **It diagnoses the model the parametric tests fit, so it takes their groups
+    (#1549 (b)).** Since #1329 (D51) the F, Tukey, the Welch t and Levene leave a
+    one-value group out (`testable_groups.split_testable`, two values a group); this
+    plot kept it, so beside an F over A and B it drew A, B and C's structural zero.
+    The plot asks the same function with the same minimum, and NAMES the groups it
+    left out (``singleton_groups``, as Levene's check does) — by the parametric rule
+    even when the panel runs the rank test, because normality is the parametric
+    model's assumption, and the rank test's own note may then name nobody.
     """
-    residuals, singletons = residuals_by_group(grouped)
+    names = list(grouped)
+    tested, left_out = split_testable(grouped, names, MIN_VALUES_PER_GROUP_PARAMETRIC)
+    residuals, _ = residuals_by_group({g: grouped[g] for g in tested})
     n = len(residuals)
 
     if n == 0:
-        return _refused(EMPTY_GROUP, singletons)
+        # Values were there and every group held one: too few, not empty.
+        return _refused(INSUFFICIENT_N if left_out else EMPTY_GROUP, left_out)
     if n < MIN_QQ_N:
-        return _refused(INSUFFICIENT_N, singletons)
+        return _refused(INSUFFICIENT_N, left_out)
     if len({round(r, 12) for r in residuals}) == 1:
         # Every residual identical — with residuals that means every group is
         # constant. There is no distribution to plot against.
-        return _refused(NO_VARIANCE, singletons)
+        return _refused(NO_VARIANCE, left_out)
 
     from scipy.stats import norm
 
@@ -172,7 +180,7 @@ def qq_summary(grouped: dict[str, list[float]]) -> dict | None:
     ppcc = _ppcc(theoretical, ordered)
     line = _reference_line(ordered, norm)
     if line is None:
-        return _refused(DEGENERATE, singletons)
+        return _refused(DEGENERATE, left_out)
 
     keep = _thin_indices(n, MAX_QQ_POINTS)
     points = []
@@ -186,7 +194,7 @@ def qq_summary(grouped: dict[str, list[float]]) -> dict | None:
         points.append({"theoretical": t, "sample": s})
 
     if not points:
-        return _refused(DEGENERATE, singletons)
+        return _refused(DEGENERATE, left_out)
 
     return {
         "points": points,
@@ -195,7 +203,8 @@ def qq_summary(grouped: dict[str, list[float]]) -> dict | None:
         "ppcc": ppcc,
         "line_slope": line[0],
         "line_intercept": line[1],
-        "singleton_group_count": singletons,
+        # #1549 (b): the groups of one this plot left out, by name.
+        "singleton_groups": left_out,
         "plotting_position": PLOTTING_POSITION_PPOINTS,
         "reference_line": REFERENCE_LINE_QUARTILE,
         "undefined_reason": None,
@@ -269,7 +278,7 @@ def _reference_line(ordered: list[float], norm) -> tuple[float, float] | None:
     return s, i
 
 
-def _refused(reason: str, singletons: int) -> dict:
+def _refused(reason: str, left_out: list[str]) -> dict:
     return {
         "points": [],
         "points_omitted": 0,
@@ -277,7 +286,7 @@ def _refused(reason: str, singletons: int) -> dict:
         "ppcc": None,
         "line_slope": None,
         "line_intercept": None,
-        "singleton_group_count": singletons,
+        "singleton_groups": left_out,
         "plotting_position": PLOTTING_POSITION_PPOINTS,
         "reference_line": REFERENCE_LINE_QUARTILE,
         "undefined_reason": reason,

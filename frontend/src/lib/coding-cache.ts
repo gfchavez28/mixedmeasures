@@ -70,6 +70,13 @@ export const DERIVED_COUNT_ROOTS = [
   'canvas-qual-chart',
   'canvas-qual-saturation',
   'canvas-qual-comparison',
+  // ROADMAP row 56 — the joint display's counts and rated cells, and a pin's suggested
+  // passages (their chips): a coding or a rating's code moves both.
+  'joint-display',
+  'joint-display-passages',
+  // Joint display slice 2, round 2 (r5): the case view and each row's misfit count — a case's
+  // "used / not used" is its codings, so a coding moves it.
+  'joint-display-cases',
   // #1337 — the Ratings page: an applied ratable code adds a passage to rate.
   'rating-queue',
   // #1337 — Text Coding's Analysis tab (`CrossAnalysisPanel`), mounted only on that
@@ -126,6 +133,10 @@ export const RATING_DERIVED_ROOTS = [
   'irr', 'reconciliation', 'consensus-status',
   'conversation-segments-readonly', 'document-segments-readonly', 'text-column-readonly',
   'datasets', 'dataset-data',
+  // ROADMAP row 56 — a joint display's rated cells are the live rollup (D168.2).
+  'joint-display',
+  // r5: a case's value on a participant-score variable, and a rule over one, move with a rating.
+  'joint-display-cases',
 ] as const
 
 /** The workbench lists — marked only with `opts.lists`. */

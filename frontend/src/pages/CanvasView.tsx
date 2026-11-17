@@ -7,8 +7,9 @@ import { useListLoad } from '@/hooks/useListLoad'
 import { LoadState } from '@/components/LoadStatus'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useHistory } from '@/hooks/useHistory'
+import { themeDeleteConfirmText, themeDeleteEntry, type ThemeDeleteHolds } from '@/lib/canvas-theme-delete-entry'
 import { useBlindMode } from '@/hooks/useBlindMode'
-import { useMachineCoderIds } from '@/hooks/useCoders'
+import { useCoders, useMachineCoderIds } from '@/hooks/useCoders'
 import { useAuth } from '@/lib/auth-context'
 import {
   Select,
@@ -45,7 +46,10 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { cn } from '@/lib/utils'
 import { excerptEmbedAttrs } from '@/lib/canvas-excerpt'
 import { formatRelativeTime } from '@/lib/format'
-import { exportCanvasMarkdown, exportCanvasHtml, exportCanvasPdf, captureCanvasChartPngs, downloadFile, fetchChartTables, docxChartTables } from '@/lib/canvas-export'
+import {
+  exportCanvasMarkdown, exportCanvasHtml, exportCanvasPdf, captureCanvasChartPngs, downloadFile, fetchChartTables,
+  docxChartTables, fetchDisplayReports, docxDisplayTables,
+} from '@/lib/canvas-export'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import InlineEditableText from '@/components/InlineEditableText'
@@ -53,6 +57,9 @@ import ThemeContextMenu from '@/components/canvas/ThemeContextMenu'
 import { extractMaterialSummary, extractAllMaterialSummaries, computeNestingDepth } from '@/components/canvas/canvas-utils'
 import type { InsertNodeHandle } from '@/components/canvas/ThemeEditor'
 import WritingCanvas from '@/components/canvas/WritingCanvas'
+import JointDisplayBuilder from '@/components/canvas/joint-display/JointDisplayBuilder'
+import DisplayDialogHost from '@/components/canvas/joint-display/DisplayDialogHost'
+import { newRowKey, type JointDisplay as JointDisplayModel } from '@/lib/joint-display'
 import SpatialCanvas from '@/components/canvas/SpatialCanvas'
 import MaterialsDrawer from '@/components/canvas/MaterialsDrawer'
 import ConvergenceMatrix from '@/components/canvas/ConvergenceMatrix'
@@ -322,7 +329,7 @@ export default function CanvasView() {
   const canvasId = canvasIdParam ? Number(canvasIdParam) : null
 
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; name: string } | null>(null)
-  const [deleteThemeTarget, setDeleteThemeTarget] = useState<{ id: number; name: string; materialCount: number; childCount: number } | null>(null)
+  const [deleteThemeTarget, setDeleteThemeTarget] = useState<{ id: number; name: string; holds: ThemeDeleteHolds } | null>(null)
   const [announcement, setAnnouncement] = useState('')
   const [newCanvasDialogOpen, setNewCanvasDialogOpen] = useState(false)
   /**
@@ -635,30 +642,34 @@ export default function CanvasView() {
     () => ({ blind: withholding, self: user?.id ?? null, machineCoderIds }),
     [withholding, user?.id, machineCoderIds],
   )
+  // A joint display's export names each meta-inference's author (D170) — by the roster's name,
+  // as the Compact view does; the report itself withholds a colleague's while blind.
+  const { coderMap } = useCoders()
+  const coderName = useCallback((id: number) => coderMap.get(id)?.username ?? null, [coderMap])
 
   const handleExportMarkdown = useCallback(async () => {
     if (!canvas) return
     const toastId = toast.loading('Exporting as Markdown...')
     try {
-      const md = await exportCanvasMarkdown(canvas, themes, projectId, timelineLens)
+      const md = await exportCanvasMarkdown(canvas, themes, projectId, timelineLens, coderName)
       downloadFile(md, `${canvas.name}.md`, 'text/markdown')
       toast.success('Exported as Markdown', { id: toastId })
     } catch {
       toast.error('Export failed', { id: toastId })
     }
-  }, [canvas, themes, projectId, timelineLens])
+  }, [canvas, themes, projectId, timelineLens, coderName])
 
   const handleExportHtml = useCallback(async () => {
     if (!canvas) return
     const toastId = toast.loading('Exporting as HTML...')
     try {
-      const html = await exportCanvasHtml(canvas, themes, projectId, undefined, timelineLens)
+      const html = await exportCanvasHtml(canvas, themes, projectId, undefined, timelineLens, coderName)
       downloadFile(html, `${canvas.name}.html`, 'text/html')
       toast.success('Exported as HTML', { id: toastId })
     } catch {
       toast.error('Export failed', { id: toastId })
     }
-  }, [canvas, themes, projectId, timelineLens])
+  }, [canvas, themes, projectId, timelineLens, coderName])
 
   // Charts can only be captured from the live DOM, which exists in the Writing view
   // (all themes mount there). Warn once when a canvas has charts but none were
@@ -684,11 +695,11 @@ export default function CanvasView() {
       const pngs = await captureCanvasChartPngs()
       warnIfChartsUncaptured(pngs)
       toast.dismiss(toastId)
-      await exportCanvasPdf(canvas, themes, projectId, pngs, timelineLens)
+      await exportCanvasPdf(canvas, themes, projectId, pngs, timelineLens, coderName)
     } catch {
       toast.error('PDF export failed', { id: toastId })
     }
-  }, [canvas, themes, projectId, warnIfChartsUncaptured, timelineLens])
+  }, [canvas, themes, projectId, warnIfChartsUncaptured, timelineLens, coderName])
 
   const handleExportDocx = useCallback(async () => {
     if (!canvas || !canvasId) return
@@ -697,14 +708,20 @@ export default function CanvasView() {
       const pngs = await captureCanvasChartPngs()
       warnIfChartsUncaptured(pngs)
       // #1406 D5 — a chart with no image prints the table the Markdown and HTML
-      // exports print; the server derives none of its own.
-      const tables = docxChartTables(await fetchChartTables(themes, projectId, timelineLens))
-      await canvasApi.exportDocx(projectId, canvasId, pngs, tables, canvas.name)
+      // exports print; the server derives none of its own. A joint display sends its
+      // report table the same way (D174), keyed by its `displayKey`.
+      const [chartTables, displayReports] = await Promise.all([
+        fetchChartTables(themes, projectId, timelineLens),
+        fetchDisplayReports(themes, projectId, timelineLens, coderName),
+      ])
+      await canvasApi.exportDocx(
+        projectId, canvasId, pngs, docxChartTables(chartTables), canvas.name, docxDisplayTables(displayReports),
+      )
       toast.success('Exported as Word', { id: toastId })
     } catch {
       toast.error('Word export failed', { id: toastId })
     }
-  }, [canvas, canvasId, themes, projectId, warnIfChartsUncaptured, timelineLens])
+  }, [canvas, canvasId, themes, projectId, warnIfChartsUncaptured, timelineLens, coderName])
 
   const handleUpdateTheme = useCallback((themeId: number, data: { name?: string; section_type?: 'theme' | 'prose'; color?: string; viz_x?: number; viz_y?: number; parent_theme_id?: number | null }) => {
     updateThemeMut.mutate({ themeId, data })
@@ -733,35 +750,34 @@ export default function CanvasView() {
     const theme = canvas?.themes.find(t => t.id === themeId)
     if (!theme) { deleteThemeMut.mutate(themeId); return }
 
-    const captured = { name: theme.name, color: theme.color ?? undefined }
-    let currentThemeId = themeId
-
-    history.execute({
-      type: 'canvas_theme_delete',
-      description: `Delete theme "${captured.name}"`,
-      redo: async () => {
-        await canvasApi.deleteTheme(projectId, canvasId!, currentThemeId)
-        setFocusedThemeId(prev => prev === currentThemeId ? null : prev)
-        invalidateCanvas()
+    // #1301 — the undo puts back everything the delete destroyed (the server's record of
+    // it, one restore call), not a `{ name, color }` shell. Built in ONE place.
+    const cid = canvasId!
+    history.execute(themeDeleteEntry({
+      themeId,
+      name: theme.name,
+      api: {
+        deleteTheme: id => canvasApi.deleteTheme(projectId, cid, id),
+        restoreTheme: record => canvasApi.restoreTheme(projectId, cid, record),
       },
-      undo: async () => {
-        const restored = await canvasApi.createTheme(projectId, canvasId!, captured)
-        currentThemeId = restored.id
-        invalidateCanvas()
-      },
-    })
+      onDeleted: id => setFocusedThemeId(prev => prev === id ? null : prev),
+      onChanged: invalidateCanvas,
+    }))
   }, [canvas?.themes, history, projectId, canvasId, deleteThemeMut, invalidateCanvas])
 
   const handleDeleteTheme = useCallback((themeId: number) => {
     const theme = canvas?.themes.find(t => t.id === themeId)
     if (!theme) return
     const summary = extractMaterialSummary(theme.content)
-    const materialCount = summary.excerptCount + summary.chartCount + summary.memoCount + summary.calloutCount
-    const childCount = canvas?.themes.filter(t => t.parent_theme_id === themeId).length ?? 0
-    if (materialCount === 0 && childCount === 0) {
+    const holds: ThemeDeleteHolds = {
+      materials: summary.excerptCount + summary.chartCount + summary.memoCount,
+      callouts: summary.calloutCount,
+      children: canvas?.themes.filter(t => t.parent_theme_id === themeId).length ?? 0,
+    }
+    if (holds.materials === 0 && holds.callouts === 0 && holds.children === 0) {
       executeThemeDelete(themeId)
     } else {
-      setDeleteThemeTarget({ id: themeId, name: theme.name, materialCount, childCount })
+      setDeleteThemeTarget({ id: themeId, name: theme.name, holds })
     }
   }, [canvas?.themes, executeThemeDelete])
 
@@ -832,6 +848,23 @@ export default function CanvasView() {
     } catch { toast.error('Failed to load memo') }
     finally { setInsertingId(null) }
   }, [projectId, themes.length, invalidateCanvas])
+
+  // ── Joint display (ROADMAP row 56): the builder, then the focused theme's insert ──
+
+  const [jointBuilderOpen, setJointBuilderOpen] = useState(false)
+  const openJointDisplayBuilder = useCallback(() => {
+    const ref = focusedEditorRef.current
+    if (!ref?.insertNode) { toast.info(themes.length > 0 ? 'Click into a theme editor first' : 'Create a theme first'); return }
+    if (ref.themeId === null) { toast.info('Switch to a theme to embed materials'); return }
+    setJointBuilderOpen(true)
+  }, [themes.length])
+  const handleInsertJointDisplay = useCallback((display: JointDisplayModel) => {
+    const ref = focusedEditorRef.current
+    if (!ref?.insertNode) { toast.info('Click into a theme editor first'); return }
+    // `displayKey` keys the display's export table (no Material id); a uuid, as a row key is.
+    ref.insertNode.insertJointDisplay({ displayKey: newRowKey(), display })
+    invalidateCanvas()
+  }, [invalidateCanvas])
 
   // ── Pending item handlers ─────────────────────────────────────────
 
@@ -1566,6 +1599,9 @@ export default function CanvasView() {
         )}
 
         {view === 'writing' && canvas && !canvasLoading && (
+          // The joint display's dialogs live OUTSIDE its node view, which ProseMirror re-creates
+          // whenever a modal dialog opens on this page (`joint-display/display-store.ts`).
+          <DisplayDialogHost projectId={projectId}>
           <WritingCanvas
             projectId={String(projectId)}
             canvas={canvas}
@@ -1574,6 +1610,7 @@ export default function CanvasView() {
             onDeleteTheme={handleDeleteTheme}
             onReorderThemes={handleReorderThemes}
             onOpenDrawer={toggleDrawer}
+            onOpenJointDisplayBuilder={openJointDisplayBuilder}
             focusedThemeId={focusedThemeId}
             onFocusTheme={setFocusedThemeId}
             pendingItems={canvas.pending_items ?? []}
@@ -1583,6 +1620,17 @@ export default function CanvasView() {
             themeInsertNodeRefs={themeInsertNodeRefs.current}
             showColorBars={showColorBars}
             onContentSaved={invalidateCanvas}
+          />
+          </DisplayDialogHost>
+        )}
+        {jointBuilderOpen && (
+          <JointDisplayBuilder
+            open={jointBuilderOpen}
+            onOpenChange={setJointBuilderOpen}
+            projectId={projectId}
+            initial={null}
+            mode="insert"
+            onSubmit={handleInsertJointDisplay}
           />
         )}
 
@@ -1737,18 +1785,15 @@ export default function CanvasView() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete section?</AlertDialogTitle>
             <AlertDialogDescription>
-              "{deleteThemeTarget?.name}"
-              {(deleteThemeTarget?.materialCount ?? 0) > 0 && ` contains ${deleteThemeTarget!.materialCount} material${deleteThemeTarget!.materialCount !== 1 ? 's' : ''} that will be permanently deleted`}
-              {(deleteThemeTarget?.materialCount ?? 0) > 0 && (deleteThemeTarget?.childCount ?? 0) > 0 && ', and'}
-              {(deleteThemeTarget?.childCount ?? 0) > 0 && ` has ${deleteThemeTarget!.childCount} nested theme${deleteThemeTarget!.childCount !== 1 ? 's' : ''} that will be un-nested`}
-              .
+              {/* #1301 D269 — the materials stay in the project, and Ctrl+Z undoes the delete. */}
+              {deleteThemeTarget && themeDeleteConfirmText(deleteThemeTarget.name, deleteThemeTarget.holds)}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              variant="destructive"
               onClick={() => { if (deleteThemeTarget) { executeThemeDelete(deleteThemeTarget.id); setDeleteThemeTarget(null) } }}
-              className="bg-red-600 hover:bg-red-700 text-white"
             >
               Delete
             </AlertDialogAction>

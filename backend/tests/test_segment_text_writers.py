@@ -46,7 +46,9 @@ ALLOWLIST: dict[str, str] = {
         "no quote is left to carry (#1320 owns this path).",
     "routers/search.py::search_study":
         "NOT A SEGMENT: `response.text` is the search response's text-results field.",
-    "services/canvas_export.py::_render_node":
+    # Session C (2026-11-12f) moved the table writer out of `_render_node` into `_write_table`,
+    # which the chart tables and the joint display's report both call.
+    "services/canvas_export.py::_write_table":
         "NOT A SEGMENT: `cell.text` is a python-docx table cell in the canvas export.",
     "services/codebook_exchange.py::export_codebook_qdc.build_code_element":
         "NOT A SEGMENT: `desc.text` is an XML element in the .qdc codebook export.",

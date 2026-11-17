@@ -31,6 +31,8 @@ import { metricsApi } from '@/lib/api'
 import { exportCanvasHtml, exportCanvasMarkdown } from './canvas-export'
 
 const LENS = { blind: false, self: null, machineCoderIds: new Set<number>() as ReadonlySet<number> }
+/** No joint display here, so no author is named. */
+const NO_NAMES = () => null
 const CANVAS = { id: 1, name: 'Report "Q3" <draft>' } as never
 
 function linkPara(href: unknown, text = 'see here') {
@@ -42,7 +44,7 @@ function themes(...nodes: unknown[]): CanvasTheme[] {
 }
 
 async function html(nodes: unknown[], pngs = new Map<number, string>()): Promise<Document> {
-  const out = await exportCanvasHtml(CANVAS, themes(...nodes), 3, pngs, LENS)
+  const out = await exportCanvasHtml(CANVAS, themes(...nodes), 3, pngs, LENS, NO_NAMES)
   return new DOMParser().parseFromString(out, 'text/html')
 }
 
@@ -132,10 +134,12 @@ describe('#1339 — the scheme allow-list', () => {
   }
 
   it('the Markdown export applies the same predicate (a refused link is its words)', async () => {
-    const md = await exportCanvasMarkdown(CANVAS, themes(linkPara('javascript:alert(1)'), linkPara('https://example.org', 'ok')), 3, LENS)
+    const md = await exportCanvasMarkdown(CANVAS, themes(linkPara('javascript:alert(1)'), linkPara('https://example.org', 'ok')), 3, LENS, NO_NAMES)
     expect(md).not.toContain('javascript:')
     expect(md).toContain('see here')
-    expect(md).toContain('[ok](https://example.org)')
+    // #1422: the destination is in pointy brackets, so no `)` or space in it can end it
+    // (the addendum's case: `canvas-export-markdown-1422.test.ts`).
+    expect(md).toContain('[ok](<https://example.org>)')
   })
 })
 

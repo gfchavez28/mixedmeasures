@@ -40,7 +40,7 @@ export type {
 
 // Segments
 export { segmentsApi } from './segments'
-export type { Segment, SegmentNoteInfo, SegmentExcerptInfo, AppliedCodeDetail } from './segments'
+export type { Segment, SegmentNoteInfo, SegmentExcerptInfo, AppliedCodeDetail, AppliedCodeIdentity } from './segments'
 
 // Codes & Categories
 export { codesApi, categoriesApi } from './codes'
@@ -311,6 +311,7 @@ export type {
   DemographicComparisonResponse,
   SaturationPoint,
   SaturationResponse,
+  SaturationParams,
   TextColumnInfo,
   ConsensusStatus,
   ReconciliationCoder,
@@ -461,6 +462,10 @@ export type {
   SnapshotRelationship,
   ThemeCreateRequest,
   ThemeUpdateRequest,
+  ThemeRestoreRecord,
+  ThemeDeleteResult,
+  ThemeRestoreLost,
+  ThemeRestoreResult,
 } from './canvas'
 
 // Project Portability
@@ -484,6 +489,34 @@ export type {
   CodeMapping,
   CodeMappingDecision,
 } from './project-portability'
+
+// Joint displays (ROADMAP row 56) — the canvas node's numbers, pin suggestions and attribution
+export { jointDisplayApi } from './joint-display'
+export type {
+  JointDisplayComputeRequest,
+  JointDisplayComputeResponse,
+  JointDisplayRowRequest,
+  JointDisplayRowResult,
+  JointDisplayStrandResult,
+  JointDisplayStrandRequest,
+  JointDisplayRowStrand,
+  JointDisplayObservationCode,
+  JointDisplayCodeStrand,
+  JointDisplayCodeCell,
+  JointDisplayVariableStrand,
+  JointDisplayVariableCell,
+  JointDisplayGroup,
+  JointDisplayPassagesRequest,
+  JointDisplayPassagesResponse,
+  JointDisplayAnswerPassage,
+  JointDisplayPinFact,
+  JointDisplayPinFactsResponse,
+  JointDisplayCasesRequest,
+  JointDisplayCasesResponse,
+  JointDisplayCaseFacts,
+  JointDisplayCase,
+  JointDisplayInactiveCode,
+} from './joint-display'
 
 // Code sets (row 48) — a mutually exclusive group of codes read as one variable
 export { codeSetsApi } from './code-sets'

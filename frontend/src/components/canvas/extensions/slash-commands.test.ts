@@ -33,9 +33,9 @@ describe('every slash command is classified as deferred or immediate', () => {
 
   it('defers exactly the commands that open something dismissable', () => {
     // Measured against `WritingCanvas.handleThemeSlashCommand`: excerpt/chart/
-    // memo open a drawer, image opens the OS file picker. heading/section
-    // create a theme outright and open nothing.
-    expect([...DEFERRED_SLASH_TYPES].sort()).toEqual(['chart', 'excerpt', 'image', 'memo'])
+    // memo open a drawer, image opens the OS file picker, joint opens the joint
+    // display's builder (row 56). heading/section create a theme outright and open nothing.
+    expect([...DEFERRED_SLASH_TYPES].sort()).toEqual(['chart', 'excerpt', 'image', 'joint', 'memo'])
   })
 })
 
@@ -55,15 +55,27 @@ describe('the editor consumes the trigger at the INSERT, not at the choice', () 
     expect(source).toContain('pendingSlashRange')
   })
 
-  it('all four insert handles go through ONE consumer', () => {
-    // The reason this is a single helper: four call sites deleting a stored
-    // range independently is four chances to forget the staleness check.
-    for (const node of ['excerpt-embed', 'chart-embed', 'memo-embed', 'image-embed']) {
+  it('all five insert handles go through ONE consumer', () => {
+    // The reason this is a single helper: five call sites deleting a stored
+    // range independently is five chances to forget the staleness check.
+    for (const node of ['excerpt-embed', 'chart-embed', 'memo-embed', 'image-embed', 'joint-display']) {
       expect(source).toContain(`insertWithPendingSlash('${node}'`)
     }
     // …and nobody inserts one of those nodes around it.
-    const direct = source.match(/insertContent\(\{ type: '(excerpt|chart|memo|image)-embed'/g)
+    const direct = source.match(/insertContent\(\{ type: '((excerpt|chart|memo|image)-embed|joint-display)'/g)
     expect(direct, 'an embed is inserted without consuming the pending slash range').toBeNull()
+  })
+
+  it('each popup update refreshes the COMMAND, whose closure holds that update’s range (2026-11-12e)', () => {
+    // Tiptap's suggestion hands a new `command` on every update, closed over that update's
+    // range. Keeping onStart's — the bare "/" — made `/divider` + Enter delete the "/" and
+    // leave "divider" behind (driven). The mention popup had the same shape.
+    const update = (src: string) => src.match(/onUpdate: \(props\) => \{([\s\S]*?)\n\s*\},/)?.[1] ?? ''
+    expect(update(source)).toMatch(/command: props\.command/)
+    const MENTION = join(__dirname, '..', 'useCanvasEditor.ts')
+    const mention = stripComments(readFileSync(MENTION, 'utf8'), MENTION)
+    expect(mention).toContain('setMentionPopup')
+    expect(update(mention)).toMatch(/command: props\.command/)
   })
 
   it('verifies the trigger is still there before deleting it', () => {

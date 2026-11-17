@@ -13,6 +13,8 @@ import {
   type TextCodingColumn,
 } from '@/lib/api'
 import { FILTERABLE_TYPES } from '@/lib/dataset-constants'
+import { useBlindScope } from '@/hooks/useBlindScope'
+import { WITHHELD_VALUES_NOTICE } from '@/lib/blind-rating-columns'
 
 interface SubgroupFilterPanelProps {
   projectId: number
@@ -385,10 +387,15 @@ function ValueSelector({
   selectedValues: string[]
   onChange: (values: string[]) => void
 }) {
+  // #1615: the values offered ARE the column's values, and a band of a participant score
+  // sorts people by every coder's ratings — so while blind mode withholds, the request
+  // carries the viewer's scope (in the key, waiting on `scopeReady` — fail closed), as the
+  // Variables view's *Observed values* does, and the server sends none for a rating column.
+  const { coderScope, scopeReady } = useBlindScope(projectId)
   const { data: freqData } = useQuery({
-    queryKey: ['column-frequencies', projectId, column.dataset_id, column.id],
-    queryFn: () => recodeApi.getFrequencies(projectId, column.dataset_id, column.id),
-    enabled: column.id > 0,
+    queryKey: ['column-frequencies', projectId, column.dataset_id, column.id, coderScope ?? 'every-coder'],
+    queryFn: () => recodeApi.getFrequencies(projectId, column.dataset_id, column.id, coderScope),
+    enabled: column.id > 0 && scopeReady,
   })
 
   const distinctValues = useMemo(() => {
@@ -427,7 +434,9 @@ function ValueSelector({
           </button>
         )
       })}
-      {distinctValues.length === 0 && (
+      {freqData?.withheld_while_blind ? (
+        <p className="text-xs text-mm-text-muted px-3 py-2">{WITHHELD_VALUES_NOTICE}</p>
+      ) : distinctValues.length === 0 && (
         <p className="text-xs text-mm-text-faint px-3 py-2">Loading values...</p>
       )}
     </div>

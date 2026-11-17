@@ -68,6 +68,7 @@ import {
   type GroupOrganization,
 } from '@/lib/chart-data'
 import type { AnalysisDemographicItem } from '@/lib/api'
+import { isWithheld, WITHHELD_OPTION_NOTE } from '@/lib/analysis-scope'
 
 interface ChartOptionsPanelProps {
   chartType: ChartType | null
@@ -797,8 +798,9 @@ export default function ChartOptionsPanel({
                         <>
                           {datasetGroupingAvailable && <SelectSeparator />}
                           {filteredDemographics.map(d => (
-                            <SelectItem key={d.id} value={String(d.id)}>
+                            <SelectItem key={d.id} value={String(d.id)} disabled={isWithheld(d)}>
                               {d.column_name || d.column_text} ({d.dataset_name})
+                              {isWithheld(d) && <span className="text-mm-text-faint"> — {WITHHELD_OPTION_NOTE}</span>}
                             </SelectItem>
                           ))}
                         </>
@@ -860,8 +862,9 @@ export default function ChartOptionsPanel({
                           <>
                             {showDim2SharedDemographics && <SelectSeparator />}
                             {dim2Demographics.map(d => (
-                              <SelectItem key={d.id} value={String(d.id)}>
+                              <SelectItem key={d.id} value={String(d.id)} disabled={isWithheld(d)}>
                                 {d.column_name || d.column_text} ({d.dataset_name})
+                                {isWithheld(d) && <span className="text-mm-text-faint"> — {WITHHELD_OPTION_NOTE}</span>}
                               </SelectItem>
                             ))}
                           </>

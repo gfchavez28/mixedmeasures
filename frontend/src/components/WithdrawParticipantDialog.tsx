@@ -49,7 +49,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import type { WithdrawalReport } from '@/lib/api'
 import type { ListLoad } from '@/lib/list-status'
-import { removedSummary, keptSummary, WITHDRAWAL_RESIDUAL_NOTE } from '@/lib/withdrawal-copy'
+import { removedSummary, keptSummary, misfitCasesNote, WITHDRAWAL_RESIDUAL_NOTE } from '@/lib/withdrawal-copy'
 import { withdrawConfirmTitle, type ParticipantNaming } from '@/lib/participant-naming'
 import { MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
 import { useKeepInViewWhen } from '@/hooks/useKeepInViewWhen'
@@ -97,6 +97,9 @@ export default function WithdrawParticipantDialog({
 }: Props) {
   const removed = removedSummary(report)
   const kept = keptSummary(report)
+  // Joint display slice 2 (r3-6; wired in round 2, r5-9): their entries in a joint display's
+  // "cases that don't fit", each with the researcher's reason — inside the description.
+  const misfitNote = report ? misfitCasesNote(report) : null
   const waiting = report === null
   // #1139 — the wait panel goes in above the footer as the work starts, and the
   // focused "Removing…" sat below the capped dialog's visible part (measured at
@@ -151,11 +154,16 @@ export default function WithdrawParticipantDialog({
                   {kept.length > 0 && (
                     <div>
                       <p className="font-medium text-mm-text mb-1">This will stay</p>
-                      <ul className="space-y-0.5 text-mm-text-secondary list-disc pl-4">
+                      {/* #1606 (D235) — a line names the backup folder's path, and
+                          D234 the researcher's project names: either can be one
+                          unbroken string, so it may break anywhere rather than
+                          widen the dialog. */}
+                      <ul className="space-y-0.5 text-mm-text-secondary list-disc pl-4 [overflow-wrap:anywhere]">
                         {kept.map(l => <li key={l}>{l}</li>)}
                       </ul>
                     </div>
                   )}
+                  {misfitNote && <p className="text-mm-text-secondary">{misfitNote}</p>}
                 </div>
               )}
 

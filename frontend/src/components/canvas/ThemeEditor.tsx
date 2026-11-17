@@ -16,12 +16,13 @@ import { useProjectLayout } from '@/layouts/ProjectLayout'
 import ThemeMentionList from './ThemeMentionList'
 import type { ThemeMentionItem } from './ThemeMentionList'
 import { useCanvasEditor } from './useCanvasEditor'
-import { ExcerptEmbed, ChartEmbed, MemoEmbed, CalloutStat, ImageEmbed, SlashCommand } from './extensions'
+import { ExcerptEmbed, ChartEmbed, MemoEmbed, CalloutStat, ImageEmbed, JointDisplay, SlashCommand } from './extensions'
 import SlashCommandList from './SlashCommandList'
 import type { SlashCommandListRef } from './SlashCommandList'
 import { COMMANDS, DEFERRED_SLASH_TYPES, type SlashCommand as SlashCommandItem } from './extensions/slash-commands'
 import { describeRewrites } from './canvas-utils'
 import { CURRENT_FIGURE_EPOCH } from './figure-baseline'
+import { placeBlock } from './insert-block'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,8 @@ export interface InsertNodeHandle {
   insertChart: (attrs: Record<string, unknown>) => void
   insertMemo: (attrs: Record<string, unknown>) => void
   insertImage: (attrs: Record<string, unknown>) => void
+  /** ROADMAP row 56 — a joint display: `{ displayKey, display }` from the builder. */
+  insertJointDisplay: (attrs: Record<string, unknown>) => void
 }
 
 interface ThemeEditorProps {
@@ -107,6 +110,10 @@ const ThemeEditor = forwardRef<InsertNodeHandle, ThemeEditorProps>(function Them
     ChartEmbed,
     MemoEmbed,
     CalloutStat,
+    // ROADMAP row 56 (D162) — registered in BOTH editors (here and `CanvasCompareView`), or
+    // `cleanCanvasContent`'s schema-driven fallback turns the node into an empty paragraph and
+    // this editor's self-healing save DELETES it (D164's older-build case, in this build).
+    JointDisplay,
     ImageEmbed.configure({
       uploadImage: (file: File) => canvasApi.uploadImage(projectId, file),
     }),
@@ -139,9 +146,13 @@ const ThemeEditor = forwardRef<InsertNodeHandle, ThemeEditorProps>(function Them
           if (c.type === 'text') return
           if (c.type === 'divider') { ed.chain().focus().setHorizontalRule().run(); return }
           if (c.type === 'callout') {
-            ed.chain().focus().insertContent({
-              type: 'callout-stat',
-              attrs: { value: '', label: '' },
+            // #1341: placed like every other embed, so the next insert cannot replace it.
+            ed.chain().focus().command(({ tr }) => {
+              placeBlock(tr, tr.doc.type.schema.nodeFromJSON({
+                type: 'callout-stat',
+                attrs: { value: '', label: '' },
+              }))
+              return true
             }).run()
             return
           }
@@ -157,9 +168,18 @@ const ThemeEditor = forwardRef<InsertNodeHandle, ThemeEditorProps>(function Them
             })
           },
           onUpdate: (props) => {
+            // 🔴 `command` too: each update's `command` closes over THAT update's range. Keeping
+            // onStart's meant the range was the bare "/" — so `/divider` + Enter deleted the "/"
+            // and left "divider" in the theme, for every typed command (found driving the joint
+            // display's `/joint`, 2026-11-12e).
             setSlashPopup(prev =>
               prev
-                ? { ...prev, items: props.items as SlashCommandItem[], clientRect: props.clientRect ?? null }
+                ? {
+                    ...prev,
+                    items: props.items as SlashCommandItem[],
+                    command: props.command as (item: SlashCommandItem) => void,
+                    clientRect: props.clientRect ?? null,
+                  }
                 : null,
             )
           },
@@ -274,9 +294,11 @@ const ThemeEditor = forwardRef<InsertNodeHandle, ThemeEditorProps>(function Them
    * Insert a node, first consuming the slash trigger that asked for it (#823j).
    *
    * ⚠️ The pending range is consumed ONCE and only if the text is still there.
-   * These handles serve three other entry points — the Materials drawer, a
-   * pending-item click, and a drag onto the theme — none of which typed
-   * anything, so a stale range must never delete a researcher's prose. The
+   * These five handles finish the deferred slash commands (`/excerpt`, `/chart`
+   * and `/memo` through the drawer, `/image`, `/joint`) and also serve three entry points that typed
+   * nothing — the Materials drawer opened from its button, a pending-item click,
+   * and a drag onto the theme — so a stale range must never delete a
+   * researcher's prose. The
    * `startsWith('/')` check is what makes that safe: if the document moved on,
    * the trigger is simply left alone.
    *
@@ -295,7 +317,13 @@ const ThemeEditor = forwardRef<InsertNodeHandle, ThemeEditorProps>(function Them
         const text = editor.state.doc.textBetween(pending.from, pending.to, '\n', '\0')
         if (text.startsWith('/')) chain = chain.deleteRange(pending)
       }
-      chain.insertContent({ type, attrs }).run()
+      // #1341: `insertContent` left the new embed node-SELECTED, so the next insert replaced
+      // it (two drawer inserts left one). `placeBlock` never replaces a selected embed and
+      // leaves the caret after the new one.
+      chain.command(({ tr }) => {
+        placeBlock(tr, tr.doc.type.schema.nodeFromJSON({ type, attrs }))
+        return true
+      }).run()
     },
     [editor],
   )
@@ -320,15 +348,22 @@ const ThemeEditor = forwardRef<InsertNodeHandle, ThemeEditorProps>(function Them
     (attrs: Record<string, unknown>) => insertWithPendingSlash('image-embed', attrs),
     [insertWithPendingSlash],
   )
+  // A joint display is placed under the current fingerprint generation too — this is its ONE
+  // door (the builder, through `CanvasView`; the server creates none).
+  const insertJointDisplay = useCallback(
+    (attrs: Record<string, unknown>) =>
+      insertWithPendingSlash('joint-display', { ...attrs, figureEpoch: CURRENT_FIGURE_EPOCH }),
+    [insertWithPendingSlash],
+  )
 
   // Expose via both ref patterns (forwardRef and MutableRefObject)
-  useImperativeHandle(ref, () => ({ insertExcerpt, insertChart, insertMemo, insertImage }), [insertExcerpt, insertChart, insertMemo, insertImage])
+  useImperativeHandle(ref, () => ({ insertExcerpt, insertChart, insertMemo, insertImage, insertJointDisplay }), [insertExcerpt, insertChart, insertMemo, insertImage, insertJointDisplay])
   useEffect(() => {
     if (insertNodeRef) {
-      insertNodeRef.current = { insertExcerpt, insertChart, insertMemo, insertImage }
+      insertNodeRef.current = { insertExcerpt, insertChart, insertMemo, insertImage, insertJointDisplay }
       return () => { insertNodeRef.current = null }
     }
-  }, [insertNodeRef, insertExcerpt, insertChart, insertMemo, insertImage])
+  }, [insertNodeRef, insertExcerpt, insertChart, insertMemo, insertImage, insertJointDisplay])
 
   // Expose imperative focus
   useEffect(() => {

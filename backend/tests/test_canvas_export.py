@@ -18,9 +18,9 @@ from app.main import app
 from app.models.metric import ComputedResult, MetricDefinition
 from app.models.project import Project
 from app.services.canvas import create_canvas, create_theme, get_canvas_full
-from app.services.canvas_export import ChartTable, export_canvas_docx
+from app.services.canvas_export import ChartTable, DisplayAppendix, DisplayTable, export_canvas_docx
 from app.routers import canvas as canvas_router
-from app.routers.canvas import _decode_chart_images, _decode_chart_tables
+from app.routers.canvas import _decode_chart_images, _decode_chart_tables, _decode_display_tables
 
 
 def _make_png(w: int = 8, h: int = 8) -> bytes:
@@ -237,6 +237,162 @@ def test_export_docx_endpoint_renders_the_posted_chart_table(client):
     resp = client.post(f"/api/projects/{pid}/canvases/{cid}/export-docx", json=body, headers=headers)
     assert resp.status_code == 200, resp.text
     assert _table_cells(Document(io.BytesIO(resp.content))) == [_GROUPED.headers, *_GROUPED.rows]
+
+
+# ── Joint display (ROADMAP row 56, D174): the report table is the CLIENT's ────
+
+
+def _canvas_with_display(db, key="k-1"):
+    p = Project(name="P", user_id=1)
+    db.add(p)
+    db.flush()
+    c = create_canvas(db, p.id, "C")
+    t = create_theme(db, c.id, "Findings")
+    t.content = json.dumps({"type": "doc", "content": [
+        {"type": "paragraph", "content": [{"type": "text", "text": "Before"}]},
+        {"type": "joint-display", "attrs": {"displayKey": key, "figureEpoch": 3, "display": {"title": "T", "rows": []}}},
+        {"type": "paragraph", "content": [{"type": "text", "text": "After"}]},
+    ]})
+    db.flush()
+    return p, get_canvas_full(db, p.id, c.id)
+
+
+#: The report `lib/joint-display-report.ts` builds: a construct row, then a different-unit
+#: result BESIDE it (one cell, merged across), then its own table in the appendix.
+_REPORT = DisplayTable(
+    title="Side-by-side joint display by construct: T",
+    headers=["Construct", "High (2 participants)", "Low (2 participants)", "High − Low", "Fit", "Meta-inference (type)"],
+    rows=[
+        ["Training", "Coded: Adequacy 2 of 2.", "Coded: Adequacy 0 of 2.", "Adequacy: +100 pp.", "Confirmation", "Not written."],
+        ["Beside “Training”: Post-test by School, a saved comparison (rows of Scores, by School)."],
+    ],
+    span_rows=frozenset({1}),
+    note="Groups: the participants with each value of Gain. Numbers as computed on 12 Nov 2026.",
+    appendix=[DisplayAppendix(title="Post-test by School", headers=["Group", "n"], rows=[["A", "5"]], note="Welch t")],
+)
+
+
+def _body(doc) -> str:
+    return "\n".join(par.text for par in doc.paragraphs)
+
+
+def test_export_docx_renders_a_joint_display_report(db_session):
+    p, canvas = _canvas_with_display(db_session)
+    doc = Document(export_canvas_docx(canvas, p.id, None, None, {"k-1": _REPORT}))
+    assert len(doc.tables) == 2  # the display, then the beside result's own table
+    grid = [[c.text for c in row.cells] for row in doc.tables[0].rows]
+    assert grid[0] == _REPORT.headers and grid[1] == _REPORT.rows[0]
+    # The beside row is ONE cell spanning the table (python-docx repeats a merged cell per column).
+    assert len(doc.tables[0].rows[2]._tr.tc_lst) == 1
+    assert grid[2] == [_REPORT.rows[1][0]] * len(_REPORT.headers)
+    assert all(r.bold for r in doc.tables[0].rows[0].cells[0].paragraphs[0].runs)
+    body = _body(doc)
+    assert _REPORT.title in body and _REPORT.note in body  # the note reaches Word (D176's build note)
+    assert "Post-test by School" in body and "Welch t" in body
+    assert [[c.text for c in row.cells] for row in doc.tables[1].rows] == [["Group", "n"], ["A", "5"]]
+    # In its place in the theme, between the prose around it.
+    assert body.index("Before") < body.index(_REPORT.title) < body.index("After")
+
+
+def test_export_docx_never_renders_a_display_as_nothing(db_session):
+    """Before session C the node had no arm: the walker found no children and the display
+    vanished from the Word file without a word."""
+    p, canvas = _canvas_with_display(db_session)
+    doc = Document(export_canvas_docx(canvas, p.id, None, None, None))
+    assert len(doc.tables) == 0
+    assert "Joint display not available in this export." in _body(doc)
+    doc = Document(export_canvas_docx(canvas, p.id, None, None, {"another-key": _REPORT}))
+    assert "Joint display not available in this export." in _body(doc)
+
+
+def test_export_docx_prints_a_displays_message_or_its_size_refusal(db_session):
+    p, canvas = _canvas_with_display(db_session)
+    msg = DisplayTable(title="Side-by-side joint display by construct", message="This display has no grouping variable yet.")
+    doc = Document(export_canvas_docx(canvas, p.id, None, None, {"k-1": msg}))
+    assert len(doc.tables) == 0
+    assert msg.title in _body(doc) and msg.message in _body(doc)
+    big = DisplayTable(title="Side-by-side joint display by construct: T", too_large=True)
+    doc = Document(export_canvas_docx(canvas, p.id, None, None, {"k-1": big}))
+    assert len(doc.tables) == 0 and "Table too large for the Word export" in _body(doc)
+
+
+def _wire(over=None, **kw):
+    t = {
+        "title": _REPORT.title, "message": None, "headers": _REPORT.headers,
+        "rows": _REPORT.rows, "span_rows": [1], "note": _REPORT.note,
+        "appendix": [{"title": "Post-test by School", "headers": ["Group", "n"], "rows": [["A", "5"]], "note": "Welch t"}],
+    }
+    t.update(over or {})
+    t.update(kw)
+    return t
+
+
+def test_decode_display_tables_keeps_a_valid_report_and_pads_a_short_row():
+    out = _decode_display_tables({"k-1": _wire()}, 0)
+    assert out == {"k-1": _REPORT}
+    short = _decode_display_tables({"k": _wire(rows=[["Training", "x"]], span_rows=[])}, 0)
+    assert short["k"].rows == [["Training", "x", "", "", "", ""]]
+    msg = _decode_display_tables({"k": {"title": "T", "message": "No grouping variable."}}, 0)
+    assert msg == {"k": DisplayTable(title="T", message="No grouping variable.")}
+
+
+def test_decode_display_tables_drops_malformed_input():
+    out = _decode_display_tables({
+        "": _wire(),                                             # no key
+        "x" * 65: _wire(),                                       # a key no displayKey has
+        "a": "a report",                                         # not an object
+        "b": _wire(title=None),                                  # no title
+        "c": _wire(headers=[]),                                  # no columns
+        "d": _wire(rows=[["1"] * 7], span_rows=[]),              # a value with no column
+        "e": _wire(span_rows=[0]),                               # a span over a row of six cells
+        "f": _wire(span_rows=[5]),                               # a span over a row that is not there
+        "g": _wire(span_rows=[True]),                            # a bool is not a row index
+        "h": _wire(rows=[[1, 2, 3, 4, 5, 6]], span_rows=[]),     # a non-string cell
+        "i": _wire(appendix=[{"title": "x", "headers": [], "rows": []}]),  # an appendix with no columns
+        "j": _wire(note=None),                                   # a note that is not text
+    }, 0)
+    assert out == {}
+
+
+def test_decode_display_tables_marks_an_oversize_report_never_truncates_it():
+    long_cell = _wire(rows=[["Training", "x" * (canvas_router._MAX_DISPLAY_CELL_CHARS + 1), "", "", "", ""]], span_rows=[])
+    long_note = _wire(note="n" * (canvas_router._MAX_DISPLAY_NOTE_CHARS + 1))
+    tall = _wire(rows=[["c", "", "", "", "", ""]] * (canvas_router._MAX_TABLE_ROWS + 1), span_rows=[])
+    out = _decode_display_tables({"1": long_cell, "2": long_note, "3": tall}, 0)
+    assert {k: v.too_large for k, v in out.items()} == {"1": True, "2": True, "3": True}
+    assert all(v.title for v in out.values()) and not any(v.rows for v in out.values())
+    # A meta-inference longer than a chart cell may be is still printed (the display's own limit).
+    ok = _decode_display_tables({"k": _wire(rows=[["c", "x" * 5000, "", "", "", ""]], span_rows=[])}, 0)
+    assert not ok["k"].too_large
+
+
+def test_decode_display_tables_shares_the_documents_cell_total_with_the_charts():
+    cells = len(_REPORT.headers) * (len(_REPORT.rows) + 1) + 2 * 2  # the display + its appendix
+    assert not _decode_display_tables({"k": _wire()}, canvas_router._MAX_TABLE_TOTAL_CELLS - cells)["k"].too_large
+    assert _decode_display_tables({"k": _wire()}, canvas_router._MAX_TABLE_TOTAL_CELLS - cells + 1)["k"].too_large
+
+
+def test_export_docx_endpoint_renders_the_posted_display_table(client):
+    """The pipeline's MOUTH: a `display_tables` body reaches the document."""
+    headers = {"X-CSRF-Token": client.get("/api/auth/status").json()["user"]["csrf_token"]}
+    pid = client.post("/api/projects", json={"name": "P"}, headers=headers).json()["id"]
+    db = SessionLocal()
+    try:
+        c = create_canvas(db, pid, "C")
+        t = create_theme(db, c.id, "Findings")
+        t.content = json.dumps({"type": "doc", "content": [
+            {"type": "joint-display", "attrs": {"displayKey": "k-1", "display": {"rows": []}}},
+        ]})
+        db.commit()
+        cid = c.id
+    finally:
+        db.close()
+    resp = client.post(f"/api/projects/{pid}/canvases/{cid}/export-docx",
+                       json={"display_tables": {"k-1": _wire()}}, headers=headers)
+    assert resp.status_code == 200, resp.text
+    doc = Document(io.BytesIO(resp.content))
+    assert [c.text for c in doc.tables[0].rows[1].cells] == _REPORT.rows[0]
+    assert _REPORT.note in _body(doc)
 
 
 # ── #370: base64/PNG validation guard (router helper) ────────────────────────

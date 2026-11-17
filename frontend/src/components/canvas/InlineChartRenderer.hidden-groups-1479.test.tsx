@@ -32,6 +32,8 @@ const { seen, recorder } = vi.hoisted(() => {
   })
   return { seen, recorder }
 })
+// #1615 — the quantitative reads take the blind scope from this hook; every coder here.
+vi.mock('@/hooks/useAnalysisScope', () => ({ useAnalysisScope: () => ({ coderIds: null, coderScope: undefined, scopeKey: 'every-coder', scopeReady: true }) }))
 vi.mock('html-to-image', () => ({ toPng: vi.fn() }))
 for (const name of [
   'HorizontalBarChart', 'GroupedScalarBarChart', 'HeatmapTable', 'FrequencyBarChart',

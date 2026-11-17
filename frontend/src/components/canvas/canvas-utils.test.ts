@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { cleanCanvasContent, describeRewrites } from './canvas-utils'
+import { cleanCanvasContent, describeRewrites, extractMaterialSummary } from './canvas-utils'
 import type { JSONContent } from '@tiptap/core'
 
 // Allowlist mirrors the actual schema produced by useCanvasEditor (StarterKit
@@ -244,5 +244,21 @@ describe('describeRewrites', () => {
   it('mentions dropped marks by name', () => {
     const text = describeRewrites([{ type: 'code', transformedTo: 'mark-dropped' }])
     expect(text).toContain('code')
+  })
+})
+
+describe('a joint display’s pins are quotes on the canvas (row 56, D163)', () => {
+  it('counts each live pin as an excerpt, as the server’s referenced sources do — never a withdrawn one', () => {
+    const doc = { type: 'doc', content: [
+      { type: 'excerpt-embed', attrs: { excerptId: 5, displayText: 'Prose quote.' } },
+      { type: 'joint-display', attrs: { displayKey: 'k', display: { rows: [
+        { key: 'a', pins: [{ excerptId: 41, displayText: 'Pinned.', group: 'High' },
+          { excerptId: null, displayText: '[removed]', group: 'Low' }] },
+        { key: 'b', pins: [{ excerptId: 42, displayText: 'Another.', group: 'Low' }] },
+      ] } } },
+    ] }
+    const summary = extractMaterialSummary(doc)
+    expect(summary.excerptIds).toEqual([5, 41, 42])
+    expect(summary.excerptCount).toBe(3)
   })
 })

@@ -56,8 +56,12 @@ from ..services.metric_cleanup import cleanup_auto_metrics
 from ..services.scale_scores import pick_scale_scores  # #1177
 from ..services.equivalence_validators import assert_domain_members_numeric_eligible
 from ..services.audit import log_action
+from ..services.rating_withholding import rating_withholding  # #1615
 from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
-from .helpers import _get_project_or_404, _validate_column_in_project
+from .helpers import (
+    _get_project_or_404, _validate_column_in_project, coder_scope_filename_suffix,
+    parse_int_list,
+)
 from .export_helpers import csv_safe
 
 
@@ -120,8 +124,16 @@ def _build_metric_response(
     metric: MetricDefinition,
     db: Session,
     label_map: dict[tuple[str, int], str] | None = None,
+    *,
+    withheld: bool = False,
 ) -> MetricDefinitionResponse:
-    """Build a full MetricDefinitionResponse with parsed JSON and resolved label."""
+    """Build a full MetricDefinitionResponse with parsed JSON and resolved label.
+
+    #1615: ``withheld`` — the viewer is blind and this metric reads a participant
+    rating score (`rating_withholding`), so its stored results (every coder's
+    ratings) are left out and the item says so. The definition itself stays: a
+    picker, a saved chart and a canvas embed still need to know what it IS.
+    """
     if label_map is None:
         label_map = resolve_input_source_labels(db, [metric])
 
@@ -129,7 +141,7 @@ def _build_metric_response(
     exclude_values = _parse_json(metric.exclude_values)
 
     results = []
-    for r in metric.results:
+    for r in ([] if withheld else metric.results):
         results.append(ComputedResultResponse(
             id=r.id,
             group_value=r.group_value,
@@ -165,6 +177,7 @@ def _build_metric_response(
         stale=metric.stale,
         result_type=metric.result_type,
         results=results,
+        withheld_while_blind=withheld,
         last_accessed_at=metric.last_accessed_at,
         created_at=metric.created_at,
         updated_at=metric.updated_at,
@@ -177,8 +190,14 @@ def _build_summary_response(
     label_map: dict[tuple[str, int], str],
     *,
     is_scale_score: bool,
+    withheld: bool = False,
 ) -> MetricDefinitionSummaryResponse:
-    """Build a summary response for the list endpoint."""
+    """Build a summary response for the list endpoint.
+
+    #1615: a ``withheld`` metric's counts are left out with its numbers — how many
+    records a rating score has is how many people colleagues rated (D198 withheld
+    the rated-passage count column for the same reason).
+    """
     config = _parse_json(metric.config) or {}
     exclude_values = _parse_json(metric.exclude_values)
 
@@ -186,7 +205,7 @@ def _build_summary_response(
     total_valid_n = None
     result_count = 0
     real_group_count = 0
-    if stats_tuple:
+    if stats_tuple and not withheld:
         latest_computed_at, total_valid_n, result_count, real_group_count = stats_tuple
 
     # Use decompose_label as input_source_label when present
@@ -219,6 +238,7 @@ def _build_summary_response(
         result_count=result_count or 0,
         real_group_count=real_group_count or 0,
         is_scale_score=is_scale_score,
+        withheld_while_blind=withheld,
         last_accessed_at=metric.last_accessed_at,
         created_at=metric.created_at,
         updated_at=metric.updated_at,
@@ -319,9 +339,12 @@ async def list_metrics(
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """List all metric definitions with summary stats."""
     _get_project_or_404(db, project_id, user.id)
+    withholding = rating_withholding(db, project_id, parse_int_list(coder_ids))
 
     # Subquery for computed result stats per metric
     stats_subq = (
@@ -367,6 +390,7 @@ async def list_metrics(
         stats = (row[2], row[3], row[4], row[5]) if row[2] is not None else None
         responses.append(_build_summary_response(
             metric, stats, label_map, is_scale_score=metric.id in scale_score_ids,
+            withheld=withholding.metric(db, metric),
         ))
 
     return MetricListResponse(metrics=responses, total=len(responses))
@@ -593,6 +617,8 @@ async def quick_compute(
     data: QuickComputeRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Find-or-create metrics for the given sources and compute any that need it.
 
@@ -601,6 +627,8 @@ async def quick_compute(
     computed MetricDefinitionResponses.
     """
     _get_project_or_404(db, project_id, user.id)
+    # #1615: asked once, before anything is found or computed.
+    withholding = rating_withholding(db, project_id, parse_int_list(coder_ids))
 
     # Validate config once
     if data.config:
@@ -680,8 +708,14 @@ async def quick_compute(
     computed_count = 0
     reused_count = 0
 
+    withheld_ids: set[int] = set()
     for metric, is_new in pairs:
         db.refresh(metric)
+        # #1615: a metric over a rating score is not computed FOR a blind viewer —
+        # its numbers would not be shown to her, and a compute is a write.
+        if withholding.metric(db, metric):
+            withheld_ids.add(metric.id)
+            continue
         needs_compute = metric.stale or len(metric.results) == 0
         if needs_compute:
             try:
@@ -697,7 +731,10 @@ async def quick_compute(
     # Build responses
     all_metrics = [m for m, _ in pairs]
     label_map = resolve_input_source_labels(db, all_metrics)
-    responses = [_build_metric_response(m, db, label_map) for m in all_metrics]
+    responses = [
+        _build_metric_response(m, db, label_map, withheld=m.id in withheld_ids)
+        for m in all_metrics
+    ]
 
     return QuickComputeResponse(
         metrics=responses,
@@ -711,15 +748,22 @@ async def get_analysis_columns(
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Return all project columns grouped by dataset, plus domains and demographics.
 
     This is the data source for the ColumnPicker component.
+
+    #1615: while blind (``coder_ids``), a participant rating score — and a column
+    computed from one, and a variable group holding one — is MARKED
+    ``withheld_while_blind``, never dropped: the picker says why it is not offered.
     """
     from ..models.dataset import Dataset, DatasetColumn
     from ..models.analysis_domain import AnalysisDomain, AnalysisDomainMember
 
     _get_project_or_404(db, project_id, user.id)
+    withheld = rating_withholding(db, project_id, parse_int_list(coder_ids)).columns
 
     # Load all columns with dataset info
     columns = (
@@ -768,6 +812,7 @@ async def get_analysis_columns(
                 dataset_id=ds_id,
                 dataset_name=ds_name,
                 subtype=col.demographic_subtype,
+                withheld_while_blind=col.id in withheld,
             ))
             continue
 
@@ -785,6 +830,7 @@ async def get_analysis_columns(
                 dataset_id=ds_id,
                 dataset_name=ds_name,
                 subtype=col.demographic_subtype,
+                withheld_while_blind=col.id in withheld,
             ))
 
         # Parse scale_labels
@@ -809,6 +855,7 @@ async def get_analysis_columns(
             # `stale` is nullable on the model (only computed columns carry it),
             # so coerce — the schema's default cannot fire for an explicit None.
             stale=bool(col.stale),
+            withheld_while_blind=col.id in withheld,
         )
 
         if ds_id not in datasets_map:
@@ -861,6 +908,7 @@ async def get_analysis_columns(
             name=domain.name,
             member_count=len(members),
             datasets=sorted(ds_names),
+            withheld_while_blind=bool(member_col_ids & withheld),
         ))
 
     return AnalysisColumnsResponse(
@@ -876,11 +924,24 @@ async def cross_tabulation(
     data: CrossTabRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Cross-tabulate two columns from the same dataset."""
     from ..services.cross_tabulation import compute_cross_tabulation
 
     _get_project_or_404(db, project_id, user.id)
+
+    # #1615: a cross-tab with a rating score on either axis puts each person's
+    # every-coder score in a cell, so it is not computed for a blind viewer.
+    withholding = rating_withholding(db, project_id, parse_int_list(coder_ids))
+    withheld_axes = sum(withholding.column(c) for c in (data.row_column_id, data.col_column_id))
+    if withheld_axes:
+        return CrossTabResponse(
+            row_values=[], col_values=[], matrix=[], row_totals=[], col_totals=[],
+            n_shared=0, row_column_label="", col_column_label="", chi_square=None,
+            withheld_rating_variables=withheld_axes,
+        )
 
     try:
         result = compute_cross_tabulation(
@@ -926,6 +987,8 @@ def get_row_matrix(
     metric_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Export record × variable matrix.
 
@@ -975,8 +1038,16 @@ def get_row_matrix(
             .all()
         )
 
+    # #1615 (D200's record matrix): a metric over a rating score is one column of
+    # each person's every-coder score, so a blind viewer's matrix leaves it out and
+    # counts it.
+    withholding = rating_withholding(db, project_id, parse_int_list(coder_ids))
+    shown = [m for m in metrics if not withholding.metric(db, m)]
+    withheld_count = len(metrics) - len(shown)
+    metrics = shown
+
     if not metrics:
-        return RowMatrixResponse(columns=[], rows=[])
+        return RowMatrixResponse(columns=[], rows=[], withheld_rating_variables=withheld_count)
 
     # Resolve labels
     label_map = resolve_input_source_labels(db, metrics)
@@ -1011,7 +1082,7 @@ def get_row_matrix(
         all_row_ids.add(s.dataset_row_id)
 
     if not all_row_ids:
-        return RowMatrixResponse(columns=columns, rows=[])
+        return RowMatrixResponse(columns=columns, rows=[], withheld_rating_variables=withheld_count)
 
     # Load row metadata
     row_meta = (
@@ -1036,7 +1107,7 @@ def get_row_matrix(
             scores=scores_dict,
         ))
 
-    return RowMatrixResponse(columns=columns, rows=rows)
+    return RowMatrixResponse(columns=columns, rows=rows, withheld_rating_variables=withheld_count)
 
 
 @router.get("/row-matrix/csv")
@@ -1045,6 +1116,8 @@ def get_row_matrix_csv(
     metric_ids: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Export record × variable matrix as CSV download.
 
@@ -1058,7 +1131,7 @@ def get_row_matrix_csv(
     import io
 
     # Reuse JSON endpoint logic
-    matrix = get_row_matrix(project_id, metric_ids, user, db)
+    matrix = get_row_matrix(project_id, metric_ids, user, db, coder_ids=coder_ids)
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -1081,11 +1154,13 @@ def get_row_matrix_csv(
         writer.writerow(csv_row)
 
     output.seek(0)
+    # #1615: a scoped file says whose view it holds (#1530 D97, `exports-wire.md` §6).
+    suffix = coder_scope_filename_suffix(db, parse_int_list(coder_ids))
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
         headers={
-            "Content-Disposition": 'attachment; filename="row_matrix.csv"',
+            "Content-Disposition": f'attachment; filename="row_matrix{suffix}.csv"',
         },
     )
 
@@ -1099,11 +1174,14 @@ async def get_metric(
     metric_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Get a metric definition with full results."""
     _get_project_or_404(db, project_id, user.id)
     metric = _get_metric_or_404(db, project_id, metric_id)
-    return _build_metric_response(metric, db)
+    withholding = rating_withholding(db, project_id, parse_int_list(coder_ids))
+    return _build_metric_response(metric, db, withheld=withholding.metric(db, metric))
 
 
 @router.patch("/{metric_id}", response_model=MetricDefinitionResponse)
@@ -1113,6 +1191,8 @@ async def update_metric(
     data: MetricDefinitionUpdate,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
     """Update a metric definition. Marks stale if config/input fields changed."""
     _get_project_or_404(db, project_id, user.id)
@@ -1183,7 +1263,9 @@ async def update_metric(
     db.commit()
     db.refresh(metric)
 
-    return _build_metric_response(metric, db)
+    # #1615: a rename keeps the stored results, so the response is a read too.
+    withholding = rating_withholding(db, project_id, parse_int_list(coder_ids))
+    return _build_metric_response(metric, db, withheld=withholding.metric(db, metric))
 
 
 @router.delete("/{metric_id}")
@@ -1228,10 +1310,17 @@ async def compute_single_metric(
     metric_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
-    """Compute (or recompute) a single metric."""
+    """Compute (or recompute) a single metric.
+
+    #1615: computing over every coder is what the shared metric IS, so a blind
+    caller may press it; the numbers it produced are not RETURNED to her.
+    """
     _get_project_or_404(db, project_id, user.id)
     metric = _get_metric_or_404(db, project_id, metric_id)
+    withholding = rating_withholding(db, project_id, parse_int_list(coder_ids))
 
     try:
         results = compute_metric(db, metric)
@@ -1255,6 +1344,8 @@ async def compute_single_metric(
     )
     db.commit()
 
+    if withholding.metric(db, metric):
+        return []
     return [
         ComputedResultResponse(
             id=r.id,
@@ -1274,10 +1365,15 @@ async def get_metric_results(
     metric_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 — bare default, LAST (direct-call tests); the client sends it while blind.
+    coder_ids: str | None = None,
 ):
-    """Get computed results for a metric."""
+    """Get computed results for a metric (#1615: none for a blind viewer when it
+    reads a rating score — `GET /{metric_id}` says why)."""
     _get_project_or_404(db, project_id, user.id)
     metric = _get_metric_or_404(db, project_id, metric_id)
+    if rating_withholding(db, project_id, parse_int_list(coder_ids)).metric(db, metric):
+        return []
 
     return [
         ComputedResultResponse(

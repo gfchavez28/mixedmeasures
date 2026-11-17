@@ -31,5 +31,18 @@ export function untestedGroupsNote(
   return variable ? `${variable}: ${sentence}` : sentence
 }
 
+/**
+ * #1549 (b) — the Q–Q plot's own sentence for the groups of one it left out
+ * (`QQSummary.singleton_groups`). The plot follows the PARAMETRIC tests' groups,
+ * because normality is their model's assumption, so it names them even when the
+ * row runs the rank test, which uses them and whose note then names nobody.
+ */
+export function qqLeftOutNote(groups: string[] | null | undefined): string | null {
+  if (!groups || groups.length === 0) return null
+  const one = groups.length === 1
+  return `${list(groups)} ${one ? 'has' : 'have'} only one value${one ? '' : ' each'}, `
+    + `so ${one ? 'it is' : 'they are'} left out of this plot: a single value's residual is 0 by construction.`
+}
+
 /** The SD cell's title when a group has no SD because it holds one value. */
 export const SINGLE_VALUE_SD_NOTE = 'No SD — a single value has no spread'

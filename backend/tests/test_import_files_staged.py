@@ -346,7 +346,15 @@ def test_a_new_import_does_not_adopt_a_deleted_projects_leftover_recording(
     logged (Windows holds open files; a process can die in between). SQLite then hands
     the deleted project's ids to the next project — and the media-less import's
     stat check used to find the leftover recording and KEEP the metadata, so the new
-    interview played the deleted one's recording."""
+    interview played the deleted one's recording.
+
+    Since #1639 (r2-1) `conversations` is AUTOINCREMENT, so a conversation THIS build
+    deletes never gives its id away; `projects` still reuses ids. The state survives the
+    upgrade for a project deleted BEFORE it, its folder left behind, whose conversations
+    were the newest: the migration starts the sequence at the highest id left, and the
+    audit seed (r2-2) cannot see the deleted ones, because a project delete removes the
+    project's audit entries (#1230). The test makes that state by setting the sequence
+    back to where such an upgrade leaves it."""
     db = db_session
     docs, media = _dirs(tmp_path)
     b, _cb, _fb = _make(db, media, "B", payload=ARCHIVED)
@@ -359,6 +367,10 @@ def test_a_new_import_does_not_adopt_a_deleted_projects_leftover_recording(
     delete_project_tree(db, a)
     db.commit()
     assert fa.exists()  # the folder removal "failed"
+    from sqlalchemy import text
+    db.execute(text("UPDATE sqlite_sequence SET seq = :s WHERE name = 'conversations'"),
+               {"s": caid - 1})
+    db.commit()
 
     new_id, _ = import_project(db, archive, docs, media_dir=media, user_id=1)
     db.commit()

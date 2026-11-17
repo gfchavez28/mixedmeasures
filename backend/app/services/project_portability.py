@@ -113,6 +113,7 @@ from ..services.canvas import (
     extract_referenced_source_ids,
     walk_tiptap_nodes,
 )
+from ..services.joint_display_node import JOINT_DISPLAY_NODE, display_of, remap_display
 from ..services.missing_declaration import realign_undeclared_numbers
 
 logger = logging.getLogger(__name__)
@@ -200,7 +201,19 @@ logger = logging.getLogger(__name__)
 #
 # ⚠️ v<=6 files still import, unchanged: `_attach_entity_rows` leaves their inline lists
 # alone, and every consumer reads whichever shape it is handed.
-CURRENT_FORMAT_VERSION = 7
+#
+# v8 = the JOINT DISPLAY (ROADMAP row 56, D164) — a new canvas node, `joint-display`,
+# whose attributes carry entity ids NESTED (its rows' codes, variables and saved
+# results, the grouping variable, its pinned quotes, a meta-inference's author), which
+# `_remap_canvas_content` remaps through `joint_display_node.remap_display`.
+# 🔴 A REFUSAL GATE: a v7 build imports the canvas text unchanged, leaves every nested
+# id naming the SOURCE install's rows, and its content cleaner then turns the unknown
+# node into a paragraph — or DROPS it, having no text — and its theme editor SAVES that
+# the first time the canvas is opened (`canvas-utils.ts`; `ThemeEditor.tsx`): v4's
+# silent-loss case. The release that ships the node also carries an Alembic revision
+# (`e7b3c5a9d2f4`), so a reinstalled older app refuses the DATABASE too (#1476).
+# Any other format change in that release rides v8.
+CURRENT_FORMAT_VERSION = 8
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
 
 #: #1321 — every value `import_project` acts on. The mode decides whether the file's
@@ -2047,6 +2060,19 @@ def _remap_canvas_content(content_json: str | None, remap: dict) -> tuple[str | 
             )
 
     walk_tiptap_nodes(content, EMBED_NODE_TYPES, _rewrite)
+
+    def _rewrite_display(node: dict) -> None:
+        # D164 — a joint display carries its ids NESTED (rows, strands, pins, the
+        # grouping variable, a meta-inference's author); `remap_display` knows each
+        # key and nulls one that did not travel (D202).
+        attrs = node.get("attrs")
+        if not isinstance(attrs, dict):
+            return
+        display = display_of(attrs, strict=False)
+        if display is not None:
+            remap_display(display, lambda table, old: remap.get(table, {}).get(old))
+
+    walk_tiptap_nodes(content, {JOINT_DISPLAY_NODE}, _rewrite_display)
 
     refs = extract_referenced_source_ids(content)
     return json.dumps(content), (json.dumps(refs) if refs else None)
@@ -4585,7 +4611,17 @@ def import_project(
                     remap["datasets"][item["_original_id"]] = local.id
                     matched_managed_dataset_ids.add(local.id)
                     continue
-            _add(Dataset, item, {"project_id": pid}, "datasets")
+            _add(Dataset, item, {
+                "project_id": pid,
+                # #1617 / #1623, D223 — the record of whose ratings a participant
+                # table's snapshot holds is NOT imported. Its ids are install-global
+                # (the JSON-id class), and remapping cannot serve it: the coder it
+                # exists for — one whose ratings are all gone — has no codings, and the
+                # file's coder roster is the key set of its codings, so exactly that
+                # coder would not travel. With no record, the live rule answers until
+                # the first refresh here.
+                "managed_rater_ids": None,
+            }, "datasets")
 
         for item in data.get("equivalence_groups", []):
             _add(EquivalenceGroup, item, {"project_id": pid}, "equivalence_groups")

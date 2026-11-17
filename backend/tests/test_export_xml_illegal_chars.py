@@ -56,7 +56,7 @@ from app.routers.export_helpers import excel_set_safe
 from app.services.canvas import (
     create_canvas, create_theme, create_theme_relationship, get_canvas_full,
 )
-from app.services.canvas_export import ChartTable, export_canvas_docx
+from app.services.canvas_export import ChartTable, DisplayAppendix, DisplayTable, export_canvas_docx
 from app.services.codebook_exchange import export_codebook_qdc, import_codebook_qdc
 from app.services.dataset_import import import_dataset_csv
 from app.services.xml_text import xml_safe_text, xml_safe_tree
@@ -335,6 +335,11 @@ def _polluted_canvas(db):
     # imported `.mmproject` writes `content` verbatim).
     a.content = json.dumps({"type": "doc", "content": [
         {"type": "paragraph", "content": [t(f"Para {PAY}{LONE}"), {**t(f"Bold {PAY}"), "marks": [{"type": "bold"}]}]},
+        # #1457 / #1420 — a mention's label and a link's ADDRESS (a relationship target, not text).
+        {"type": "paragraph", "content": [
+            {"type": "mention", "attrs": {"id": "1", "label": f"Men {PAY}"}},
+            {**t(f"Link {PAY}"), "marks": [{"type": "link", "attrs": {"href": f"https://x.example/{PAY}"}}]},
+        ]},
         {"type": "heading", "attrs": {"level": 2}, "content": [t(f"Head {PAY}")]},
         {"type": "bulletList", "content": [{"type": "listItem", "content": [t(f"Bullet {PAY}")]}]},
         {"type": "orderedList", "content": [{"type": "listItem", "content": [t(f"Numbered {PAY}")]}]},
@@ -344,6 +349,7 @@ def _polluted_canvas(db):
         {"type": "memo-embed", "attrs": {"numericId": 1, "title": f"MemoT {PAY}", "preview": f"Preview {PAY}", **tag}},
         {"type": "callout-stat", "attrs": {"value": f"Val {PAY}", "label": f"Lab {PAY}", "sourceDescription": f"SD {PAY}", **tag}},
         {"type": "image-embed", "attrs": {"imageId": "", "alt": f"Alt {PAY}", **tag}},
+        {"type": "joint-display", "attrs": {"displayKey": "k-1", "display": {"title": f"JD {PAY}"}}},
         {"type": "unknownWrapper", "content": [{"type": "paragraph", "content": [t(f"Nested {PAY}")]}]},
     ]})
     db.flush()
@@ -359,15 +365,32 @@ def _docx_texts(buf) -> set[str]:
     return texts
 
 
+#: A joint display's report (D174) with a payload in EVERY string it carries.
+_DISPLAY = DisplayTable(
+    title=f"DT {PAY}{LONE}",
+    headers=[f"DH {PAY}", "B"],
+    rows=[[f"DC {PAY}", "x"], [f"DS {PAY}"]],
+    span_rows=frozenset({1}),
+    note=f"DN {PAY}",
+    appendix=[DisplayAppendix(title=f"AT {PAY}", headers=[f"AH {PAY}"], rows=[[f"AC {PAY}"]], note=f"AN {PAY}")],
+)
+
+
 def test_the_canvas_word_export_writes_every_string_cleaned(db_session):
     p, canvas = _polluted_canvas(db_session)
-    tables = {5: ChartTable(headers=[f"H {PAY}{LONE}", "n"], rows=[[f"Cell {PAY}{LONE}", "3"]])}
-    texts = _docx_texts(export_canvas_docx(canvas, p.id, None, tables))
+    tables = {5: ChartTable(headers=[f"H {PAY}{LONE}", "n"], rows=[[f"Cell {PAY}{LONE}", "3"]], note=f"CN {PAY}{LONE}")}
+    buf = export_canvas_docx(canvas, p.id, None, tables, {"k-1": _DISPLAY})
+    texts = _docx_texts(buf)
+    buf.seek(0)
+    addresses = {r.target_ref for r in Document(buf).part.rels.values() if r.reltype.endswith("/hyperlink")}
+    assert addresses == {f"https://x.example/{CLEAN}"}
     want = {
+        f"DT {CLEAN}", f"DH {CLEAN}", f"DC {CLEAN}", f"DS {CLEAN}", f"DN {CLEAN}",
+        f"AT {CLEAN}", f"AH {CLEAN}", f"AC {CLEAN}", f"AN {CLEAN}",
         f"Canvas {CLEAN}", f"Theme {CLEAN}", f"Child {CLEAN}",
-        f"Para {CLEAN}Bold {CLEAN}", f"Head {CLEAN}", f"Bullet {CLEAN}", f"Numbered {CLEAN}",
+        f"Para {CLEAN}Bold {CLEAN}", f"@Men {CLEAN}Link {CLEAN}", f"Head {CLEAN}", f"Bullet {CLEAN}", f"Numbered {CLEAN}",
         f"Quote {CLEAN}", f"“Excerpt {CLEAN}”\n— Src {CLEAN}", f"Tag: Tag {CLEAN}",
-        f"Chart {CLEAN}", f"H {CLEAN}", f"Cell {CLEAN}", f"Memo M-1: MemoT {CLEAN}", f"Preview {CLEAN}",
+        f"Chart {CLEAN}", f"H {CLEAN}", f"Cell {CLEAN}", f"CN {CLEAN}", f"Memo M-1: MemoT {CLEAN}", f"Preview {CLEAN}",
         f"Val {CLEAN} Lab {CLEAN}", f"SD {CLEAN}", f"Alt {CLEAN}", f"Nested {CLEAN}",
         f"Theme {CLEAN} → Child {CLEAN}: supports · Rel {CLEAN}",
     }

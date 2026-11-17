@@ -11,6 +11,12 @@ import {
   comparisonsApi,
   codesApi,
   observationsApi,
+  jointDisplayApi,
+  materialsApi,
+  type AnalysisColumnsResponse,
+  type JointDisplayComputeResponse,
+  type JointDisplayPinFact,
+  type MaterialResponse,
   type CanvasDetail,
   type CanvasTheme,
   type CanvasThemeRelationship,
@@ -19,7 +25,9 @@ import {
   type GroupComparisonResponse,
   type AnalysisCrossTabResponse,
 } from '@/lib/api'
+import { analysisScope, coderIdsField, ratingsViewerField } from './analysis-scope'
 import { safeFilename } from './filename'
+import { mdBlock, mdDestination, mdHeading, mdLine, mdLines, mdText, mdWrap } from './markdown-text'
 import {
   computeTimedRows,
   coveredTotalSeconds,
@@ -51,6 +59,7 @@ import {
 import {
   comparisonMethodNote, correctionName, deltaIntervalVisual, describeOmittedTest, unitCount,
 } from '@/lib/comparison-basis'
+import { noCodingNote, noCodingScope } from '@/lib/coding-completeness'
 import { ciLabel } from '@/lib/ci-label'
 import { COOCCURRENCE_RULE } from '@/lib/cooccurrence-rule'
 import {
@@ -66,12 +75,28 @@ import {
   extractCrossTabParams,
   extractGroupDisplayOptions,
   quantChartKind,
+  qualChartRefusal,
+  type QualChartKind,
   type QualComputeParams,
 } from '@/components/canvas/inline-chart-params'
 import { isQualitativeMaterialConfig } from '@/lib/material-kind'
-import { describeUndefined, NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
-import { pMethodShort } from '@/lib/p-method'
+import { describeUndefined, formatStat, NO_VALUE, undefinedTooltip } from '@/lib/stat-format'
+import {
+  effectSizeText, groupStatHeaders, groupStatTexts, hasDifferenceColumn, meanDifference,
+  pCellText, testStatisticText,
+} from '@/lib/group-comparison-display'
 import { untestedGroupsNote } from '@/lib/untested-groups'
+import { describeUnavailable } from '@/lib/comparison-unavailable'
+import { computeRequest, displayCoderScope, JOINT_DISPLAY_NODE, readDisplay, type JointDisplay } from '@/lib/joint-display'
+import {
+  buildJointDisplayReport, computeFailureText, NO_GROUPING_TEXT, reportToDocx, reportToHtml, reportToMarkdown,
+  type DocxDisplayTable, type JointDisplayReport, type ReportResult,
+} from '@/lib/joint-display-report'
+import { describeResult, isDisplayResult } from '@/lib/joint-display-results'
+import { caseCountRequest, hasMisfit, misfitReportFacts, type MisfitReportFacts } from '@/lib/joint-display-cases'
+import { withheldAttributionColumn } from '@/lib/blind-rating-columns'
+import { attributionUnusableNote } from '@/lib/joint-display-vocabulary'
+import { formatWrittenDate, todayIso } from '@/components/canvas/joint-display/display-helpers'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -169,6 +194,22 @@ export interface TimelineExportLens {
   machineCoderIds: MachineCoderIds
 }
 
+/** #1615 (D281, D96) — a chart that needs the viewer while blind, with no viewer to name. */
+const NO_VIEWER_SENTENCE = 'The chart was not computed: the coder could not be identified while blind mode is on.'
+
+/** #1615 (D297's Canvas path) — the qualitative kinds whose request can group people by a
+ *  variable (the bar's `group_by_subtype`, the comparison's groups), so it names the viewer. */
+const QUAL_KINDS_ASKING_THE_VIEWER: ReadonlySet<QualChartKind> = new Set<QualChartKind>([
+  'heatmap', 'bar', 'stacked_bar', 'summary', 'comparison_table', 'comparison_bar',
+])
+
+/** A chart exported as ONE sentence in place of its table (Markdown, HTML; Word reads no table,
+ *  so it prints its own "Chart data unavailable"). The sentence may name a user's variable, so
+ *  it is escaped as it enters (#1422 / #1339) — a plain paragraph, as a table's note is. */
+function sentenceExport(materialId: number, why: string) {
+  return { materialId, md: mdBlock(why), html: `<p><em>${esc(why)}</em></p>` }
+}
+
 /** Fetch chart data for all chart-embeds and convert to tables. */
 export async function fetchChartTables(
   themes: CanvasTheme[],
@@ -178,112 +219,7 @@ export async function fetchChartTables(
   const charts = collectChartEmbeds(themes)
   if (charts.length === 0) return new Map()
 
-  const results = await Promise.allSettled(
-    charts.map(async (chart): Promise<{ materialId: number; md: string; html: string; table?: ExportTable }> => {
-      // #652 slab 1: a qualitative embed reads a different endpoint. Without
-      // this branch `extractComputeParams` finds no columns or domains and the
-      // chart exports as an EMPTY table in Markdown, HTML, PDF and the docx
-      // fallback — so the export would silently lag the renderer.
-      if (isQualitativeMaterialConfig(chart.config)) {
-        const qualParams = extractQualComputeParams(chart.config)
-        if (!qualChartHasEnoughToFetch(qualParams)) {
-          return { materialId: chart.materialId, md: '', html: '' }
-        }
-        const table = await qualChartTable(projectId, qualParams, timelineLens)
-        if (!table || table.rows.length === 0) return { materialId: chart.materialId, md: '', html: '' }
-        return tableExport(chart.materialId, table)
-      }
-
-      // 🔴 #1315 — the SAME dispatch the renderer asks, so the two cannot take
-      // different branches for one embed. They did: the renderer asked
-      // "comparison?" first and this file "correlation?" first, so a comparison
-      // carrying `show_scatter` drew on the canvas and exported as "Chart data
-      // not available". The order lives in `quantChartKind`, nowhere else.
-      const kind = quantChartKind(chart.config)
-
-      // 🔴 #817 — a quantitative COMPARISON must not be run through
-      // `quickCompute` here either. This path is not a fallback for the
-      // renderer: the Markdown export has no images at all, so it is the ONLY
-      // thing a `.md` reader sees, and before this it carried the same wrong
-      // figure the canvas drew — the pooled frequency distribution of the
-      // comparison's own variables, under the comparison's title.
-      //
-      // ⚠️ **Two halves of one fact, in two files.** Fixing the renderer alone
-      // would have left the Markdown export wrong and the HTML/PDF/docx exports
-      // right (they capture the rendered PNG), so the same material would say
-      // different things in different formats.
-      // 🔴 #831 — and a CORRELATION or SCATTER matrix must not reach
-      // `quickCompute` either, for the same reason one bullet up. The renderer
-      // REFUSES to draw these (there is no inline correlation chart), so an
-      // export that quietly emitted a frequency table of the correlation's own
-      // variables would be the #832 divergence again: canvas honest, `.md`
-      // wrong, and nothing to tell the reader which to believe.
-      //
-      // Exporting NOTHING is the honest match for a refusal on screen. The
-      // embed's title and surrounding prose still carry into the document.
-      if (kind === 'correlation') {
-        return { materialId: chart.materialId, md: '', html: '' }
-      }
-
-      if (kind === 'comparison') {
-        const cmp = extractComparisonParams(chart.config)
-        if (cmp.request == null) return { materialId: chart.materialId, md: '', html: '' }
-        const data = await comparisonsApi.groupComparison(projectId, cmp.request)
-        const table = comparisonExportTable(data)
-        if (!table) return { materialId: chart.materialId, md: '', html: '' }
-        return tableExport(chart.materialId, table)
-      }
-
-      // 🔴 #832 — a CROSS-TAB is the one descriptives type whose data does not
-      // come from `quickCompute`, and #823(g) taught only the renderer that.
-      // Without this branch the fall-through below computes a metric on the
-      // cross-tab's ROW variable alone and emits its marginal frequency
-      // distribution — the second axis silently absent, under the cross-tab's
-      // own title. The canvas drew the right table and `.md` carried a
-      // different one: the same material saying two things, which is exactly
-      // what the #817 comment above exists to prevent.
-      //
-      // ⚠️ The axis derivation and the display mode are SHARED with the
-      // renderer (`extractCrossTabParams`), not re-read from `content` here.
-      if (kind === 'cross_tab') {
-        const ct = extractCrossTabParams(chart.config)
-        // A half-configured cross-tab has no row or no column axis. The
-        // renderer says so on screen; an export emits nothing, exactly as it
-        // does for every other unusable config.
-        if (ct.request == null) return { materialId: chart.materialId, md: '', html: '' }
-        const data = await metricsApi.crossTabulation(projectId, ct.request)
-        const table = crossTabExportTable(data, ct.display, ct.scaleOrder)
-        if (!table) return { materialId: chart.materialId, md: '', html: '' }
-        return tableExport(chart.materialId, table)
-      }
-
-      const params = extractComputeParams(chart.config)
-      if (params.columnIds.length === 0 && params.domainIds.length === 0) {
-        return { materialId: chart.materialId, md: '', html: '' }
-      }
-      const request = buildRequest(params)
-      const result = await metricsApi.quickCompute(projectId, request)
-      const metrics = result.metrics ?? []
-      if (metrics.length === 0) return { materialId: chart.materialId, md: '', html: '' }
-
-      const chartType = (chart.config.chart_type as ChartType) ?? detectChartType(metrics)
-      const metricType = params.metricType
-      // #1406 — the groups the embed shows, from the function the renderer reads.
-      const groupOpts = extractGroupDisplayOptions(chart.config)
-      const binWidth = (chart.config.formatting as { binWidth?: number | null } | undefined)?.binWidth
-      const table = convertMetrics(metrics, chartType, metricType, groupOpts, binWidth)
-      // A table the shapers could not build still says so in the Markdown and
-      // HTML; the `.docx` then reads "Chart data unavailable" for it.
-      if (!table) {
-        return {
-          materialId: chart.materialId,
-          md: '*[Chart data could not be converted to table]*',
-          html: '<p><em>Chart data could not be converted to table</em></p>',
-        }
-      }
-      return tableExport(chart.materialId, table)
-    }),
-  )
+  const results = await Promise.allSettled(charts.map(chart => shapeChartTable(projectId, chart, timelineLens)))
 
   const map = new Map<number, ChartExportTable>()
   for (const r of results) {
@@ -292,6 +228,308 @@ export async function fetchChartTables(
     }
   }
   return map
+}
+
+/**
+ * ONE saved chart's table, shaped as its chart embed exports it — the dispatch below is the
+ * renderer's (#1315). Exported for the joint display's different-unit strand (D165), whose
+ * saved result prints the table a chart embed of the same Material would, so the two cannot
+ * disagree. `md: ''` = nothing to export (the embed's title and prose still carry).
+ */
+export async function shapeChartTable(
+  projectId: number,
+  chart: ChartInfo,
+  timelineLens: TimelineExportLens,
+): Promise<{ materialId: number; md: string; html: string; table?: ExportTable }> {
+  // #652 slab 1: a qualitative embed reads a different endpoint. Without
+  // this branch `extractComputeParams` finds no columns or domains and the
+  // chart exports as an EMPTY table in Markdown, HTML, PDF and the docx
+  // fallback — so the export would silently lag the renderer.
+  if (isQualitativeMaterialConfig(chart.config)) {
+    const qualParams = extractQualComputeParams(chart.config)
+    if (!qualChartHasEnoughToFetch(qualParams)) {
+      return { materialId: chart.materialId, md: '', html: '' }
+    }
+    // #1615 (D297's Canvas path) — the two grouping reads ask the ratings question of the
+    // VIEWER, from the export lens, as the embed does (`ratingsViewerField`); the figure's
+    // coding stays its saved scope. Withholding with no viewer: no such read at all (D96).
+    // A grouping refused while blind (D284's 409) exports the server's sentence, not a table.
+    const viewer = analysisScope(timelineLens.blind, timelineLens.self)
+    if (viewer == null && QUAL_KINDS_ASKING_THE_VIEWER.has(qualChartKind(qualParams)!)) {
+      return sentenceExport(chart.materialId, NO_VIEWER_SENTENCE)
+    }
+    let table: ExportTable | null
+    try {
+      table = await qualChartTable(projectId, qualParams, timelineLens, ratingsViewerField(viewer?.coderIds ?? null))
+    } catch (e) {
+      const refusal = qualChartRefusal(e)
+      if (refusal == null) throw e
+      return sentenceExport(chart.materialId, refusal)
+    }
+    if (!table || table.rows.length === 0) return { materialId: chart.materialId, md: '', html: '' }
+    return tableExport(chart.materialId, table)
+  }
+
+  // 🔴 #1315 — the SAME dispatch the renderer asks, so the two cannot take
+  // different branches for one embed. They did: the renderer asked
+  // "comparison?" first and this file "correlation?" first, so a comparison
+  // carrying `show_scatter` drew on the canvas and exported as "Chart data
+  // not available". The order lives in `quantChartKind`, nowhere else.
+  const kind = quantChartKind(chart.config)
+
+  // #1615 — the same scope the embed sends (`InlineChartRenderer`, `useAnalysisScope`), from
+  // the export lens: the viewer alone while blind, so a rating score the screen leaves out is
+  // left out of the file too. Withholding with no viewer to scope to: no read at all (D96).
+  const scope = analysisScope(timelineLens.blind, timelineLens.self)
+  if (scope == null) {
+    const why = NO_VIEWER_SENTENCE
+    return { materialId: chart.materialId, md: `*[${why}]*`, html: `<p><em>${why}</em></p>` }
+  }
+  const coderIds = scope.coderIds
+
+  // 🔴 #817 — a quantitative COMPARISON must not be run through
+  // `quickCompute` here either. This path is not a fallback for the
+  // renderer: the Markdown export has no images at all, so it is the ONLY
+  // thing a `.md` reader sees, and before this it carried the same wrong
+  // figure the canvas drew — the pooled frequency distribution of the
+  // comparison's own variables, under the comparison's title.
+  //
+  // ⚠️ **Two halves of one fact, in two files.** Fixing the renderer alone
+  // would have left the Markdown export wrong and the HTML/PDF/docx exports
+  // right (they capture the rendered PNG), so the same material would say
+  // different things in different formats.
+  // 🔴 #831 — and a CORRELATION or SCATTER matrix must not reach
+  // `quickCompute` either, for the same reason one bullet up. The renderer
+  // REFUSES to draw these (there is no inline correlation chart), so an
+  // export that quietly emitted a frequency table of the correlation's own
+  // variables would be the #832 divergence again: canvas honest, `.md`
+  // wrong, and nothing to tell the reader which to believe.
+  //
+  // Exporting NOTHING is the honest match for a refusal on screen. The
+  // embed's title and surrounding prose still carry into the document.
+  if (kind === 'correlation') {
+    return { materialId: chart.materialId, md: '', html: '' }
+  }
+
+  if (kind === 'comparison') {
+    const cmp = extractComparisonParams(chart.config)
+    if (cmp.request == null) return { materialId: chart.materialId, md: '', html: '' }
+    const data = await comparisonsApi.groupComparison(projectId, { ...cmp.request, ...coderIdsField(coderIds) })
+    // #1423: the table's own mean-or-median switch, from the same saved config.
+    const table = comparisonExportTable(data, cmp.nonparametric)
+    if (!table) {
+      // #1615 (lead, from r6's found-beside): a comparison the server answered with a
+      // reason (D275's rating score while blind, or any other) says it in the file as the
+      // embed says it on screen — never the generic "not available".
+      const why = describeUnavailable(data.unavailable_reason)?.title
+      return why ? sentenceExport(chart.materialId, why) : { materialId: chart.materialId, md: '', html: '' }
+    }
+    return tableExport(chart.materialId, table)
+  }
+
+  // 🔴 #832 — a CROSS-TAB is the one descriptives type whose data does not
+  // come from `quickCompute`, and #823(g) taught only the renderer that.
+  // Without this branch the fall-through below computes a metric on the
+  // cross-tab's ROW variable alone and emits its marginal frequency
+  // distribution — the second axis silently absent, under the cross-tab's
+  // own title. The canvas drew the right table and `.md` carried a
+  // different one: the same material saying two things, which is exactly
+  // what the #817 comment above exists to prevent.
+  //
+  // ⚠️ The axis derivation and the display mode are SHARED with the
+  // renderer (`extractCrossTabParams`), not re-read from `content` here.
+  if (kind === 'cross_tab') {
+    const ct = extractCrossTabParams(chart.config)
+    // A half-configured cross-tab has no row or no column axis. The
+    // renderer says so on screen; an export emits nothing, exactly as it
+    // does for every other unusable config.
+    if (ct.request == null) return { materialId: chart.materialId, md: '', html: '' }
+    const data = await metricsApi.crossTabulation(projectId, { ...ct.request, ...coderIdsField(coderIds) })
+    const table = crossTabExportTable(data, ct.display, ct.scaleOrder)
+    if (!table) return { materialId: chart.materialId, md: '', html: '' }
+    return tableExport(chart.materialId, table)
+  }
+
+  const params = extractComputeParams(chart.config)
+  if (params.columnIds.length === 0 && params.domainIds.length === 0) {
+    return { materialId: chart.materialId, md: '', html: '' }
+  }
+  const request = buildRequest(params)
+  const result = await metricsApi.quickCompute(projectId, { ...request, ...coderIdsField(coderIds) })
+  const metrics = result.metrics ?? []
+  if (metrics.length === 0) return { materialId: chart.materialId, md: '', html: '' }
+
+  const chartType = (chart.config.chart_type as ChartType) ?? detectChartType(metrics)
+  const metricType = params.metricType
+  // #1406 — the groups the embed shows, from the function the renderer reads.
+  const groupOpts = extractGroupDisplayOptions(chart.config)
+  const binWidth = (chart.config.formatting as { binWidth?: number | null } | undefined)?.binWidth
+  const table = convertMetrics(metrics, chartType, metricType, groupOpts, binWidth)
+  // A table the shapers could not build still says so in the Markdown and
+  // HTML; the `.docx` then reads "Chart data unavailable" for it.
+  if (!table) {
+    return {
+      materialId: chart.materialId,
+      md: '*[Chart data could not be converted to table]*',
+      html: '<p><em>Chart data could not be converted to table</em></p>',
+    }
+  }
+  return tableExport(chart.materialId, table)
+}
+
+// ── Joint displays (ROADMAP row 56, D174) ────────────────────────────────────────
+
+/** A coder's name by `users.id` — threaded in from `CanvasView`, as the lens is. */
+export type CoderNameLookup = (id: number) => string | null
+
+interface DisplayInfo {
+  displayKey: string
+  display: JointDisplay
+}
+
+/** Every joint-display node across the themes, once per `displayKey`. */
+function collectJointDisplays(themes: CanvasTheme[]): DisplayInfo[] {
+  const out: DisplayInfo[] = []
+  const seen = new Set<string>()
+  for (const theme of themes) {
+    if (!theme.content) continue
+    let doc: TiptapNode
+    try {
+      doc = typeof theme.content === 'string' ? JSON.parse(theme.content) : theme.content
+    } catch {
+      continue
+    }
+    walkNodes(doc, node => {
+      const key = node.attrs?.displayKey
+      if (node.type !== JOINT_DISPLAY_NODE || typeof key !== 'string' || !key || seen.has(key)) return
+      seen.add(key)
+      out.push({ displayKey: key, display: readDisplay(node.attrs?.display) })
+    })
+  }
+  return out
+}
+
+/**
+ * Each joint display's REPORT table, keyed by `displayKey` — the one `buildJointDisplayReport`
+ * the Report view renders (D176.2), read here under the EXPORT's lens: blind mode narrows the
+ * numbers exactly as the Compact view's request does (D175), and a colleague's authorship is
+ * not named. A read that fails says so in the table's place; it never sinks the export.
+ */
+export async function fetchDisplayReports(
+  themes: CanvasTheme[],
+  projectId: number,
+  timelineLens: TimelineExportLens,
+  coderName: CoderNameLookup,
+): Promise<Map<string, JointDisplayReport>> {
+  const displays = collectJointDisplays(themes)
+  if (displays.length === 0) return new Map()
+  const scope = displayCoderScope(timelineLens.blind, timelineLens.self)
+  const ctx = { coderName, withholding: timelineLens.blind, self: timelineLens.self, asOf: formatWrittenDate(todayIso()) }
+
+  // The saved results' metadata, once for every display (D165).
+  const needResults = displays.some(d => d.display.rows.some(r => r.result_material_ids.some(id => id != null)))
+  let materials: MaterialResponse[] | null = []
+  let columns: AnalysisColumnsResponse | null = null
+  if (needResults) {
+    try {
+      ;[materials, columns] = await Promise.all([
+        materialsApi.listAllMaterials(projectId), metricsApi.analysisColumns(projectId),
+      ])
+    } catch {
+      materials = null
+    }
+  }
+
+  const reports = await Promise.all(displays.map(async ({ displayKey, display }) => {
+    const request = computeRequest(display, scope)
+    let data: JointDisplayComputeResponse | null = null
+    let unavailable: string | null = null
+    if (request == null) unavailable = NO_GROUPING_TEXT
+    else if (timelineLens.blind && timelineLens.self == null) {
+      // `useBlindScope`'s rule (D96): a read with no one to scope it to must not run.
+      unavailable = 'The joint display was not computed: the coder could not be identified while blind mode is on.'
+    } else {
+      try {
+        data = await jointDisplayApi.compute(projectId, request)
+      } catch (e) {
+        unavailable = computeFailureText(e)  // #1639 (r1-5)
+      }
+    }
+
+    const pinIds = [...new Set(display.rows.flatMap(r => r.pins.map(p => p.excerptId)).filter((x): x is number => x != null))]
+    let facts: Map<number, JointDisplayPinFact> | null = new Map()
+    let attributionWithheld: string | null = null
+    let attributionUnusable: string | null = null
+    if (pinIds.length > 0) {
+      if (timelineLens.blind && timelineLens.self == null) {
+        // #1615: D96 — no one to scope the attribution to, so no read (its column may be
+        // a rating score); the pins say their attribution could not be read.
+        facts = null
+      } else {
+        try {
+          // #1615: the display's blind scope, as the Compact view sends it — a rating-derived
+          // attribution column's value is left out while blind (`column_withheld`), and the
+          // report's note says so by the column's name (D286).
+          const got = await jointDisplayApi.pinFacts(projectId, {
+            excerpt_ids: pinIds, column_id: display.attribution.column_id, coder_ids: scope.coderIds,
+          })
+          facts = new Map(got.pins.map(f => [f.excerpt_id, f]))
+          attributionWithheld = withheldAttributionColumn(got)
+          // #1653 (D346): a gone or retyped attribution variable — who and where are still read.
+          attributionUnusable = attributionUnusableNote(got)
+        } catch {
+          facts = null
+        }
+      }
+    }
+
+    const results = new Map<number, ReportResult>()
+    let resultsUnread = false
+    const bound = [...new Set(display.rows.flatMap(r => r.result_material_ids).filter((x): x is number => x != null))]
+    if (bound.length > 0 && (materials == null || columns == null)) resultsUnread = true
+    else {
+      for (const id of bound) {
+        const m = materials!.find(x => x.id === id)
+        if (!m) continue
+        // A result slice 1 cannot place is named, never shaped (`describeResult` leaves its unit null).
+        const shaped = isDisplayResult(m)
+          ? await shapeChartTable(projectId, { materialId: id, config: m.config ?? {} }, timelineLens).catch(() => null)
+          : null
+        results.set(id, { ...describeResult(m, columns!), table: shaped?.table ?? null })
+      }
+    }
+
+    // Joint display slice 2, round 2 (r5-8, r3-11): one COUNT-ONLY case read per row with a
+    // misfit (r5-7: `limit` 0 — no person's facts), under the same lens as the numbers. Only
+    // when the numbers were read: with none the report prints its one sentence and no note —
+    // which is also what keeps D96 (blind, no viewer: no compute, so no case read either).
+    const misfits = new Map<string, MisfitReportFacts>()
+    if (data) {
+      await Promise.all(display.rows.filter(hasMisfit).map(async r => {
+        const req = caseCountRequest(display, r.key, scope)
+        if (req == null) { misfits.set(r.key, 'unread'); return }
+        try {
+          misfits.set(r.key, misfitReportFacts(await jointDisplayApi.cases(projectId, req), (r.misfit?.rule?.conditions.length ?? 0) > 0))
+        } catch {
+          misfits.set(r.key, 'unread')
+        }
+      }))
+    }
+
+    return [displayKey, buildJointDisplayReport({ display, data, unavailable, facts, attributionWithheld, attributionUnusable, results, resultsUnread, misfits }, ctx)] as const
+  }))
+  return new Map(reports)
+}
+
+/** The Word payload for each display (`display_tables`) — the same report, as strings. */
+export function docxDisplayTables(reports: Map<string, JointDisplayReport>): Map<string, DocxDisplayTable> {
+  return new Map([...reports].map(([key, r]) => [key, reportToDocx(r)]))
+}
+
+/** What a theme's Tiptap renders against: the charts' tables and the displays' reports. */
+interface ExportTables {
+  charts: Map<number, { md: string; html: string }>
+  displays: Map<string, JointDisplayReport>
 }
 
 /**
@@ -309,26 +547,6 @@ export function docxChartTables(tables: Map<number, ChartExportTable>): Map<numb
   return out
 }
 
-/**
- * Fetch and flatten whichever payload this qualitative chart is made of.
- *
- * Dispatches on the SAME `qualChartKind` the renderer uses, so an exported
- * table can never describe a different chart than the one on screen. Note
- * co-occurrence is fetched directly here — the export mounts no components, so
- * the fact that `QualCooccurrence` normally fetches for itself is irrelevant on
- * this path.
- */
-/**
- * A group comparison as a plain table, for the Markdown and HTML exports (#817).
- *
- * ⚠️ **Mirrors what `GroupComparisonTable` renders, not what the payload
- * holds** — per group its n and mean, then the test and its p. A dump of every
- * field would not be the figure the researcher put on the page.
- *
- * ⚠️ **A row whose test did not run prints the REASON, never a blank cell.** A
- * blank is indistinguishable from a broken export (#566), and the reason is
- * already on the row.
- */
 /**
  * The cross-tab grid, shaped exactly as `AnalysisCrossTabTable` draws it (#832).
  *
@@ -383,31 +601,55 @@ function crossTabExportTable(
   return { headers, rows }
 }
 
+/**
+ * A group comparison as a plain table (#817) — the Markdown export's only view of it,
+ * the table under the figure's image in HTML/PDF, Word's table when no image was
+ * captured (#1406 D5), and the joint display's bound saved result (D165, through
+ * `shapeChartTable`).
+ *
+ * 🔴 **#1423 — every cell is the screen's, from the resolvers `GroupComparisonTable` and
+ * `ComparisonTestStrip` render (`lib/group-comparison-display.ts`), never a derivation of
+ * its own.** This printed the test's wire id (`kruskal_wallis = 48.557`), the MEAN under a
+ * figure showing medians, `p.toFixed(4)` ("0.0000") and no effect size. Columns:
+ * - `Variable`, then per group the table's own columns — n, M, SD, or n and Mdn under a
+ *   rank test (`nonparametric` is the embed's saved setting, the prop the table gets);
+ * - `Δ (A − B)` where the table shows its Difference column (two groups, a
+ *   variance-based test);
+ * - `Test` — the strip's `F(2, 15) = 42.35`; `p` — the table's `.002` / `<.001`, with
+ *   the method the data chose (#1326 D58); `Effect size` — the strip's
+ *   `ω² = 0.82 (large)`, with d's interval.
+ * ⚠️ No significance stars (their legend would have to ride the note) and no post-hoc
+ * block: the image carries both where there is one.
+ *
+ * ⚠️ **A row whose test did not run prints the REASON, never a blank cell** (#566).
+ */
 function comparisonExportTable(
   data: GroupComparisonResponse,
+  nonparametric: boolean,
 ): ExportTable | null {
   if (data.rows.length === 0) return null
+  const delta = hasDifferenceColumn(data.groups, nonparametric)
+  const statHeaders = groupStatHeaders(nonparametric)
   const headers = [
     'Variable',
-    ...data.groups.flatMap(g => [`${g} n`, `${g} M`]),
+    ...data.groups.flatMap(g => statHeaders.map(h => `${g} ${h}`)),
+    ...(delta ? [`Δ (${data.groups[0]} − ${data.groups[1]})`] : []),
     'Test',
     'p',
+    'Effect size',
   ]
   const rows = data.rows.map(row => {
     const cells: string[] = [row.full_label || row.label]
     for (const g of data.groups) {
-      const stat = row.group_stats.find(s => s.group === g)
-      cells.push(stat ? String(stat.n) : '—')
-      cells.push(stat?.mean != null ? stat.mean.toFixed(2) : '—')
+      cells.push(...groupStatTexts(row.group_stats.find(s => s.group === g), nonparametric))
     }
-    if (row.test) {
-      cells.push(`${row.test.test_type} = ${row.test.statistic.toFixed(3)}`)
-      // #1326 STAT-12 (D58): a p whose method the data chose says which.
-      const method = pMethodShort(row.test.p_method)
-      cells.push(`${row.test.p.toFixed(4)}${method ? ` (${method})` : ''}`)
+    const test = row.test
+    // The table's Difference cell is a dash when the row's test did not run.
+    if (delta) cells.push(test ? formatStat(meanDifference(row, data.groups)) : NO_VALUE)
+    if (test) {
+      cells.push(testStatisticText(test), pCellText(test), effectSizeText(test))
     } else {
-      cells.push(describeUndefined(row.test_omitted_reason) ?? 'Not computed')
-      cells.push('—')
+      cells.push(describeUndefined(row.test_omitted_reason) ?? 'Not computed', NO_VALUE, NO_VALUE)
     }
     return cells
   })
@@ -420,10 +662,21 @@ function comparisonExportTable(
   return notes.length ? { headers, rows, note: notes.join(' ') } : { headers, rows }
 }
 
+/**
+ * Fetch and flatten whichever payload this qualitative chart is made of.
+ *
+ * Dispatches on the SAME `qualChartKind` the renderer uses, so an exported
+ * table can never describe a different chart than the one on screen. Note
+ * co-occurrence is fetched directly here — the export mounts no components, so
+ * the fact that `QualCooccurrence` normally fetches for itself is irrelevant on
+ * this path.
+ */
 async function qualChartTable(
   projectId: number,
   params: QualComputeParams,
   timelineLens: TimelineExportLens,
+  /** #1615 — `ratingsViewerField(…)`, spread into the two grouping reads only. */
+  viewer: { ratings_viewer_id?: number },
 ): Promise<ExportTable | null> {
   switch (qualChartKind(params)) {
     case 'timeline':
@@ -433,7 +686,7 @@ async function qualChartTable(
     case 'bar':
     case 'stacked_bar':
     case 'summary': {
-      const data = await codeAnalysisApi.sourceFrequencies(projectId, params.request)
+      const data = await codeAnalysisApi.sourceFrequencies(projectId, { ...params.request, ...viewer })
       return qualFrequenciesToTable(data, params.orientation === 'codes-rows')
     }
 
@@ -470,7 +723,7 @@ async function qualChartTable(
     case 'comparison_bar': {
       const request = buildQualComparisonRequest(params)
       if (!request) return null
-      const data = await codeAnalysisApi.demographicComparison(projectId, request)
+      const data = await codeAnalysisApi.demographicComparison(projectId, { ...request, ...viewer })
       const groups = data.groups ?? []
       if (groups.length === 0) return null
       // #1323: the unit is in the header ("Board (of 5 participants)") and the test
@@ -518,7 +771,15 @@ async function qualChartTable(
               : [NO_VALUE, describeOmittedTest(entry.test_omitted_reason) ?? NO_VALUE]
             : []),
         ]),
-        note: comparisonMethodNote(data) ?? undefined,
+        // #1626 (D244): the participants with no coding in scope, after the method
+        // note, as the figure prints them beneath itself.
+        note: [
+          comparisonMethodNote(data),
+          noCodingNote(
+            groups.map(g => [g, data.group_totals?.[g]?.without_coding ?? 0] as const),
+            noCodingScope(data.scope?.no_coding_scope),
+          ),
+        ].filter(Boolean).join(' ') || undefined,
       }
     }
 
@@ -678,9 +939,11 @@ export interface ExportTable {
   /**
    * #1323 — a paragraph printed UNDER the table in the Markdown and HTML renderings:
    * the words the rendered figure carries beneath itself (the comparison's method
-   * note), which a Markdown reader otherwise never sees. ⚠️ The `.docx` fallback
-   * table does not carry it — the server reads `headers` and `rows` only
-   * (`routers/canvas.py::_decode_chart_tables`); the Word export's captured image does.
+   * note), which a Markdown reader otherwise never sees. #1458 D260: the `.docx`
+   * fallback table prints it too — `docxChartTables` sends it and
+   * `routers/canvas.py::_decode_chart_tables` validates it (a non-string drops the
+   * entry; over 20,000 characters is `too_large`, never cut). Under a captured image
+   * Word prints no note: the image carries its own.
    */
   note?: string
 }
@@ -698,16 +961,21 @@ export interface ChartExportTable {
 
 function tableExport(materialId: number, table: ExportTable) {
   // A plain paragraph, not emphasis: the note is generated prose, and an `*` or `_`
-  // inside it would unbalance Markdown emphasis.
-  const md = mdTable(table.headers, table.rows) + (table.note ? `\n\n${table.note}` : '')
+  // inside it would unbalance Markdown emphasis. It names groups (user values), so it
+  // is escaped as it enters (#1422).
+  const md = mdTable(table.headers, table.rows) + (table.note ? `\n\n${mdBlock(table.note)}` : '')
   const html = htmlTable(table.headers, table.rows) + (table.note ? `\n<p>${esc(table.note)}</p>` : '')
   return { materialId, md, html, table }
 }
 
+/**
+ * #1422 — every header and cell is DATA, escaped by `mdLine` (a `|` would add a column, a
+ * newline end the row, a `*` or `<Tag>` become markup); a cell can never carry Markdown.
+ */
 function mdTable(headers: string[], rows: string[][]): string {
-  const h = `| ${headers.join(' | ')} |`
+  const h = `| ${headers.map(mdLine).join(' | ')} |`
   const sep = `| ${headers.map(() => '---').join(' | ')} |`
-  const body = rows.map(r => `| ${r.join(' | ')} |`).join('\n')
+  const body = rows.map(r => `| ${r.map(mdLine).join(' | ')} |`).join('\n')
   return `${h}\n${sep}\n${body}`
 }
 
@@ -880,17 +1148,25 @@ function convertMetrics(
 
 // ── Tiptap-to-Markdown ───────────────────────────────────────────────────────
 
+/**
+ * A text node: its words escaped ONCE (#1422), then the marks wrapped around them — never the
+ * other way round, or the marks' own `*` would be escaped. A `\n` in the text is a line
+ * break, resolved by the enclosing block (`mdLines`).
+ */
 function renderTextWithMarks(node: TiptapNode): string {
-  let text = node.text ?? ''
+  let text = mdText(node.text)
   if (!node.marks) return text
   for (const mark of node.marks) {
     switch (mark.type) {
-      case 'bold': text = `**${text}**`; break
-      case 'italic': text = `*${text}*`; break
-      case 'strike': text = `~~${text}~~`; break
+      case 'bold': text = mdWrap('**', text); break
+      case 'italic': text = mdWrap('*', text); break
+      case 'strike': text = mdWrap('~~', text); break
+      // DECIDED (r1-9): Markdown has no underline, and inline `<u>` prints as literal tags
+      // where a renderer disables HTML (markdown-it's default preset) — so the words, plain.
+      case 'underline': break
       case 'link': {
         const href = exportableHref(mark.attrs?.href)
-        if (href != null) text = `[${text}](${href})`
+        if (href != null) text = `[${text}](${mdDestination(href)})`
         break
       }
     }
@@ -898,54 +1174,100 @@ function renderTextWithMarks(node: TiptapNode): string {
   return text
 }
 
-function nodeChildrenToMd(node: TiptapNode, chartTables: Map<number, { md: string; html: string }>): string {
-  if (!node.content) return ''
-  return node.content.map(c => nodeToMd(c, chartTables)).join('')
+/** #1457 — an @mention prints as the editor draws it: `@` and its label (the id without one). */
+function mentionText(node: TiptapNode): string {
+  return `@${String(node.attrs?.label ?? node.attrs?.id ?? '')}`
 }
 
-function nodeToMd(node: TiptapNode, chartTables: Map<number, { md: string; html: string }>): string {
+/**
+ * An ordered list's first number (Tiptap's input rule stores a typed "3. " as `start: 3`).
+ * A non-negative integer, else 1 — the Word export's rule (`_new_numbering`), so the formats agree.
+ */
+function listStart(node: TiptapNode): number {
+  const s = node.attrs?.start
+  return typeof s === 'number' && Number.isInteger(s) && s >= 0 ? s : 1
+}
+
+/** `- ` / `1. ` and the item's blocks, every later line indented under the marker (#1422):
+ *  an unindented second paragraph or nested list leaves the item. */
+function mdListItem(marker: string, body: string): string {
+  const pad = ' '.repeat(marker.length)
+  return marker + body.trim().split('\n').map((l, i) => (i === 0 || l === '' ? l : pad + l)).join('\n') + '\n'
+}
+
+function nodeChildrenToMd(node: TiptapNode, tables: ExportTables): string {
+  if (!node.content) return ''
+  return node.content.map(c => nodeToMd(c, tables)).join('')
+}
+
+/**
+ * The joint display in either format: its report table, or — when the node's key matched no
+ * report (it could not be collected) — one sentence, never nothing: an unknown node rendered
+ * NOTHING in every export before session C, silently.
+ */
+function jointDisplayExport(node: TiptapNode, tables: ExportTables, format: 'md' | 'html'): string {
+  const key = node.attrs?.displayKey
+  const report = typeof key === 'string' ? tables.displays.get(key) : undefined
+  if (report) return format === 'md' ? reportToMarkdown(report) : reportToHtml(report, esc)
+  const text = 'Joint display not available in this export.'
+  return format === 'md' ? `*[${text}]*\n\n` : `<p><em>${esc(text)}</em></p>\n`
+}
+
+function nodeToMd(node: TiptapNode, tables: ExportTables): string {
+  const chartTables = tables.charts
   switch (node.type) {
     case 'text':
       return renderTextWithMarks(node)
 
+    // #1457 — Shift+Enter; the enclosing block turns it into a hard break (`mdLines`).
+    case 'hardBreak':
+      return '\n'
+
+    case 'mention':
+      return mdText(mentionText(node))
+
     case 'paragraph':
-      return nodeChildrenToMd(node, chartTables) + '\n\n'
+      return mdLines(nodeChildrenToMd(node, tables)) + '\n\n'
 
     case 'heading': {
+      // Only imported JSON holds one (the editor has no headings). An ATX heading is one line,
+      // so a line break in it is a space here; HTML keeps it as `<br>`.
       const level = (node.attrs?.level as number) ?? 3
       const prefix = '#'.repeat(Math.min(level + 2, 6)) // offset: themes are h2
-      return `${prefix} ${nodeChildrenToMd(node, chartTables)}\n\n`
+      return `${prefix} ${mdHeading(nodeChildrenToMd(node, tables))}\n\n`
     }
 
     case 'bulletList':
-      return (node.content ?? []).map(li => {
-        const text = nodeChildrenToMd(li, chartTables).trim()
-        return `- ${text}\n`
-      }).join('') + '\n'
+      return (node.content ?? []).map(li => mdListItem('- ', nodeChildrenToMd(li, tables))).join('') + '\n'
 
-    case 'orderedList':
-      return (node.content ?? []).map((li, i) => {
-        const text = nodeChildrenToMd(li, chartTables).trim()
-        return `${i + 1}. ${text}\n`
-      }).join('') + '\n'
+    case 'orderedList': {
+      // CommonMark takes the list's first number as its start (r1-10); a marker past nine digits
+      // is not a list marker at all, so such a list counts from 1 rather than becoming prose.
+      const items = node.content ?? []
+      const start = listStart(node) + items.length - 1 <= 999_999_999 ? listStart(node) : 1
+      return items.map((li, i) => mdListItem(`${start + i}. `, nodeChildrenToMd(li, tables))).join('') + '\n'
+    }
 
     case 'listItem':
-      return nodeChildrenToMd(node, chartTables)
+      return nodeChildrenToMd(node, tables)
 
     case 'blockquote':
-      return nodeChildrenToMd(node, chartTables).trim().split('\n').map(l => `> ${l}`).join('\n') + '\n\n'
+      return nodeChildrenToMd(node, tables).trim().split('\n').map(l => `> ${l}`).join('\n') + '\n\n'
 
     case 'horizontalRule':
       return '---\n\n'
 
     case 'excerpt-embed': {
+      // #1422 \u2014 EVERY line of the quote carries `> `: a participant's second paragraph must not
+      // leave the quote and read as the researcher's prose. The attribution and the tag are
+      // their own lines inside it (they ran onto the quote's line as a soft break).
       const text = (node.attrs?.displayText as string) ?? ''
       const source = (node.attrs?.sourceContext as string) ?? ''
       const tag = (node.attrs?.materialTag as string) ?? ''
-      let md = `> "${text}"\n`
-      if (source) md += `> *\u2014 ${source}*\n`
-      if (tag) md += `> Tag: ${tag}\n`
-      return md + '\n'
+      const parts = [`"${mdBlock(text)}"`]
+      if (source) parts.push(mdWrap('*', `\u2014 ${mdLine(source)}`))
+      if (tag) parts.push(`Tag: ${mdLine(tag)}`)
+      return parts.join('\n\n').split('\n').map(l => (l ? `> ${l}` : '>')).join('\n') + '\n\n'
     }
 
     case 'chart-embed': {
@@ -953,24 +1275,24 @@ function nodeToMd(node: TiptapNode, chartTables: Map<number, { md: string; html:
       const mid = node.attrs?.materialId as number
       const tag = (node.attrs?.materialTag as string) ?? ''
       const tableData = mid ? chartTables.get(mid) : undefined
-      let md = `**${title}**\n\n`
+      let md = `${mdWrap('**', mdLine(title))}\n\n`
       if (tableData?.md) {
         md += tableData.md + '\n\n'
       } else {
         md += '*[Chart data not available as table]*\n\n'
       }
-      if (tag) md += `Tag: ${tag}\n\n`
+      if (tag) md += `Tag: ${mdLine(tag)}\n\n`
       return md
     }
 
     case 'memo-embed': {
-      const numId = (node.attrs?.numericId as number) ?? ''
+      const numId = node.attrs?.numericId ?? ''
       const title = (node.attrs?.title as string) ?? ''
       const preview = (node.attrs?.preview as string) ?? ''
       const tag = (node.attrs?.materialTag as string) ?? ''
-      let md = `**Memo M-${numId}${title ? `: ${title}` : ''}**\n\n`
-      if (preview) md += `${preview}\n\n`
-      if (tag) md += `Tag: ${tag}\n\n`
+      let md = `${mdWrap('**', `Memo M-${mdLine(numId)}${title ? `: ${mdLine(title)}` : ''}`)}\n\n`
+      if (preview) md += `${mdBlock(preview)}\n\n`
+      if (tag) md += `Tag: ${mdLine(tag)}\n\n`
       return md
     }
 
@@ -979,31 +1301,35 @@ function nodeToMd(node: TiptapNode, chartTables: Map<number, { md: string; html:
       const label = (node.attrs?.label as string) ?? ''
       const source = (node.attrs?.sourceDescription as string) ?? ''
       const tag = (node.attrs?.materialTag as string) ?? ''
-      let md = `**${value}** ${label}\n\n`
-      if (source) md += `*Source: ${source}*\n\n`
-      if (tag) md += `Tag: ${tag}\n\n`
+      // `mdLines` guards the line's start: with no value it begins with the label.
+      let md = `${mdLines(`${mdWrap('**', mdLine(value))} ${mdLine(label)}`)}\n\n`
+      if (source) md += `${mdWrap('*', `Source: ${mdLine(source)}`)}\n\n`
+      if (tag) md += `Tag: ${mdLine(tag)}\n\n`
       return md
     }
 
     case 'image-embed': {
       const alt = (node.attrs?.alt as string) ?? 'Image'
       const tag = (node.attrs?.materialTag as string) ?? ''
-      let md = `*[Image: ${alt}]*\n\n`
-      if (tag) md += `Tag: ${tag}\n\n`
+      let md = `*[Image: ${mdLine(alt)}]*\n\n`
+      if (tag) md += `Tag: ${mdLine(tag)}\n\n`
       return md
     }
 
+    case JOINT_DISPLAY_NODE:
+      return jointDisplayExport(node, tables, 'md')
+
     default:
       // Unknown node — try to render children
-      return nodeChildrenToMd(node, chartTables)
+      return nodeChildrenToMd(node, tables)
   }
 }
 
-function tiptapToMarkdown(content: unknown, chartTables: Map<number, { md: string; html: string }>): string {
+function tiptapToMarkdown(content: unknown, tables: ExportTables): string {
   if (!content) return ''
   const doc = typeof content === 'string' ? JSON.parse(content) : content
   if (!doc?.content) return ''
-  return (doc.content as TiptapNode[]).map(n => nodeToMd(n, chartTables)).join('').trim()
+  return (doc.content as TiptapNode[]).map(n => nodeToMd(n, tables)).join('').trim()
 }
 
 // ── Chart PNG capture ─────────────────────────────────────────────────────────
@@ -1090,14 +1416,33 @@ export async function captureCanvasChartPngs(): Promise<Map<number, string>> {
 
 // ── Tiptap-to-HTML ───────────────────────────────────────────────────────────
 
+/**
+ * #1457 — escaped text whose line breaks stay line breaks (HTML collapses a bare `\n`).
+ * ONE paragraph: for an attr that can hold blank lines use `htmlParagraphs`.
+ */
+function htmlLines(s: unknown): string {
+  return esc(s).replace(/\r\n?|\n/g, '<br>')
+}
+
+/** Multi-line attr text (a quote, a memo preview) → `<p>` per blank-line paragraph (#1422). */
+function htmlParagraphs(s: unknown): string {
+  return String(s ?? '')
+    .split(/(?:\r\n?|\n)[ \t]*(?:\r\n?|\n)/)
+    .filter(p => p.trim() !== '')
+    .map(p => `<p>${htmlLines(p.trim())}</p>`)
+    .join('')
+}
+
 function renderTextWithMarksHtml(node: TiptapNode): string {
-  let text = esc(node.text ?? '')
+  let text = htmlLines(node.text)
   if (!node.marks) return text
   for (const mark of node.marks) {
     switch (mark.type) {
       case 'bold': text = `<strong>${text}</strong>`; break
       case 'italic': text = `<em>${text}</em>`; break
       case 'strike': text = `<s>${text}</s>`; break
+      // StarterKit's Ctrl+U — the Word export keeps it as an underlined run (r1-9).
+      case 'underline': text = `<u>${text}</u>`; break
       case 'link': {
         const href = exportableHref(mark.attrs?.href)
         if (href != null) text = `<a href="${esc(href)}">${text}</a>`
@@ -1108,44 +1453,56 @@ function renderTextWithMarksHtml(node: TiptapNode): string {
   return text
 }
 
-function nodeChildrenToHtml(node: TiptapNode, chartTables: Map<number, { md: string; html: string }>, chartPngs: Map<number, string>): string {
+function nodeChildrenToHtml(node: TiptapNode, tables: ExportTables, chartPngs: Map<number, string>): string {
   if (!node.content) return ''
-  return node.content.map(c => nodeToHtml(c, chartTables, chartPngs)).join('')
+  return node.content.map(c => nodeToHtml(c, tables, chartPngs)).join('')
 }
 
-function nodeToHtml(node: TiptapNode, chartTables: Map<number, { md: string; html: string }>, chartPngs: Map<number, string>): string {
+function nodeToHtml(node: TiptapNode, tables: ExportTables, chartPngs: Map<number, string>): string {
+  const chartTables = tables.charts
   switch (node.type) {
     case 'text':
       return renderTextWithMarksHtml(node)
 
+    // #1457 — Shift+Enter, and an @mention as the editor draws it.
+    case 'hardBreak':
+      return '<br>'
+
+    case 'mention':
+      return esc(mentionText(node))
+
     case 'paragraph':
-      return `<p>${nodeChildrenToHtml(node, chartTables, chartPngs)}</p>\n`
+      return `<p>${nodeChildrenToHtml(node, tables, chartPngs)}</p>\n`
 
     case 'heading': {
       const level = Math.min(((node.attrs?.level as number) ?? 3) + 2, 6)
-      return `<h${level}>${nodeChildrenToHtml(node, chartTables, chartPngs)}</h${level}>\n`
+      return `<h${level}>${nodeChildrenToHtml(node, tables, chartPngs)}</h${level}>\n`
     }
 
     case 'bulletList':
-      return `<ul>\n${(node.content ?? []).map(li => `<li>${nodeChildrenToHtml(li, chartTables, chartPngs).trim()}</li>\n`).join('')}</ul>\n`
+      return `<ul>\n${(node.content ?? []).map(li => `<li>${nodeChildrenToHtml(li, tables, chartPngs).trim()}</li>\n`).join('')}</ul>\n`
 
-    case 'orderedList':
-      return `<ol>\n${(node.content ?? []).map(li => `<li>${nodeChildrenToHtml(li, chartTables, chartPngs).trim()}</li>\n`).join('')}</ol>\n`
+    case 'orderedList': {
+      // r1-10 — a list typed from "3. " counts from 3, as on screen (`start` only when not 1).
+      const start = listStart(node)
+      return `<ol${start === 1 ? '' : ` start="${start}"`}>\n${(node.content ?? []).map(li => `<li>${nodeChildrenToHtml(li, tables, chartPngs).trim()}</li>\n`).join('')}</ol>\n`
+    }
 
     case 'listItem':
-      return nodeChildrenToHtml(node, chartTables, chartPngs)
+      return nodeChildrenToHtml(node, tables, chartPngs)
 
     case 'blockquote':
-      return `<blockquote>${nodeChildrenToHtml(node, chartTables, chartPngs)}</blockquote>\n`
+      return `<blockquote>${nodeChildrenToHtml(node, tables, chartPngs)}</blockquote>\n`
 
     case 'horizontalRule':
       return '<hr>\n'
 
     case 'excerpt-embed': {
-      const text = esc((node.attrs?.displayText as string) ?? '')
+      // #1422 \u2014 a quote's paragraphs stay paragraphs (HTML ran them into one).
+      const text = String((node.attrs?.displayText as string) ?? '').trim()
       const source = esc((node.attrs?.sourceContext as string) ?? '')
       const tag = (node.attrs?.materialTag as string) ?? ''
-      return `<blockquote class="excerpt"><p>"${text}"</p>${source ? `<footer>\u2014 ${source}</footer>` : ''}${tag ? `<p class="tag">Tag: ${esc(tag)}</p>` : ''}</blockquote>\n`
+      return `<blockquote class="excerpt">${htmlParagraphs(`"${text}"`)}${source ? `<footer>\u2014 ${source}</footer>` : ''}${tag ? `<p class="tag">Tag: ${esc(tag)}</p>` : ''}</blockquote>\n`
     }
 
     case 'chart-embed': {
@@ -1166,9 +1523,9 @@ function nodeToHtml(node: TiptapNode, chartTables: Map<number, { md: string; htm
     case 'memo-embed': {
       const numId = esc(node.attrs?.numericId)
       const title = esc((node.attrs?.title as string) ?? '')
-      const preview = esc((node.attrs?.preview as string) ?? '')
+      const preview = (node.attrs?.preview as string) ?? ''
       const tag = (node.attrs?.materialTag as string) ?? ''
-      return `<div class="memo"><strong>Memo M-${numId}${title ? `: ${title}` : ''}</strong>${preview ? `<p>${preview}</p>` : ''}${tag ? `<p class="tag">Tag: ${esc(tag)}</p>` : ''}</div>\n`
+      return `<div class="memo"><strong>Memo M-${numId}${title ? `: ${title}` : ''}</strong>${preview ? htmlParagraphs(preview) : ''}${tag ? `<p class="tag">Tag: ${esc(tag)}</p>` : ''}</div>\n`
     }
 
     case 'callout-stat': {
@@ -1185,16 +1542,19 @@ function nodeToHtml(node: TiptapNode, chartTables: Map<number, { md: string; htm
       return `<div class="image"><p><em>[Image: ${alt}]</em></p>${tag ? `<p class="tag">Tag: ${esc(tag)}</p>` : ''}</div>\n`
     }
 
+    case JOINT_DISPLAY_NODE:
+      return jointDisplayExport(node, tables, 'html')
+
     default:
-      return nodeChildrenToHtml(node, chartTables, chartPngs)
+      return nodeChildrenToHtml(node, tables, chartPngs)
   }
 }
 
-function tiptapToHtml(content: unknown, chartTables: Map<number, { md: string; html: string }>, chartPngs: Map<number, string>): string {
+function tiptapToHtml(content: unknown, tables: ExportTables, chartPngs: Map<number, string>): string {
   if (!content) return ''
   const doc = typeof content === 'string' ? JSON.parse(content) : content
   if (!doc?.content) return ''
-  return (doc.content as TiptapNode[]).map(n => nodeToHtml(n, chartTables, chartPngs)).join('')
+  return (doc.content as TiptapNode[]).map(n => nodeToHtml(n, tables, chartPngs)).join('')
 }
 
 // ── Full document assembly ───────────────────────────────────────────────────
@@ -1210,12 +1570,14 @@ function buildRelationshipsSummary(
   if (format === 'md') {
     let md = '---\n\n## Relationships\n\n'
     for (const r of relationships) {
-      const src = themeNames.get(r.source_theme_id) ?? 'Unknown'
-      const tgt = themeNames.get(r.target_theme_id) ?? 'Unknown'
-      const type = r.relationship_type === 'custom' ? '' : `**${r.relationship_type}**`
-      const label = r.label ? (type ? ` \u00b7 ${r.label}` : r.label) : ''
+      // #1422 \u2014 names and labels are user text; `mdLines` guards the item's start (`- # x`
+      // would be a heading inside the list).
+      const src = mdLine(themeNames.get(r.source_theme_id) ?? 'Unknown')
+      const tgt = mdLine(themeNames.get(r.target_theme_id) ?? 'Unknown')
+      const type = r.relationship_type === 'custom' ? '' : mdWrap('**', mdLine(r.relationship_type))
+      const label = r.label ? (type ? ` \u00b7 ${mdLine(r.label)}` : mdLine(r.label)) : ''
       const arrow = r.is_bidirectional ? '\u2194' : '\u2192'
-      md += `- ${src} ${arrow} ${tgt}${type || label ? `: ${type}${label}` : ''}\n`
+      md += `- ${mdLines(`${src} ${arrow} ${tgt}${type || label ? `: ${type}${label}` : ''}`)}\n`
     }
     return md + '\n'
   }
@@ -1243,19 +1605,35 @@ function getAllRelationships(themes: CanvasTheme[]): CanvasThemeRelationship[] {
   return rels
 }
 
+/** Both table sets a canvas export renders against, fetched side by side. */
+async function fetchExportTables(
+  themes: CanvasTheme[],
+  projectId: number,
+  timelineLens: TimelineExportLens,
+  coderName: CoderNameLookup,
+): Promise<ExportTables> {
+  const [charts, displays] = await Promise.all([
+    fetchChartTables(themes, projectId, timelineLens),
+    fetchDisplayReports(themes, projectId, timelineLens, coderName),
+  ])
+  return { charts, displays }
+}
+
 export async function exportCanvasMarkdown(
   canvas: CanvasDetail,
   themes: CanvasTheme[],
   projectId: number,
   timelineLens: TimelineExportLens,
+  coderName: CoderNameLookup,
 ): Promise<string> {
-  const chartTables = await fetchChartTables(themes, projectId, timelineLens)
+  const tables = await fetchExportTables(themes, projectId, timelineLens, coderName)
   const relationships = getAllRelationships(themes)
 
-  let md = `# ${canvas.name}\n\n`
+  // #1422 — the names are user text: `_draft_` was emphasis, `<x>` vanished, a trailing ` #` was eaten.
+  let md = `# ${mdHeading(mdLine(canvas.name))}\n\n`
   for (const theme of themes) {
-    md += `## ${theme.name}\n\n`
-    md += tiptapToMarkdown(theme.content, chartTables)
+    md += `## ${mdHeading(mdLine(theme.name))}\n\n`
+    md += tiptapToMarkdown(theme.content, tables)
     if (md.length > 0 && !md.endsWith('\n\n')) md += '\n\n'
   }
   md += buildRelationshipsSummary(relationships, themes, 'md')
@@ -1279,6 +1657,10 @@ blockquote.excerpt footer { font-style: italic; color: #6b7280; margin-top: 0.5r
 table { border-collapse: collapse; width: 100%; margin: 0.5rem 0; font-size: 0.9rem; }
 th, td { border: 1px solid #d1d5db; padding: 0.4rem 0.75rem; text-align: left; }
 th { background: #f9fafb; font-weight: 600; }
+.joint-display th[scope="row"] { background: transparent; }
+.joint-display tr.beside td { background: #f6f6f6; }
+.joint-display td, .joint-display th { vertical-align: top; }
+.note { font-size: 0.85rem; color: #4b5563; }
 hr { border: none; border-top: 1px solid #e5e7eb; margin: 2rem 0; }
 ul { padding-left: 1.5rem; }
 `.trim()
@@ -1290,14 +1672,15 @@ async function buildCanvasHtmlBody(
   projectId: number,
   chartPngs: Map<number, string>,
   timelineLens: TimelineExportLens,
+  coderName: CoderNameLookup,
 ): Promise<string> {
-  const chartTables = await fetchChartTables(themes, projectId, timelineLens)
+  const tables = await fetchExportTables(themes, projectId, timelineLens, coderName)
   const relationships = getAllRelationships(themes)
 
   let body = `<h1>${esc(canvas.name)}</h1>\n`
   for (const theme of themes) {
     body += `<h2>${esc(theme.name)}</h2>\n`
-    body += tiptapToHtml(theme.content, chartTables, chartPngs)
+    body += tiptapToHtml(theme.content, tables, chartPngs)
   }
   body += buildRelationshipsSummary(relationships, themes, 'html')
   return body
@@ -1309,9 +1692,10 @@ export async function exportCanvasHtml(
   projectId: number,
   preCapturedPngs: Map<number, string> | undefined,
   timelineLens: TimelineExportLens,
+  coderName: CoderNameLookup,
 ): Promise<string> {
   const chartPngs = preCapturedPngs ?? await captureCanvasChartPngs()
-  const body = await buildCanvasHtmlBody(canvas, themes, projectId, chartPngs, timelineLens)
+  const body = await buildCanvasHtmlBody(canvas, themes, projectId, chartPngs, timelineLens, coderName)
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1395,9 +1779,10 @@ export async function exportCanvasPdf(
   projectId: number,
   preCapturedPngs: Map<number, string> | undefined,
   timelineLens: TimelineExportLens,
+  coderName: CoderNameLookup,
 ): Promise<void> {
   const chartPngs = preCapturedPngs ?? await captureCanvasChartPngs()
-  const body = await buildCanvasHtmlBody(canvas, themes, projectId, chartPngs, timelineLens)
+  const body = await buildCanvasHtmlBody(canvas, themes, projectId, chartPngs, timelineLens, coderName)
 
   const html = `<!DOCTYPE html>
 <html lang="en">

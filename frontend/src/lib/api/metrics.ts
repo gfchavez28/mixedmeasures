@@ -1,5 +1,6 @@
 import api from './client'
 import { downloadFromApi } from './download'
+import { liftCoderIds } from './coder-scope-query'  // #1615
 
 // Metric types
 export type MetricType = 'frequency_distribution' | 'proportion' | 'mean' | 'domain_aggregate'
@@ -98,6 +99,8 @@ export interface QuickComputeRequest {
   grouping_mode: GroupingMode | null
   exclude_values: string[] | null
   decompose?: boolean
+  /** #1615 — the viewer alone while blind (`lib/analysis-scope.ts`); absent = every coder. */
+  coder_ids?: number[] | null
 }
 
 export interface QuickComputeResponse {
@@ -118,6 +121,8 @@ export interface AnalysisColumnItem {
   scale_labels: string[] | null
   equivalence_group_id: number | null
   domain_ids: number[]
+  /** #1615 (C4) — a rating score hidden from the asked scope. The pickers hide it; names still resolve. */
+  withheld_while_blind?: boolean
 }
 
 export interface AnalysisDatasetGroup {
@@ -131,6 +136,8 @@ export interface AnalysisDomainItem {
   name: string
   member_count: number
   datasets: string[]
+  /** #1615 (C4) — the group holds a rating score hidden from the asked scope. */
+  withheld_while_blind?: boolean
 }
 
 export interface AnalysisDemographicItem {
@@ -140,6 +147,8 @@ export interface AnalysisDemographicItem {
   dataset_id: number
   dataset_name: string
   subtype: string | null
+  /** #1615 (C4) — a grouping variable derived from a rating score, hidden from the asked scope. */
+  withheld_while_blind?: boolean
 }
 
 export interface AnalysisColumnsResponse {
@@ -194,6 +203,9 @@ export interface AnalysisCrossTabResponse {
   row_column_label: string
   col_column_label: string
   chi_square: ChiSquareResult | null
+  /** #1615 D295 — the axes left out while blind (a rating score): the cross-tab is then empty
+   *  and this count is the only reason the response carries. */
+  withheld_rating_variables?: number
 }
 
 // Record matrix types
@@ -254,23 +266,36 @@ export const metricsApi = {
     api.post<{ created: number; metrics: MetricDefinitionResponse[] }>(`/projects/${projectId}/metrics/bulk`, data).then(res => res.data),
   reorder: (projectId: number, metricIds: number[]) =>
     api.post(`/projects/${projectId}/metrics/reorder`, { metric_ids: metricIds }).then(res => res.data),
-  quickCompute: (projectId: number, data: QuickComputeRequest, signal?: AbortSignal) =>
-    api.post<QuickComputeResponse>(`/projects/${projectId}/metrics/quick-compute`, data, { signal }).then(res => res.data),
-  analysisColumns: (projectId: number) =>
-    api.get<AnalysisColumnsResponse>(`/projects/${projectId}/metrics/analysis-columns`).then(res => res.data),
+  quickCompute: (projectId: number, data: QuickComputeRequest, signal?: AbortSignal) => {
+    const [body, params] = liftCoderIds(data)  // #1615: the route reads the scope from the query
+    return api.post<QuickComputeResponse>(`/projects/${projectId}/metrics/quick-compute`, body, { signal, params }).then(res => res.data)
+  },
+  /** #1615 — `coderScope` (the viewer alone while blind) makes the list MARK rating scores
+   * hidden from it (`withheld_while_blind`); without it nothing is marked. */
+  analysisColumns: (projectId: number, coderScope?: string) =>
+    api.get<AnalysisColumnsResponse>(`/projects/${projectId}/metrics/analysis-columns`, {
+      params: coderScope ? { coder_ids: coderScope } : undefined,
+    }).then(res => res.data),
   crossTabulation: (projectId: number, data: {
     row_column_id: number
     col_column_id: number
     include_chi_square?: boolean
-  }) =>
-    api.post<AnalysisCrossTabResponse>(`/projects/${projectId}/metrics/cross-tabulation`, data).then(res => res.data),
-  rowMatrix: (projectId: number, metricIds?: number[], format: 'json' | 'csv' = 'json') => {
-    const paramStr = metricIds?.length ? `?metric_ids=${metricIds.join(',')}` : ''
+    /** #1615 — the viewer alone while blind; absent = every coder. */
+    coder_ids?: number[] | null
+  }) => {
+    const [body, params] = liftCoderIds(data)  // #1615: the route reads the scope from the query
+    return api.post<AnalysisCrossTabResponse>(`/projects/${projectId}/metrics/cross-tabulation`, body, { params }).then(res => res.data)
+  },
+  /** #1615 — `coderScope` (the viewer alone while blind) leaves out every metric over a rating
+   * score hidden from it; the CSV says so in its own words (the server's). */
+  rowMatrix: (projectId: number, metricIds?: number[], format: 'json' | 'csv' = 'json', coderScope?: string) => {
+    const query = new URLSearchParams()
+    if (metricIds?.length) query.append('metric_ids', metricIds.join(','))
+    if (coderScope) query.append('coder_ids', coderScope)
+    const paramStr = query.toString() ? `?${query.toString()}` : ''
     if (format === 'csv') {
       return downloadFromApi(`/projects/${projectId}/metrics/row-matrix/csv${paramStr}`, 'row_matrix.csv')
     }
-    return api.get<RowMatrixResponse>(`/projects/${projectId}/metrics/row-matrix`, {
-      params: metricIds?.length ? { metric_ids: metricIds.join(',') } : undefined,
-    }).then(res => res.data)
+    return api.get<RowMatrixResponse>(`/projects/${projectId}/metrics/row-matrix${paramStr}`).then(res => res.data)
   },
 }

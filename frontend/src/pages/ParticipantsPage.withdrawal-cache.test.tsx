@@ -44,13 +44,19 @@ vi.mock('@/lib/api', async () => ({
   retryUnanswered: () => false,
 }))
 vi.mock('@/layouts/ProjectLayout', () => ({ useProjectLayout: () => ({ projectId: 1 }) }))
+// #1608 — the profile's read follows blind mode (`useBlindScope`); here it is every coder's.
+vi.mock('@/hooks/useBlindScope', () => ({ useBlindScope: () => ({ coderScope: undefined, scopeReady: true }) }))
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 import ParticipantsPage from './ParticipantsPage'
 
 beforeEach(() => {
   listDatasets.mockImplementation(() => Promise.resolve({ datasets: [{ id: 5, name: 'Survey' }] }))
-  withdraw.mockResolvedValue({ identifier: 'P001', backup_filename: 'b.mmbackup', documents_unlinked: 0 })
+  withdraw.mockResolvedValue({
+    identifier: 'P001', backup_filename: 'b.mmbackup', documents_unlinked: 0,
+    other_projects_with_identifier: { projects: [], total: 0 },
+    pre_update_copies: { count: 0, folder: '/home/r/backups' },
+  })
 })
 
 afterEach(() => {
@@ -74,7 +80,11 @@ function person(id: number, over: Partial<Participant> = {}): Participant {
 const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   participant_id: 0, identifier: '', display_name: null, role: null, has_demographics: false,
   speaker_names: [], conversations: [], datasets: [], documents: [], total_items: 1,
-  unlinked_records_with_identifier: 0, ...over,
+  unlinked_records_with_identifier: 0,
+  canvas_quotes_unplaced: { quotes: 0, sections: [], snapshots: [] },
+  canvas_misfit_cases: 0,  // joint display slice 2 (r3-6)
+  other_projects_with_identifier: { projects: [], total: 0 },
+  pre_update_copies: { count: 0, folder: '/home/r/backups' }, ...over,
 })
 
 const P1 = person(1, {
@@ -206,6 +216,30 @@ describe('#1474 — after a withdrawal no cached page serves what it removed', (
   })
 })
 
+describe('joint display slice 2 (D314) — a plain DELETE rewrites the canvas too', () => {
+  /**
+   * The delete endpoint removes the person from every list of cases that don't fit (ids are
+   * reused, so an entry must not outlive its person). A cached canvas bound by the editor
+   * would autosave the old entry, and the researcher's reason, straight back — so the delete
+   * resets canvas content as the withdrawal does. Found by the build's drive.
+   */
+  it('cached canvas content is gone after a delete', async () => {
+    listParticipants.mockResolvedValue({ participants: [P1, P2], total: 2 })
+    renderPage()
+    await screen.findByText('P002')
+    client.setQueryData(['canvas', 1, 4], { cached: true })
+    client.setQueryData(['snapshot-detail', 1, 4, 9], { cached: true })
+    fireEvent.click(screen.getByRole('button', { name: "Delete P002's participant record but keep their data" }))
+    const confirm = await screen.findByRole('button', { name: 'Delete record' })
+    await waitFor(() => expect(confirm).not.toHaveAttribute('aria-disabled'))
+    fireEvent.click(confirm)
+    await waitFor(() => {
+      expect(client.getQueryData(['canvas', 1, 4])).toBeUndefined()
+      expect(client.getQueryData(['snapshot-detail', 1, 4, 9])).toBeUndefined()
+    })
+  })
+})
+
 describe('#1474 — what the act costs the Participants page itself', () => {
   it('the list keeps its rows while it refetches: no loading line, no "No participants yet", the check survives', async () => {
     let answer!: (v: unknown) => void
@@ -248,7 +282,9 @@ describe('#1474 — what the act costs the Participants page itself', () => {
       report: withdrawalReport.mock.calls.filter(([, id]) => id === 1).length - reportBefore,
     }).toEqual({ detail: 0, report: 0 })
     // And nothing of theirs is left cached to answer a later read.
-    expect(client.getQueryData(['participant-detail', 1])).toBeUndefined()
+    // #1608 — the profile's key carries its blind scope; an EXACT read must name it, or this
+    // absence could never fail (every-coder here: `useBlindScope` is mocked so).
+    expect(client.getQueryData(['participant-detail', 1, 'every-coder'])).toBeUndefined()
     expect(client.getQueriesData({ queryKey: ['withdrawal-report', 1, 1] }).filter(([, d]) => d !== undefined)).toEqual([])
   })
 
@@ -324,6 +360,6 @@ describe('#1474 — a withdrawal that fails', () => {
     expect(screen.queryByText('Checking what would be removed…')).toBeNull()
     expect(confirm).not.toHaveAttribute('aria-disabled')
     expect(document.activeElement).toBe(confirm)
-    expect(client.getQueryData(['participant-detail', 1])).toBeDefined()
+    expect(client.getQueryData(['participant-detail', 1, 'every-coder'])).toBeDefined()
   })
 })

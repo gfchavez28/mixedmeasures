@@ -394,9 +394,27 @@ def check_workflow(text: str) -> list[str]:
                 f"ci.yml `{area}` job must run unless the plan says exactly false: "
                 f"`if: ${{{{ !cancelled() && {want_cond} }}}}` (a crashed plan then tests everything)"
             )
-    if not re.search(r"(?m)^  plan:\s*$", text):
+        # #1669: a plan SKIPPED by its private-push gate must take the area with it — with
+        # `!cancelled()` alone the job runs on a skipped plan, testing everything on every
+        # private push and spending the minutes the gate exists to save.
+        if cond and SKIPPED_PLAN_COND not in cond.group(1):
+            problems.append(f"ci.yml `{area}` job must skip when the plan is skipped: add "
+                            f"`{SKIPPED_PLAN_COND}` to its `if:` (#1669)")
+    plan = re.search(r"(?ms)^  plan:\n(.*?)(?=^  \S|\Z)", text)
+    if not plan:
         problems.append("ci.yml has no `plan` job")
+    else:
+        gate = re.search(r"(?m)^    if:\s*(.+)$", plan.group(1))
+        if not gate or PRIVATE_PUSH_GATE not in gate.group(1):
+            problems.append("ci.yml `plan` job has no private-push gate: a push on the private "
+                            f"repository would test (and bill) again — its `if:` must test "
+                            f"`{PRIVATE_PUSH_GATE}` (#1669)")
     return problems
+
+
+#: #1669 — a push or pull request on the PRIVATE repository tests nothing (`ci.yml`'s COST note).
+PRIVATE_PUSH_GATE = "github.event.repository.private"
+SKIPPED_PLAN_COND = "needs.plan.result != 'skipped'"
 
 
 # ── where an area last passed ────────────────────────────────────────────────────────────
@@ -718,8 +736,10 @@ def self_test() -> int:
                "CHANGELOG.md", "CITATION.cff"]
     wf = ("on:\n  push:\n    branches: [main]\n    paths:\n" + "".join(f"      - '{p}'\n" for p in minimal)
           + "  pull_request:\n    paths:\n" + "".join(f"      - '{p}'  # why\n" for p in minimal)
-          + "jobs:\n  plan:\n    runs-on: x\n"
-          + "".join(f"  {a}:\n    needs: plan\n    if: ${{{{ !cancelled() && needs.plan.outputs.{a} != 'false' }}}}\n"
+          + "jobs:\n  plan:\n    if: ${{ !(github.event.repository.private && github.event_name == 'push') }}\n"
+          + "    runs-on: x\n"
+          + "".join(f"  {a}:\n    needs: plan\n    if: ${{{{ !cancelled() && needs.plan.result != 'skipped' && "
+                    f"needs.plan.outputs.{a} != 'false' }}}}\n"
                     for a in AREAS))
     expect(check_workflow(wf) == [], f"a correct workflow was reported: {check_workflow(wf)}")
     broken = wf.replace("needs.plan.outputs.backend != 'false'", "needs.plan.outputs.backend == 'true'")
@@ -728,10 +748,21 @@ def self_test() -> int:
     expect(any("CHANGELOG.md" in p for p in check_workflow(short)), "a missing union pattern went unreported")
     extra = wf.replace("      - 'CITATION.cff'\n", "      - 'CITATION.cff'\n      - 'docs/**'\n", 1)
     expect(any("docs/**" in p for p in check_workflow(extra)), "an unrelated trigger pattern went unreported")
-    nocancel = wf.replace("!cancelled() && needs.plan.outputs.frontend", "needs.plan.outputs.frontend")
+    nocancel = wf.replace("!cancelled() && needs.plan.result != 'skipped' && needs.plan.outputs.frontend",
+                          "needs.plan.result != 'skipped' && needs.plan.outputs.frontend")
+    expect(nocancel != wf, "the !cancelled() plant matched nothing — the template moved")
     expect(any("frontend" in p for p in check_workflow(nocancel)), "an area job without !cancelled() went unreported")
     narrow = wf.replace("      - 'electron/**'\n", "      - 'electron/*.js'\n", 1)
     expect(any("electron/**" in p for p in check_workflow(narrow)), "a trigger list too narrow went unreported")
+    # #1669: the private-push gate, and an area job that would RUN on a skipped plan.
+    ungated = wf.replace("    if: ${{ !(github.event.repository.private && github.event_name == 'push') }}\n", "", 1)
+    expect(ungated != wf, "the private-push gate plant matched nothing — the template moved")
+    expect(any("private-push gate" in p for p in check_workflow(ungated)), "a plan with no private-push gate went unreported")
+    runs_on_skip = wf.replace("needs.plan.result != 'skipped' && needs.plan.outputs.electron",
+                              "needs.plan.outputs.electron", 1)
+    expect(runs_on_skip != wf, "the skipped-plan plant matched nothing — the template moved")
+    expect(any("electron" in p and "skipped" in p for p in check_workflow(runs_on_skip)),
+           "an area job that runs on a skipped plan went unreported")
 
     # decide(): the fail-safe direction, and since-last-PASS rather than since-last-push.
     priv = {"repository": {"private": True}}

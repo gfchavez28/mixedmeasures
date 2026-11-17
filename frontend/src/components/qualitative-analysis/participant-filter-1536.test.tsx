@@ -83,6 +83,8 @@ function descriptives(chartType: string, participantIds: number[]) {
     chartType, participantIds,
     valueMode: 'count', denominatorMode: 'coded', source: 'all', excludeFacilitator: true,
     selectedCodeIds: new Set<number>(), codeMode: 'codes', layerScope: 'human',
+    // #1544: the saturation curve asks whether questions are selected (its answers note).
+    selectedTextColumnIds: new Set<number>(),
     formatting: { labelFontSize: 12, dataLabelFontSize: 11, heatmapPreset: 'default', dataLabels: false },
     descTitle: '', descSubtitle: '', descFootnote: '', showChartN: false,
     timelineTableMode: false, setTimelineTableMode: () => {},

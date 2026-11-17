@@ -17,6 +17,8 @@ import { render, screen, cleanup } from '@testing-library/react'
 import { ColumnFormDialog, MANUAL_COLUMN_TYPES } from './ColumnFormDialog'
 import type { DatasetColumn } from '@/lib/api'
 
+// #1615 — the preview reads the blind scope; not blind here.
+vi.mock('@/hooks/useBlindScope', () => ({ useBlindScope: () => ({ coderScope: undefined, scopeReady: true }) }))
 vi.mock('@/lib/api', () => ({
   datasetsApi: { previewComputed: vi.fn() },
 }))

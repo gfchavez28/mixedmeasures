@@ -49,6 +49,24 @@ SCALE_SCORE_ELIGIBLE_TYPES = frozenset({
     ColumnType.PERCENTAGE,
 })
 
+# CATEGORICAL_GROUPING_TYPES — the types a variable may FORM GROUPS by: the axes of
+# a group-by and a cross-tab. Categorical only — a continuous `numeric` or
+# `percentage` grouped by raw value is one group per value (bin it through a recode
+# first); `binary` IS a category. The client offered exactly these since 2026-05-26
+# (`lib/dataset-constants.ts::CATEGORICAL_GROUPING_TYPES`) with no server twin, because
+# the row-grouped surfaces bucket by `value_text` and gate nothing. The code-by-group
+# comparison and the joint display group PARTICIPANTS by a column named by id (D166),
+# and that door must refuse a column the picker would never offer — so the set lives
+# here now, held to the client's by `tests/test_categorical_grouping_types.py`.
+# ⚠️ Not a subset or superset of the two numeric sets above by design: `ordinal` and
+# `binary` are in both kinds, `nominal` and `demographic` only here.
+CATEGORICAL_GROUPING_TYPES = frozenset({
+    ColumnType.ORDINAL,
+    ColumnType.NOMINAL,
+    ColumnType.BINARY,
+    ColumnType.DEMOGRAPHIC,
+})
+
 # CROSSWALK_INELIGIBLE_TYPES — types that can never be an equivalence-group /
 # analysis-domain member (#556b). An EXCLUSION set, unlike the two above, because
 # what belongs in a variable group is "a measurement" — an open list — while what
@@ -207,6 +225,26 @@ class Dataset(Base):
     managed_synced_at = Column(DateTime, nullable=True)
     managed_stale = Column(Boolean, nullable=True, default=False, server_default="0")
 
+    # #1617 / #1623, D222–D223 — WHOSE ratings the snapshot holds, beside WHEN it
+    # was taken (`managed_synced_at`) and WHETHER something moved since
+    # (`managed_stale`). A JSON list of `users.id`, sorted, written by the refresh
+    # from the ballots its rollup read (`MagnitudeRollup.rater_ids`) and read by
+    # `participant_scores.withheld_rating_column_ids`: a blind reader is kept from
+    # the score columns when someone in it is outside their scope. Asking who rates
+    # NOW instead missed a colleague whose every rating went after the refresh,
+    # while the cells still held them (#1623).
+    #
+    # NULL = no record — refreshed by an older build, or IMPORTED: the ids are
+    # install-global (the JSON-id class), and the coder the set exists for, one whose
+    # ratings are all gone, has no codings to travel with, so the import writes NULL.
+    # Then the live rule answers until the first refresh here. A malformed value
+    # reads as NULL (`parse_managed_rater_ids`). `[]` is a RECORD — nobody's ratings
+    # — and is never read as NULL.
+    #
+    # 🔴 NEVER ON THE WIRE: it names which colleagues rated, which blind mode must
+    # not tell (#964). `routers/dataset.py::_dataset_to_response` does not carry it.
+    managed_rater_ids = Column(Text, nullable=True)
+
     # Track J · J3-2-0: stable cross-instance identity for merge matching
     uuid = Column(String(36), unique=True, index=True, nullable=True, default=lambda: str(uuid4()))
     created_at = Column(DateTime, default=func.now(), nullable=False)
@@ -244,6 +282,10 @@ class Dataset(Base):
             "uq_datasets_project_managed_kind", "project_id", "managed_kind",
             unique=True, sqlite_where=_sa_text("managed_kind IS NOT NULL"),
         ),
+        # #1639 (r2-1): a deleted row's id is never handed to the next row — a joint
+        # display (and every other stored reference) names rows by id with no FK.
+        # Migration `c3a7e1f9b5d8` makes the same table; `schema_diff_harness` compares.
+        {"sqlite_autoincrement": True},
     )
 
 
@@ -367,6 +409,10 @@ class DatasetColumn(Base):
             sqlite_where=_sa_text("equivalence_group_id IS NOT NULL"),
             postgresql_where=_sa_text("equivalence_group_id IS NOT NULL"),
         ),
+        # #1639 (r2-1): a deleted row's id is never handed to the next row — a joint
+        # display (and every other stored reference) names rows by id with no FK.
+        # Migration `c3a7e1f9b5d8` makes the same table; `schema_diff_harness` compares.
+        {"sqlite_autoincrement": True},
     )
 
 

@@ -114,7 +114,7 @@ describe('#1326 STAT-12 — a Mann–Whitney p says how it was computed', () => 
   })
 
   it('the strip carries the method beside the p', () => {
-    render(<ComparisonTestStrip rows={[mwRow('normal_approximation')]} sigLevels={SIG} nonparametric />)
+    render(<ComparisonTestStrip rows={[mwRow('normal_approximation')]} sigLevels={SIG} />)
     expect(screen.getByText(/normal approximation, continuity-corrected/)).toBeInTheDocument()
   })
 

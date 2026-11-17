@@ -5,7 +5,7 @@ import {
 } from '@/lib/participant-search'
 import { Link } from 'react-router'
 import { FOCUS_RING, SELECTED_ROW } from '@/lib/selection'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
   Plus,
@@ -16,7 +16,6 @@ import {
   Trash2,
   UserMinus,
   CircleAlert,
-  ExternalLink,
   ChevronRight,
   Search,
   MessageSquare,
@@ -30,6 +29,7 @@ import {
   type Participant,
   type Dataset,
   type LinkableRow,
+  type WithdrawalReport,
   isServerRefusal,
   retryUnanswered,
   serverDetailMessage,
@@ -40,7 +40,7 @@ import { createConfirmingWithdrawn, WITHDRAWN_RENAME_WORDING } from '@/lib/withd
 import { invalidateAfterParticipantLinkChange } from '@/lib/participant-link-cache'
 import { forgetCachedProjectPages } from '@/lib/project-cache'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
-import { LoadState } from '@/components/LoadStatus'
+import { LoadFailedNotice, LoadState } from '@/components/LoadStatus'
 import { toast } from 'sonner'
 import { DatasetRecordPicker } from '@/components/DatasetRecordPicker'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
@@ -54,11 +54,15 @@ import { getContrastColor } from '@/lib/utils'
 import {
   withdrawalLocations, describeDeleteConsequence, withdrawalHeadline, withdrawalDoneNote,
   WITHDRAWAL_SCOPE_NOTE,
+  WITHDRAWAL_SECTION_FAILED_TITLE,
   bulkDeleteDescription,
+  bulkDeleteRefusals,
   unlinkedRecordsNote,
+  unplacedCanvasQuotesNote,
 } from '@/lib/withdrawal-copy'
 import WithdrawParticipantDialog from '@/components/WithdrawParticipantDialog'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
+import { useBlindScope } from '@/hooks/useBlindScope'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   deleteConfirmTitle, participantNameWithId, type ParticipantNaming,
@@ -114,6 +118,21 @@ function useConfirmReport(projectId: number, participantId: number | null) {
 }
 
 /**
+ * 🔴 #1320 — after an act that rewrites canvas content on the server (a withdrawal; since
+ * the joint display's slice 2, D314, a plain delete too: it removes the person from every
+ * list of cases that don't fit), cached canvas content must never be served old. The theme
+ * editor binds its content ONCE (`components/canvas/the internal design notes), so a Writing view handed
+ * the old copy would edit it and autosave it straight back — here, a deleted person's entry
+ * and the researcher's reason about them, under an id SQLite can give the next participant.
+ * RESET, never invalidate: no data until the server's version arrives (`list-load-state.md`
+ * §5's reset-vs-invalidate).
+ */
+function resetCanvasContent(queryClient: QueryClient, projectId: number) {
+  void queryClient.resetQueries({ queryKey: ['canvas', projectId] })
+  void queryClient.resetQueries({ queryKey: ['snapshot-detail', projectId] })
+}
+
+/**
  * #1088 — the table and the detail panel share a row only when there is room
  * for both. Measured at 640×360: the panel kept its 384px beside a table whose
  * narrowest form was 613px in a 593px column, so it was drawn OVER the Role and
@@ -134,6 +153,15 @@ const DETAIL_PANEL =
   + '@min-[960px]/participants:max-h-[70vh] @min-[960px]/participants:overflow-y-auto'
 /** The id the open row's `aria-controls` names. */
 const DETAIL_PANEL_ID = 'participant-detail-panel'
+
+/** #1606 — the withdrawal's done toast, capped to the window so a tall note scrolls
+ *  inside it instead of growing past the top edge (the toaster is bottom-anchored with
+ *  sonner's 24 px offset, so 3rem keeps both ends on screen). `items-start!`: sonner
+ *  centres the toast's row (`align-items: center` at two attribute selectors, which a
+ *  plain class cannot beat), and centred content overflows UPWARD where no scroll
+ *  reaches — the capped toast hid its own title 75 px above its top edge (driven).
+ *  A literal string, for Tailwind. jsdom computes no layout: driven at 640×360. */
+const TOAST_FITS_WINDOW = 'max-h-[calc(100dvh-3rem)] overflow-y-auto items-start!'
 
 /** The orphan filter's description, and the badge's — one sentence (#1110). */
 const NO_LINKED_SOURCES_TITLE =
@@ -267,6 +295,10 @@ export default function ParticipantsPage() {
       queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
       setSelectedParticipantId(null)
     },
+    // Joint display slice 2 (D314): a delete rewrites the canvas — it removes the person's
+    // entries from every list of cases that don't fit — so the canvas is reset as after a
+    // withdrawal. On SETTLED, for the withdrawal's reason (#1474).
+    onSettled: () => resetCanvasContent(queryClient, projectId),
   })
 
   const bulkDeleteMutation = useMutation({
@@ -274,12 +306,15 @@ export default function ParticipantsPage() {
       const results = await Promise.allSettled(
         ids.map((pid) => participantsApi.delete(projectId, pid))
       )
-      const failed = results.filter((r) => r.status === 'rejected').length
-      return { total: ids.length, failed }
+      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      return { total: ids.length, failed: rejected.length, why: bulkDeleteRefusals(rejected.map(r => r.reason)) }
     },
-    onSuccess: ({ total, failed }) => {
+    onSuccess: ({ total, failed, why }) => {
       if (failed > 0) {
-        toast.error(`Deleted ${total - failed} of ${total}; ${failed} could not be removed.`)
+        // #1667 (D343): the server's reasons, once each — a damaged canvas copy refuses every
+        // delete in one sentence naming it. Capped to the window like the withdrawal's note.
+        toast.error(`Deleted ${total - failed} of ${total}; ${failed} could not be removed.`,
+          why ? { description: why, className: TOAST_FITS_WINDOW } : undefined)
       } else {
         toast.success(`Deleted ${total} participant${total === 1 ? '' : 's'}.`)
       }
@@ -288,6 +323,7 @@ export default function ParticipantsPage() {
       queryClient.invalidateQueries({ queryKey: ['participants', projectId] })
       setSelectedIds(new Set())
       setSelectedParticipantId(null)
+      resetCanvasContent(queryClient, projectId)  // D314, as the single delete
     },
   })
 
@@ -347,8 +383,13 @@ export default function ParticipantsPage() {
         `${participantNameWithId(target)} removed. Backup saved as ${res.backup_filename}.`,
         {
           // #1320 — it now also names the backups, so it is held longer.
-          description: withdrawalDoneNote(res.documents_unlinked),
+          description: withdrawalDoneNote(res),
           duration: 20000,
+          // #1606 — with the other projects and the update copies the note can be taller
+          // than a short window (458 px at 640×360, driven), and a bottom-anchored toast
+          // grows UP past the top edge, taking the "… removed. Backup saved as …" line
+          // with it. Capped to the window (sonner's 24 px offset at each end), it scrolls.
+          className: TOAST_FITS_WINDOW,
         },
       )
       setWithdrawParticipant(null)
@@ -366,15 +407,10 @@ export default function ParticipantsPage() {
     // act may have finished. After a real refusal the cost is first-visit loads.
     onSettled: () => {
       forgetCachedProjectPages(queryClient, { refreshActive: true })
-      // 🔴 #1320 — canvas CONTENT must never be served old: the theme editor binds
-      // its content ONCE (`components/canvas/the internal design notes), so a Writing view handed
-      // their words would edit them and autosave them straight back. A canvas no
-      // page shows was just removed; one still ON SCREEN (the act lands whenever
-      // the request returns — no client timeout, #1025) was only invalidated above,
-      // which keeps serving the old copy, so it is RESET: no data until the
-      // server's version arrives (`list-load-state.md` §5's reset-vs-invalidate).
-      void queryClient.resetQueries({ queryKey: ['canvas', projectId] })
-      void queryClient.resetQueries({ queryKey: ['snapshot-detail', projectId] })
+      // A canvas no page shows was just removed; one still ON SCREEN (the act lands
+      // whenever the request returns — no client timeout, #1025) was only invalidated
+      // above, which keeps serving the old copy, so it is RESET too.
+      resetCanvasContent(queryClient, projectId)
     },
   })
 
@@ -1168,7 +1204,10 @@ function ParticipantRow({
               <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-faint hover:text-destructive" onClick={onWithdraw} aria-label={`Remove ${rawName}'s data (withdrawal request)`} title="Remove this participant's data (withdrawal request)">
                 <UserMinus className="w-4 h-4" aria-hidden />
               </Button>
-              <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-faint hover:text-destructive" onClick={onDelete} aria-label={`Delete ${rawName}'s participant record only`} title="Delete participant record only">
+              {/* #1648: "…record only" stopped being exact when a delete also took the person
+                  off a joint display's lists of cases that don't fit (D314); what stays true, and
+                  what the name must keep beside the withdrawal button, is that their DATA stays. */}
+              <Button size="icon" variant="ghost" className="h-8 w-8 text-mm-text-faint hover:text-destructive" onClick={onDelete} aria-label={`Delete ${rawName}'s participant record but keep their data`} title="Delete participant record but keep their data">
                 <Trash2 className="w-4 h-4" aria-hidden />
               </Button>
             </>
@@ -1208,9 +1247,13 @@ function ParticipantDetailPanel({
   const headingRef = useRef<HTMLHeadingElement>(null)
   const linkSelectRef = useRef<HTMLSelectElement>(null)
 
+  // #1608 — while blind the profile leaves the participant table's rating columns out
+  // (they combine every coder's ratings). The scope rides the key; the read waits for it.
+  const { coderScope, scopeReady } = useBlindScope(projectId)
   const detailQuery = useQuery({
-    queryKey: ['participant-detail', participantId],
-    queryFn: () => participantsApi.getDetail(projectId, participantId),
+    queryKey: ['participant-detail', participantId, coderScope ?? 'every-coder'],
+    enabled: scopeReady,
+    queryFn: () => participantsApi.getDetail(projectId, participantId, coderScope),
     // #1152 — asked again on every OPEN. It is keyed per participant and this
     // panel mounts when it opens, so 'always' does fire here (unlike on the page's
     // confirm queries, which never remount); without it a panel re-opened inside
@@ -1420,15 +1463,13 @@ function ParticipantDetailPanel({
                       {s.conversations.map((c, i) => (
                         <span key={c.id}>
                           {i > 0 && ', '}
-                          <a
-                            href={`/projects/${projectId}/conversations/${c.id}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
+                          <Link
+                            to={`/projects/${projectId}/conversations/${c.id}`}
                             className="hover:text-mm-blue-text hover:underline"
-                            title={`Open conversation "${c.name}" in new tab`}
+                            title={`Open conversation "${c.name}"`}
                           >
                             {c.name}
-                          </a>
+                          </Link>
                         </span>
                       ))}
                     </p>
@@ -1450,16 +1491,14 @@ function ParticipantDetailPanel({
           <ul className="space-y-1">
             {detail.linked_documents.map(d => (
               <li key={d.id}>
-                <a
-                  href={`/projects/${projectId}/documents/${d.id}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <Link
+                  to={`/projects/${projectId}/documents/${d.id}`}
                   className="group/doclink inline-flex items-center gap-1 min-w-0 text-xs text-mm-text hover:text-mm-blue-text"
-                  title={`Open document "${d.name}" in new tab`}
+                  title={`Open document "${d.name}"`}
                 >
                   <FileText className="w-3 h-3 shrink-0 text-mm-text-muted" aria-hidden="true" />
                   <span className="truncate group-hover/doclink:underline">{d.name}</span>
-                </a>
+                </Link>
               </li>
             ))}
           </ul>
@@ -1488,16 +1527,13 @@ function ParticipantDetailPanel({
                 <div key={dr.id} className="bg-mm-bg rounded p-2">
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
-                      <a
-                        href={`/projects/${projectId}/datasets/${dr.dataset_id}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
+                      <Link
+                        to={`/projects/${projectId}/datasets/${dr.dataset_id}`}
                         className="group/dslink flex items-center gap-1 min-w-0 text-xs font-medium text-mm-text hover:text-mm-blue-text"
-                        title={`Open dataset "${dr.dataset_name}" in new tab`}
+                        title={`Open dataset "${dr.dataset_name}"`}
                       >
                         <span className="truncate group-hover/dslink:underline">{dr.dataset_name}</span>
-                        <ExternalLink className="w-2.5 h-2.5 flex-shrink-0 opacity-0 group-hover/dslink:opacity-60" aria-hidden="true" />
-                      </a>
+                      </Link>
                       <p className="text-[11px] text-mm-text-faint" title={dr.row_identifier ?? undefined}>{dr.row_identifier}</p>
                     </div>
                     {/* #1157 — the participant table keeps its own links: an
@@ -1682,20 +1718,43 @@ function ParticipantDetailPanel({
 function WithdrawalSection({
   projectId, participantId,
 }: { projectId: number; participantId: number }) {
-  const { data: report } = useQuery({
+  const query = useQuery({
     queryKey: ['withdrawal-report', projectId, participantId],
     queryFn: () => participantsApi.withdrawalReport(projectId, participantId),
     // #1152 — asked again each time the panel opens, like its detail above.
     refetchOnMount: 'always',
   })
-  if (!report) return null
+  const load = useListLoad(query)
+  const headingRef = useRef<HTMLHeadingElement>(null)
+  const report = query.data
+  // #1667 (D342) — a report that could not be read is SAID, never a section that vanishes: a
+  // damaged canvas copy refuses it (409, the copy named) for every participant, and the
+  // section — its headline, its locations, the scope note — went with nothing in its place
+  // (`list-load-state.md` §7). While it LOADS it stays silent: the panel's detail above already
+  // carries the one loading line (§6, one region, one `role="status"`).
+  if (report === undefined && load.status !== 'failed' && !load.retrying) return null
 
-  const locations = withdrawalLocations(report)
   return (
     <div className="p-4 border-t border-mm-border-subtle">
-      <h3 className="text-xs font-medium text-mm-text-secondary mb-1">
+      {/* The SAME element in both branches, so a successful Retry lands here (#955 b). */}
+      <h3 ref={headingRef} tabIndex={-1}
+        className={`text-xs font-medium text-mm-text-secondary mb-1 rounded-sm ${FOCUS_RING}`}>
         If this person withdraws
       </h3>
+      {report === undefined ? (
+        <LoadFailedNotice title={WITHDRAWAL_SECTION_FAILED_TITLE} load={load} size="panel"
+          landingRef={headingRef} />
+      ) : (
+        <WithdrawalSectionBody report={report} />
+      )}
+    </div>
+  )
+}
+
+function WithdrawalSectionBody({ report }: { report: WithdrawalReport }) {
+  const locations = withdrawalLocations(report)
+  return (
+    <>
       <p className="text-xs text-mm-text-faint leading-snug">
         {withdrawalHeadline(report)}
       </p>
@@ -1717,9 +1776,13 @@ function WithdrawalSection({
       {unlinkedRecordsNote(report) && (
         <p className="mt-2 text-xs text-mm-text-faint leading-snug">{unlinkedRecordsNote(report)}.</p>
       )}
+      {/* #1546 (D158) — canvas quotes the withdrawal would leave, and where. */}
+      {unplacedCanvasQuotesNote(report) && (
+        <p className="mt-2 text-xs text-mm-text-faint leading-snug">{unplacedCanvasQuotesNote(report)}.</p>
+      )}
       <p className="mt-2 text-[11px] text-mm-text-faint leading-snug">
         {WITHDRAWAL_SCOPE_NOTE}
       </p>
-    </div>
+    </>
   )
 }

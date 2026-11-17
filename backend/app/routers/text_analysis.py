@@ -30,8 +30,11 @@ from ..services.text_analysis import (
     treat_as_empty_for_project,
 )
 from ..services.coding_layers import LAYER_CONSENSUS, layer_scope_filter
+from ..services.code_analysis import rating_grouping_refusal
 from ..services.id_set import in_id_set
+from ..services.participant_scores import withheld_rating_columns_in_project
 from ..auth import get_current_user
+from .code_analysis import _blind_scope
 from .helpers import _get_project_or_404, coder_scope_names, parse_int_list, sanitize_content_disposition, TEXT_TYPES
 from .export_helpers import csv_safe
 from ..schemas.text_analysis import (
@@ -168,7 +171,27 @@ def not_compared_note(names: list[str]) -> str:
     return f"{'; '.join(names)} (no filter applies to {whose} records)"
 
 
-def _apply_filters(db: Session, project_id: int, filters, focal_column_ids: list[int]):
+#: #1615 — why a subgroup filter on a variable worked out from participant scores is refused
+#: while blind. The grouping refusal's words (`code_analysis.rating_grouping_refusal`, D284),
+#: said of a FILTER: who a threshold on a score keeps (``score ≥ 3``, moved by halves) reads
+#: each person's every-coder score off, and a mean filter prints the mean itself.
+def rating_filter_refusal(name: str) -> str:
+    return (f"“{name}” cannot filter while blind: it comes from participant scores, "
+            "which combine every coder's ratings, so who it keeps would show your "
+            "colleagues' judgements.")
+
+
+def _refuse_rating_grouping(db: Session, project_id: int, column: DatasetColumn, blind_scope) -> None:
+    """#1615 — a cross-tab variable or a density grouping worked out from participant scores
+    is refused while blind (409, D284's words) — never dropped: the grouping IS the figure."""
+    if column.id in withheld_rating_columns_in_project(db, project_id, blind_scope):
+        raise HTTPException(
+            status_code=409,
+            detail=rating_grouping_refusal(column.column_name or column.column_text),
+        )
+
+
+def _apply_filters(db: Session, project_id: int, filters, focal_column_ids: list[int], *, blind_scope):
     """Apply subgroup filters and return the matching DatasetRow IDs.
 
     🔴 #1534 D107 (1.5.9): **a focal dataset no filter can judge is NOT compared.**
@@ -178,6 +201,13 @@ def _apply_filters(db: Session, project_id: int, filters, focal_column_ids: list
     are now left out of BOTH sides (the caller reads `compared_column_ids` for the
     overall too), so the comparison sets a subgroup beside the population it was
     drawn from, and `filter_scope.unfiltered_datasets` names what was left out.
+
+    🔴 #1615: ``blind_scope`` is REQUIRED (the grouping gates' shape) — the viewer's coder
+    ids while blind mode withholds (`ratings_follow_coder_ids`), else None. A filter on a
+    column the participant table's snapshot fills from a coder outside it (a score, its
+    rated-passage count, a band computed from one) is REFUSED whole with 409 — before its
+    rows or its mean are read, so `describe_filter` never prints an every-coder mean.
+    Never dropped: the comparison would then be of a different subgroup than the pills say.
 
     Returns:
         tuple: (filtered_row_ids: set[int] | None, filter_description: str,
@@ -221,6 +251,14 @@ def _apply_filters(db: Session, project_id: int, filters, focal_column_ids: list
                 status_code=400,
                 detail=f"Filter column {f.column_id} not found in project",
             )
+
+    # #1615 — asked once, of every filter, before any is resolved (docstring).
+    withheld = withheld_rating_columns_in_project(db, project_id, blind_scope)
+    for f in filters:
+        if f.column_id in withheld:
+            col = col_map[f.column_id]
+            raise HTTPException(
+                status_code=409, detail=rating_filter_refusal(col.column_name or col.column_text))
 
     # Group filters by dataset_id
     dataset_filters: dict[int, list] = defaultdict(list)
@@ -374,6 +412,7 @@ def filtered_frequencies(
     # Apply filters. #1534 D107: both sides read only the columns the filters judge.
     filtered_row_ids, filter_desc, filter_scope, compared_ids = _apply_filters(
         db, project_id, body.filters, column_ids,
+        blind_scope=_blind_scope(body.coder_ids, body.ratings_follow_coder_ids, ratings_viewer_id=None),  # #1615
     )
 
     filtered_set = _to_frequency_set(compute_comment_frequencies(
@@ -422,6 +461,10 @@ def cross_tabulation(
     )
     if not cross_col:
         raise HTTPException(status_code=400, detail="Cross-tab column not found in project")
+    # #1615 — refused while blind when worked out from participant scores. Asked of the
+    # column whatever its dataset: the cross-tab follows participant links (below).
+    _refuse_rating_grouping(
+        db, project_id, cross_col, _blind_scope(body.coder_ids, body.ratings_follow_coder_ids, ratings_viewer_id=None))
 
     # Build the ordered list of cross-column values (these become the cross-tab
     # columns). They are the original text labels stored in value_text — both the
@@ -625,6 +668,9 @@ def code_density(
     layer_scope: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    # #1615 — sent ONLY while blind mode withholds (D273): a grouping worked out from
+    # participant scores is then refused. Bare default (backend/tests/the internal design notes).
+    ratings_follow_coder_ids: bool = False,
 ):
     """Average number of codes applied per comment, optionally grouped."""
     _get_project_or_404(db, project_id, user.id)
@@ -679,6 +725,8 @@ def code_density(
         )
         if not group_col:
             raise HTTPException(status_code=400, detail="Group column not found in project")
+        _refuse_rating_grouping(  # #1615
+            db, project_id, group_col, _blind_scope(parsed_coder_ids, ratings_follow_coder_ids, ratings_viewer_id=None))
 
         # Build row_id -> group_value through the shared grouping loader (#597):
         # applies the #384 N/A rule so a recognized-missing label never forms a
@@ -801,6 +849,8 @@ def export_cross_analysis(
     layer_scope: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    # #1615 — as `code-density`'s: a filter worked out from participant scores is refused.
+    ratings_follow_coder_ids: bool = False,
 ):
     """Export cross-analysis as CSV.
 
@@ -837,6 +887,7 @@ def export_cross_analysis(
     if filters:
         filtered_row_ids, filter_desc, filter_scope, compared_ids = _apply_filters(
             db, project_id, filters, col_id_list,
+            blind_scope=_blind_scope(parsed_coder_ids, ratings_follow_coder_ids, ratings_viewer_id=None),  # #1615
         )
         # D107: both sides read only the columns the filters judge.
         overall = compute_comment_frequencies(

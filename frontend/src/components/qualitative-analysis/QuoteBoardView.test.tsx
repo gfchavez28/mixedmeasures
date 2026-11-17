@@ -45,7 +45,7 @@ function clip(over: Partial<QuotedExcerptItem> & { excerpt_id: number }): Quoted
     document_id: null, document_name: null,
     observation_id: 7, observation_name: 'Classroom',
     dataset_id: null, dataset_name: null, column_id: null, column_name: null,
-    applied_code_ids: [], applied_codes: [],
+    applied_code_ids: [], applied_codes: [], applied_code_details: [],
     excerpt_note: null, context_before: null, context_before_speaker: null,
     created_at: '2026-07-18T00:00:00+00:00',
     ...over,
@@ -69,6 +69,7 @@ function renderBoard(excerpts: QuotedExcerptItem[], props: Record<string, unknow
     <QueryClientProvider client={qc}>
       <MemoryRouter>
         <QuoteBoardView
+          viewerId={1}
           projectId={1}
           codes={[]}
           codesStatus="ready"
@@ -236,6 +237,7 @@ describe('#963 Tier 3 — the board fetching for itself', () => {
       <QueryClientProvider client={qc}>
         <MemoryRouter>
           <QuoteBoardView
+            viewerId={1}
             projectId={1}
             codes={[]}
             codesStatus="ready"
@@ -282,6 +284,7 @@ describe('#963 Tier 3 — the board fetching for itself', () => {
       <QueryClientProvider client={qc}>
         <MemoryRouter>
           <QuoteBoardView
+            viewerId={1}
             projectId={1} codes={[]} codesStatus="ready" filterParams={{ coder_ids: '2' }}
             groupBy="source" sortMode="source" density="quote" setSrAnnouncement={vi.fn()}
             blind={false} blindSettled={false} fileScope={null}

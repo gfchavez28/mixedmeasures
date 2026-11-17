@@ -768,6 +768,9 @@ const ReconciliationCell = memo(function ReconciliationCell(props: Reconciliatio
           codeMap={props.codeMap}
           allCodes={props.allCodes}
           codesStatus={props.codesStatus}
+          // #1592: the own cell is the viewer's by construction — every chip in it
+          // carries their id above, so every chip keeps its remove.
+          viewer={{ coderId: props.coder?.id ?? null }}
           onCodeChange={props.onCodeChange}
           // #475: the grid's roving-tabindex focus churn would otherwise dismiss the
           // add-code popover the instant it opens (open→focus-outside→close loop).

@@ -58,7 +58,7 @@ export default function ComparisonChartRouter({
             metricType="mean"
             formatting={formatting}
           />
-          <ComparisonTestStrip rows={data.rows} sigLevels={sigLevels} nonparametric={nonparametric} />
+          <ComparisonTestStrip rows={data.rows} sigLevels={sigLevels} />
         </>
       )
 
@@ -72,7 +72,7 @@ export default function ComparisonChartRouter({
             metricType="mean"
             formatting={formatting}
           />
-          <ComparisonTestStrip rows={data.rows} sigLevels={sigLevels} nonparametric={nonparametric} />
+          <ComparisonTestStrip rows={data.rows} sigLevels={sigLevels} />
         </>
       )
 
@@ -86,7 +86,7 @@ export default function ComparisonChartRouter({
           {data.rows.map(row => (
             <div key={row.source_id} className="mb-4 last:mb-0">
               <BoxPlotChart groups={row.group_stats} formatting={formatting} valueLabel={row.full_label} />
-              <ComparisonTestStrip rows={[row]} sigLevels={sigLevels} nonparametric={nonparametric} />
+              <ComparisonTestStrip rows={[row]} sigLevels={sigLevels} />
             </div>
           ))}
         </>
@@ -98,7 +98,7 @@ export default function ComparisonChartRouter({
           {data.rows.map(row => (
             <div key={row.source_id} className="mb-4 last:mb-0">
               <QQPlotChart qq={row.qq} formatting={formatting} valueLabel={row.full_label} />
-              <ComparisonTestStrip rows={[row]} sigLevels={sigLevels} nonparametric={nonparametric} />
+              <ComparisonTestStrip rows={[row]} sigLevels={sigLevels} />
             </div>
           ))}
         </>

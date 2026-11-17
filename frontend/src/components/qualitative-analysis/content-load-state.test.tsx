@@ -83,6 +83,7 @@ function wrap(ui: React.ReactElement) {
 function renderByCode(over: Record<string, unknown> = {}) {
   return wrap(
     <ContentByCode
+      viewerId={1}
       projectId={1}
       codes={CODES}
       codesStatus={'ready' as ListStatus}
@@ -116,6 +117,7 @@ function renderBySource(selectedSourceId: string, over: Record<string, unknown> 
       onSourceSelect={() => {}}
       source="all"
       coderLens={null}
+      viewerId={1}
       blind={false}
       {...over}
     />,

@@ -4,6 +4,7 @@ import { useChartColors } from '@/lib/theme-context'
 import { mergeFormatting, resolveColorPalette, type ChartFormatting } from '@/lib/chart-data'
 import { undefinedTooltip } from '@/lib/stat-format'
 import { describeQQBasis, qqAccessibleSummary } from '@/lib/qq-basis'
+import { qqLeftOutNote } from '@/lib/untested-groups'
 
 /**
  * A normal Q–Q plot of the model residuals, for the Comparisons panel (#525b).
@@ -116,6 +117,7 @@ export default function QQPlotChart({
         title={undefinedTooltip(qq?.undefined_reason)}
       >
         No Q–Q plot: not enough variation in the residuals to draw one.
+        {qq && qqLeftOutNote(qq.singleton_groups) && ` ${qqLeftOutNote(qq.singleton_groups)}`}
       </div>
     )
   }
@@ -201,7 +203,8 @@ export default function QQPlotChart({
         {' '}Residuals are each value minus its own group&rsquo;s mean, so this describes
         the comparison as a whole rather than any one group.
         {qq.points_omitted > 0 && ` ${qq.points_omitted} intermediate point${qq.points_omitted === 1 ? '' : 's'} not plotted (the extremes are always kept).`}
-        {qq.singleton_group_count > 0 && ` ${qq.singleton_group_count} group${qq.singleton_group_count === 1 ? '' : 's'} of one contribute${qq.singleton_group_count === 1 ? 's a residual' : ' residuals'} of exactly zero by construction.`}
+        {/* #1549 (b): the plot follows the parametric tests' groups and names the ones it left out. */}
+        {qqLeftOutNote(qq.singleton_groups) && ` ${qqLeftOutNote(qq.singleton_groups)}`}
       </figcaption>
     </figure>
   )

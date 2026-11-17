@@ -107,7 +107,7 @@ export interface FigureFingerprint {
  * which is exactly how #1323's comparison would have changed its numbers under every
  * canvas with no word. ⚠️ A test pins that no projection's epoch exceeds this one.
  */
-export const CURRENT_FIGURE_EPOCH = 2
+export const CURRENT_FIGURE_EPOCH = 3
 
 interface Generation { epoch: number; note?: string }
 const FIRST_GENERATION: Generation = { epoch: 0 }
@@ -142,6 +142,17 @@ const QUAL_COMPARISON_GENERATION: Generation = {
 const COOCCURRENCE_GENERATION: Generation = {
   epoch: 2,
   note: 'An update changed how this co-occurrence is counted: a pair counts only where one coder applied both codes, the sources selected are counted exactly, answers treated as no response are left out, and N counts every passage and clip.',
+}
+
+/**
+ * #1544 — the saturation curve had no fingerprint until #1544 changed which sources it walks
+ * (a saved selection is counted exactly; an unselected kind was walked in full). ⚠️ This
+ * generation speaks only for SATURATION embeds: each projection carries its own epoch, so an
+ * embed of another kind placed under generation 2 still seeds (`figurePredatesBaseline`).
+ */
+const SATURATION_GENERATION: Generation = {
+  epoch: 3,
+  note: 'An update changed which sources this saturation curve counts: now only the ones selected. Before, it also counted every source of a kind with nothing selected — every document and clip beside the interviews chosen, for example.',
 }
 
 interface GroupStatLike { group: string; n: number; mean?: number | null; sd?: number | null }
@@ -349,6 +360,52 @@ export function fingerprintCooccurrence(
     }
   })
   return fingerprintOf(rows, `N = ${data.n_units}`, COOCCURRENCE_GENERATION)
+}
+
+/**
+ * #1544 — a saturation curve: per step its source kind, the codes it adds and the running
+ * total, and the two totals — everything the curve and its summary line draw.
+ *
+ * ⚠️ Keyed by POSITION, because the payload names no source id: a renamed source moves no
+ * number and does not speak; a different source with the same counts at the same step does
+ * not either (the stated residual — its label is the only difference drawn).
+ */
+export function fingerprintSaturation(
+  data: {
+    // Loose on purpose, like the projections above.
+    points: { source_index: number; source_type: string; cumulative_unique_codes: number; new_codes_this_source: number }[]
+    total_unique_codes: number
+    total_sources: number
+    category_level: boolean
+  },
+): FigureFingerprint {
+  const rows: [string, ...number[]][] = [['total', data.total_sources, data.total_unique_codes]]
+  for (const p of data.points) {
+    rows.push([`${p.source_index}/${p.source_type}`, p.new_codes_this_source, p.cumulative_unique_codes])
+  }
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
+  const found = data.category_level
+    ? plural(data.total_unique_codes, 'category', 'categories')
+    : plural(data.total_unique_codes, 'code', 'codes')
+  return fingerprintOf(rows, `${plural(data.total_sources, 'source', 'sources')}, ${found}`, SATURATION_GENERATION)
+}
+
+/**
+ * Joint display (ROADMAP row 56, D168.5) — ONE ROW's cells as the Compact view prints them
+ * (`lib/joint-display.ts::rowCells`, the one projection the view and its drift line share).
+ *
+ * ⚠️ Hashed as PRINTED, not at `PRECISION`: the row stores the cells themselves beside the hash
+ * so its drift line can say WHICH cell moved ("Low gain: 4 of 11 → 5 of 11"), and a change the
+ * view cannot show is not one the meta-inference beside it can be wrong about.
+ *
+ * ⚠️ The FIRST generation, and no `CURRENT_FIGURE_EPOCH` raise: that rule exists for embeds
+ * placed BEFORE a kind had a fingerprint, and no joint display predates this one. A row is not
+ * seeded either — its baseline is stamped when its meta-inference is saved (D168.5), so a row
+ * nobody has written about makes no claim.
+ */
+export function fingerprintJointDisplayRow(cells: Record<string, string>): FigureFingerprint {
+  const body = Object.keys(cells).sort().map(k => `${k}=${cells[k]}`).join('|')
+  return { hash: hash(body), headline: '', epoch: FIRST_GENERATION.epoch }
 }
 
 /**

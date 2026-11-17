@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { useInfiniteQuery, keepPreviousData } from '@tanstack/react-query'
-import { ExternalLink, Loader2, X } from 'lucide-react'
+import { Loader2, Table2, X } from 'lucide-react'
+import { Link } from 'react-router'
 import { datasetsApi, retryUnanswered, type LinkableRow } from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
 import { LoadState } from '@/components/LoadStatus'
@@ -177,17 +178,17 @@ export function DatasetRecordPicker({
         <span className="text-[11px] text-mm-text-muted truncate max-w-[120px]" title={datasetName}>
           {datasetName}
         </span>
-        <a
-          href={`/projects/${projectId}/datasets/${datasetId}`}
-          target="_blank"
-          rel="noopener noreferrer"
+        {/* #1625 (D238/D239): an in-app link navigates in place — the packaged app
+            opens no new window, so `target="_blank"` here did nothing. */}
+        <Link
+          to={`/projects/${projectId}/datasets/${datasetId}`}
           className="inline-flex items-center justify-center w-6 h-6 rounded text-mm-text-faint hover:text-mm-blue-text flex-shrink-0"
-          aria-label={`Open dataset "${datasetName}" in new tab`}
-          title="Open dataset in new tab"
+          aria-label={`Open dataset "${datasetName}"`}
+          title="Open dataset"
           onClick={(e) => e.stopPropagation()}
         >
-          <ExternalLink className="w-3 h-3" aria-hidden="true" />
-        </a>
+          <Table2 className="w-3 h-3" aria-hidden="true" />
+        </Link>
         <div className="flex-1" />
         <button
           type="button"

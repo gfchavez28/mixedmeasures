@@ -29,8 +29,14 @@ import type { QueryClient } from '@tanstack/react-query'
  * restore's way): that would discard the success toast that names the safety
  * copy, which is the recovery instruction.
  *
- * 🔴 **#1226 — a SOURCE delete is the same door one level down.** Deleting the
- * newest conversation, document, observation or dataset hands its id to the next
+ * 🔴 **#1226 — a SOURCE delete is the same door one level down.** ⚠️ **Since D319
+ * (migration `c3a7e1f9b5d8`, 2026-11-15d) those four tables never issue a deleted
+ * id again (AUTOINCREMENT; an id freed before that upgrade can be issued once more,
+ * D320), so what follows is mostly the HISTORY of why the source doors call this; a
+ * PROJECT's id and a segment's still come back (neither table is in D319's nine),
+ * and a deleted source's cached pages are wrong to keep either way, so the forget
+ * stays (`mm-file-doors.md` §1b).** Deleting the
+ * newest conversation, document, observation or dataset handed its id to the next
  * one created, in the same project or another: `['document', pid, did]` is the
  * new document's key exactly, and `['segments', cid]` / `['notes', cid]` carry
  * no project id at all. DRIVEN (2026-10-15): the re-imported interview's page

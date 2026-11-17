@@ -692,7 +692,7 @@ class TestTheFourConsumersDecideAlike:
         assert unit["consensus"] == [positive.id]
 
         # The rollup — the consumer that had no split at all.
-        rollup = compute_magnitude_rollup(db, 55)
+        rollup = compute_magnitude_rollup(db, 55, coder_ids=None)
         assert [(s.participant_id, s.code_id, s.mean) for s in rollup.scores] == [
             (person.id, positive.id, 7.5)
         ]

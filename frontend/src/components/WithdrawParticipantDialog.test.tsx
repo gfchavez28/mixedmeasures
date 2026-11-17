@@ -27,6 +27,10 @@ const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   participant_id: 1, identifier: 'P07', display_name: 'Maria', role: null,
   has_demographics: true, speaker_names: ['Maria'], total_items: 20,
   unlinked_records_with_identifier: 0,
+  canvas_quotes_unplaced: { quotes: 0, sections: [], snapshots: [] },
+  canvas_misfit_cases: 0,  // joint display slice 2 (r3-6)
+  other_projects_with_identifier: { projects: [], total: 0 },
+  pre_update_copies: { count: 0, folder: '/home/r/backups' },
   conversations: [{
     conversation_id: 1, name: 'Focus group', segments: 3, combined_turns: 0,
     code_applications: 2, excerpts: 1, notes: 1,
@@ -141,6 +145,23 @@ describe('what the screen says will happen', () => {
     const stay = screen.getByText('This will stay').parentElement!
     expect(stay).toHaveTextContent('The document “Workplan P07” stays, no longer linked to them')
     expect(screen.getByText('This will be removed').parentElement).not.toHaveTextContent(/Workplan/)
+  })
+
+  /** #1546 (D158) — the canvas quotes it cannot place stay, and the confirm says where. */
+  it('says canvas quotes it cannot place stay, and names their sections, in the description', () => {
+    setup(report({
+      canvas_quotes_unplaced: {
+        quotes: 2,
+        sections: [{ canvas_id: 1, canvas_name: 'Main', id: 4, name: 'Findings', quotes: 2 }],
+        snapshots: [],
+      },
+    }))
+    const stay = screen.getByText('This will stay').parentElement!
+    expect(stay).toHaveTextContent(
+      /2 quotes on a canvas come from .* so the withdrawal cannot tell whose words they hold\. They stay — read them yourself: “Main › Findings” \(2\)/)
+    expect(screen.getByText('This will be removed').parentElement).not.toHaveTextContent(/canvas/)
+    expect(screen.getByRole('alertdialog'))
+      .toHaveAccessibleDescription(/cannot tell whose words they hold/)
   })
 })
 

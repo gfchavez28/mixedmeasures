@@ -10,6 +10,8 @@ import {
   type ComputedPreviewRow,
 } from '@/lib/api'
 import { datasetsApi } from '@/lib/api'
+import { useBlindScope } from '@/hooks/useBlindScope'
+import { WITHHELD_PREVIEW_NOTICE } from '@/lib/blind-rating-columns'
 import {
   Dialog,
   DialogContent,
@@ -134,6 +136,10 @@ export function ColumnFormDialog({
   // Computed column state
   const [formExpression, setFormExpression] = useState(initial?.expression || '')
   const [preview, setPreview] = useState<ComputedPreviewResponse | null>(null)
+  // #1615 — a preview prints the cells it reads; over a participant score while blind the
+  // server checks the expression and sends no rows. No request until the blind state is
+  // settled (fail closed, D96).
+  const { coderScope, scopeReady } = useBlindScope(projectId ?? 0)
   const [previewLoading, setPreviewLoading] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null)
   const formulaRef = useRef<HTMLTextAreaElement>(null)
@@ -272,7 +278,7 @@ export function ColumnFormDialog({
 
   // Debounced preview for computed mode
   useEffect(() => {
-    if (mode !== 'computed' || !projectId || !datasetId) return
+    if (mode !== 'computed' || !projectId || !datasetId || !scopeReady) return
     if (!formExpression.trim()) {
       setPreview(null)
       return
@@ -285,7 +291,7 @@ export function ColumnFormDialog({
           column_text: formLabel || 'Preview',
           expression: formExpression,
           column_type: formType,
-        })
+        }, coderScope)
         setPreview(res)
       } catch {
         setPreview({ valid: false, error: 'Network error', warnings: [], preview_rows: [] })
@@ -294,7 +300,7 @@ export function ColumnFormDialog({
       }
     }, 500)
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
-  }, [formExpression, mode, projectId, datasetId, formLabel, formType])
+  }, [formExpression, mode, projectId, datasetId, formLabel, formType, coderScope, scopeReady])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -438,6 +444,11 @@ export function ColumnFormDialog({
                   )}
                 </div>
               </div>
+
+              {/* #1615 — no rows for THIS reason, said where they would be. */}
+              {preview?.valid && preview.values_withheld_while_blind && (
+                <p className="text-xs text-mm-text-muted">{WITHHELD_PREVIEW_NOTICE}</p>
+              )}
 
               {/* Preview table */}
               {preview?.valid && preview.preview_rows.length > 0 && (

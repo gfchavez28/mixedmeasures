@@ -1,5 +1,6 @@
 import type {
-  CodeAnalysisFilterParams, CodeComparisonEntry, DemographicComparisonResponse, SourceFrequenciesRequest,
+  CodeAnalysisFilterParams, CodeComparisonEntry, DemographicComparisonResponse, SaturationParams,
+  SourceFrequenciesRequest,
 } from '@/lib/api'
 import type { ChartDataRow } from '@/lib/chart-types'
 
@@ -47,7 +48,9 @@ export type QualCsvParams = Partial<Record<
   keyof ComparisonSources | 'code_ids' | 'participant_ids' | 'exclude_facilitator'
   | 'coder_ids' | 'layer_scope' | 'group_by_subtype'
   // #1545: the panel's description of the chosen filter values, for the file's scope line.
-  | 'participant_filter_label',
+  | 'participant_filter_label'
+  // #1615: sent ONLY while blind mode withholds — `coder_ids` is then the blind scope.
+  | 'ratings_follow_coder_ids',
   string
 >>
 
@@ -83,6 +86,41 @@ export function cooccurrenceFilterParams(
   delete out.observation_ids
   return { ...out, ...comparisonSourceParams(comparisonSources(sel)) }
 }
+
+/**
+ * #1544 — the saturation curve walks what the page selected, by the rule above: nothing
+ * selected → no list (every conversation, document and clip); anything selected → exactly
+ * the selection's passage sources, an unselected kind as `''` (none of it). ONE builder for
+ * the page's query and the Canvas (`inline-chart-params.ts::buildQualSaturationParams`, which
+ * the embed and its export share). Until it, both sent only the kinds that held a selection,
+ * which the route read as every source of the others — one selected interview walked every
+ * document and clip in the project.
+ *
+ * ⚠️ The curve has no answer arm (the route takes no `text_column_ids`), so a selection of
+ * survey questions alone sends three empty lists and draws an empty curve that says why
+ * (`SATURATION_NO_PASSAGE`), where the old reading drew the whole project.
+ */
+export function saturationParams(
+  base: Omit<SaturationParams, 'conversation_ids' | 'document_ids' | 'observation_ids'>,
+  sel: QualSourceSelection,
+): SaturationParams {
+  const lists = comparisonSourceParams(comparisonSources(sel))
+  // `comparisonSources` gives every list or none, so one test decides.
+  if (lists.conversation_ids === undefined) return { ...base }
+  return {
+    ...base,
+    conversation_ids: lists.conversation_ids,
+    document_ids: lists.document_ids,
+    observation_ids: lists.observation_ids,
+  }
+}
+
+/** #1544 — the curve when no passage source is in scope (the Segments CSV's words, D112). */
+export const SATURATION_NO_PASSAGE =
+  'The saturation curve counts interviews, documents and clips. The selection holds none of them.'
+
+/** #1544 — questions selected beside passages: the curve still draws, and says what it leaves out. */
+export const SATURATION_ANSWERS_NOTE = 'Survey answers are not part of this curve.'
 
 /** The analysis sidebar's *Conversations / Text / All* mode — which kinds it OFFERS. */
 export type QualSourceMode = 'all' | 'conversations' | 'text'
@@ -135,6 +173,8 @@ export function sourceDataCsvParams(
     excludeFacilitator: boolean; participantIds: number[]; coderIdsCsv?: string; layerScope?: string
     /** #1545: `participantFilterFileScope(…).label` — the file names the values on its scope line. */
     participantFilterLabel?: string | null
+    /** #1615: true ONLY while blind mode withholds. */
+    ratingsFollowCoderIds?: boolean
   },
 ): QualCsvParams {
   const out: QualCsvParams = {
@@ -150,6 +190,7 @@ export function sourceDataCsvParams(
   // #499: the EFFECTIVE (blind-forced) coder/layer scope, so the file matches the screen.
   if (opts.coderIdsCsv) out.coder_ids = opts.coderIdsCsv
   if (opts.layerScope) out.layer_scope = opts.layerScope
+  if (opts.ratingsFollowCoderIds) out.ratings_follow_coder_ids = 'true'  // #1615
   return out
 }
 

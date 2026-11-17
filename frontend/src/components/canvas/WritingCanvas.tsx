@@ -31,6 +31,8 @@ interface WritingCanvasProps {
   onDeleteTheme: (themeId: number) => void
   onReorderThemes: (themeIds: number[]) => void
   onOpenDrawer?: (section?: 'excerpts' | 'charts' | 'memos') => void
+  /** ROADMAP row 56 — `/joint` opens the joint display's builder (mounted by the page). */
+  onOpenJointDisplayBuilder?: () => void
   focusedThemeId?: number | null
   onFocusTheme?: (themeId: number | null) => void
   pendingItems: PendingItem[]
@@ -66,6 +68,7 @@ export default function WritingCanvas({
   onDeleteTheme,
   onReorderThemes,
   onOpenDrawer,
+  onOpenJointDisplayBuilder,
   focusedThemeId,
   onFocusTheme,
   pendingItems,
@@ -167,6 +170,7 @@ export default function WritingCanvas({
     if (cmd.type === 'excerpt') { onOpenDrawer?.('excerpts'); return }
     if (cmd.type === 'chart') { onOpenDrawer?.('charts'); return }
     if (cmd.type === 'memo') { onOpenDrawer?.('memos'); return }
+    if (cmd.type === 'joint') { onOpenJointDisplayBuilder?.(); return }
     if (cmd.type === 'heading') {
       onCreateTheme({ name: 'New theme', after_theme_id: themeId })
       return
@@ -195,7 +199,7 @@ export default function WritingCanvas({
       input.click()
       return
     }
-  }, [onOpenDrawer, onCreateTheme, projectId, focusedEditorRef])
+  }, [onOpenDrawer, onOpenJointDisplayBuilder, onCreateTheme, projectId, focusedEditorRef])
 
   // Theme move helpers
   const handleMoveTheme = useCallback((themeId: number, direction: 'up' | 'down') => {
@@ -253,7 +257,15 @@ export default function WritingCanvas({
   // kept: that is what made it findable in the landmark list.
   return (
     <div className={`flex-1 flex flex-col bg-white dark:bg-mm-surface${!showColorBars ? ' hide-material-colors' : ''}`} role="region" aria-label="Writing canvas">
-      <div className="flex-1 overflow-auto">
+      {/* `data-canvas-scroll`: the box a joint display's Report view widens to (D176.4,
+          `joint-display/useReportBreakout.ts`) — measured, never a `@container`.
+          🔴 `overflow-x-hidden` is the canvas's ONE horizontal containment since the sections'
+          collapse wrapper stopped clipping the x axis (below): an embed's `sr-only` span that
+          resolves against the embed rather than its table's scroll box (#1156's class — a chart
+          embed's comparison table has three) otherwise scrolled the whole canvas sideways at
+          640px with the outline open (driven 2026-11-12f). Nothing here is meant to scroll
+          sideways: wide content scrolls in its own `ScrollableTable`. */}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden" data-canvas-scroll="">
       <div className="max-w-[740px] mx-auto px-8 py-10 min-h-[50vh]">
         {/* ── Focus mode exit bar ─────────────────────────────────────── */}
         {focusedThemeId != null && (
@@ -647,7 +659,14 @@ function ThemeSection({
             className="grid transition-[grid-template-rows] duration-200 ease-in-out"
             style={{ gridTemplateRows: isCollapsed ? '0fr' : '1fr' }}
           >
-            <div className="overflow-hidden min-h-0">
+            {/* The collapse needs only VERTICAL clipping. `overflow-hidden` clipped both axes, which
+                cut a joint display's Report view back to the 740px column it widens past (D176.4,
+                driven 2026-11-12f); `clip` may pair with `visible` on the other axis (`hidden`
+                may not), and unlike `hidden` it makes no scroll container. ⚠️ So `min-w-0` is now
+                load-bearing: a grid item that is not a scroll container takes its content's
+                min-content width as its minimum, and a wide table inside stretched the whole
+                column to 1,475px (measured) — `hidden` had been zeroing that minimum silently. */}
+            <div className="overflow-x-visible overflow-y-clip min-h-0 min-w-0">
               <div className="text-[13.5px] leading-[1.75]">
                 <ThemeEditor
                   content={theme.content}

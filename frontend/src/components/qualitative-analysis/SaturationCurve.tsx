@@ -14,9 +14,16 @@ import type { SaturationResponse } from '@/lib/api'
 import type { RechartsTooltipProps } from '@/lib/chart-types'
 import { ChartFigure } from '@/components/charts/ChartFigure'
 import { saturationAxisLabel, saturationCaveat } from '@/lib/saturation-ordering'
+import { SATURATION_ANSWERS_NOTE, SATURATION_NO_PASSAGE } from '@/lib/qual-comparison'
 
 interface SaturationCurveProps {
   data: SaturationResponse
+  /**
+   * #1544 — the selection holds survey questions. REQUIRED, so each mount (the analysis
+   * page, the Canvas) decides: the curve walks passages only, and says so when questions
+   * sit beside them — the rest of the page counts their answers.
+   */
+  answersSelected: boolean
 }
 
 function SaturationTooltip({ active, payload, label }: RechartsTooltipProps) {
@@ -37,7 +44,7 @@ function SaturationTooltip({ active, payload, label }: RechartsTooltipProps) {
   )
 }
 
-export default function SaturationCurve({ data }: SaturationCurveProps) {
+export default function SaturationCurve({ data, answersSelected }: SaturationCurveProps) {
   const chartTheme = useChartColors()
 
   const chartData = useMemo(() => {
@@ -50,8 +57,11 @@ export default function SaturationCurve({ data }: SaturationCurveProps) {
     }))
   }, [data.points])
 
+  // #1544: every source in scope is a point, coded or not, so no point means no
+  // interview, document or clip in the selection (questions alone, say) — said as such,
+  // where "No saturation data available." read as a fault.
   if (chartData.length === 0) {
-    return <div className="text-center py-16 text-mm-text-muted">No saturation data available.</div>
+    return <div className="text-center py-16 text-mm-text-muted">{SATURATION_NO_PASSAGE}</div>
   }
 
   const maxCodes = data.total_unique_codes
@@ -141,6 +151,7 @@ export default function SaturationCurve({ data }: SaturationCurveProps) {
           {data.total_sources} source{data.total_sources !== 1 ? 's' : ''} analyzed.{' '}
           {data.total_unique_codes} unique {data.category_level ? 'categories' : 'codes'} found.
         </p>
+        {answersSelected && <p>{SATURATION_ANSWERS_NOTE}</p>}
         {chartData.length >= 2 && chartData[chartData.length - 1].new_codes_this_source === 0 && (
           <p className="text-emerald-600 dark:text-emerald-400">
             No new codes in the last source — potential saturation reached.

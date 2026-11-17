@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
 from ..database import get_db
+from ..models.audit import AuditEntry
 from ..models.user import User
 from ..models.canvas import Canvas, CanvasTheme, CanvasThemeRelationship, CanvasPendingItem, CanvasSnapshot
 from ..schemas.canvas import (
@@ -28,6 +29,9 @@ from ..schemas.canvas import (
     ThemeCreate,
     ThemeUpdate,
     ThemeReorderRequest,
+    ThemeRestore,
+    ThemeRestoreLost,
+    ThemeRestoreResponse,
     ThemeRelationshipCreate,
     ThemeRelationshipUpdate,
     PendingItemCreate,
@@ -47,6 +51,8 @@ from ..services.canvas import (
     update_theme,
     delete_theme,
     reorder_themes,
+    restore_theme,
+    theme_restore_record,
     build_theme_response,
     create_theme_relationship,
     update_theme_relationship,
@@ -60,7 +66,8 @@ from ..services.canvas import (
     restore_snapshot,
     delete_snapshot,
 )
-from ..services.canvas_export import ChartTable, export_canvas_docx
+from ..services.canvas_embed_scrub import holds_canvas_quotes
+from ..services.canvas_export import ChartTable, DisplayAppendix, DisplayTable, export_canvas_docx
 from ..services.audit import log_action
 from ..config import get_media_dir
 from .helpers import _get_project_or_404, sanitize_content_disposition
@@ -450,16 +457,97 @@ async def delete_theme_endpoint(
     _get_canvas_or_404(db, project_id, canvas_id)
     theme = _get_theme_or_404(db, canvas_id, theme_id)
     theme_name = theme.name
+    # #1301: what this delete destroys, read before it, for the undo to send back.
+    record = theme_restore_record(theme)
 
     delete_theme(db, theme)
 
-    log_action(
+    entry = log_action(
         db, action="canvas_theme_delete", entity_type="canvas_theme",
         entity_id=theme_id, user_id=user.id, project_id=project_id,
         details={"canvas_id": canvas_id, "name": theme_name},
     )
+    # #1301: THIS delete's own entry, for the restore's withdrawal gate — never "the newest
+    # delete of this id", which after SQLite's id reuse can be a later theme's.
+    db.flush()
+    record["deleted_audit_id"] = entry.id
     db.commit()
-    return {"status": "ok", "deleted_id": theme_id}
+    return {"status": "ok", "deleted_id": theme_id, "restore": record}
+
+
+#: #1301 — the refusal when a withdrawal ran between a delete and its undo. Guidance, as every
+#: refusal here is: `useHistory` shows it in these words and drops the step.
+RESTORE_AFTER_WITHDRAWAL = (
+    "This section can no longer be brought back: a participant was withdrawn after it was "
+    "deleted, and it holds quotes that may be theirs."
+)
+
+
+def _withdrawn_since_delete(db: Session, project_id: int, theme_id: int | None,
+                            deleted_audit_id: int | None) -> bool:
+    """Whether a withdrawal was recorded in this project after THIS delete (#1301).
+
+    Measured from the delete's OWN audit entry, which the delete put in the record — never
+    the newest delete of the theme id: SQLite reuses the highest id, so a later theme given
+    the same id, deleted after the withdrawal, would move "since" past it. Ordered by
+    audit-entry id, never by time (SQLite's `now()` is second precision). Both entries survive
+    a withdrawal: `withdrawn` is the one it never strips (D9), and it does not key on canvas
+    entries. An absent entry, or one that is not this project's delete of this theme, reads
+    as "yes" — fail closed.
+    """
+    if deleted_audit_id is None:
+        return True
+    is_this_delete = db.query(AuditEntry.id).filter(
+        AuditEntry.id == deleted_audit_id,
+        AuditEntry.project_id == project_id,
+        AuditEntry.action == "canvas_theme_delete",
+        AuditEntry.entity_type == "canvas_theme",
+        AuditEntry.entity_id == theme_id,
+    ).first() is not None
+    if not is_this_delete:
+        return True
+    return db.query(AuditEntry.id).filter(
+        AuditEntry.project_id == project_id,
+        AuditEntry.action == "withdrawn",
+        AuditEntry.id > deleted_audit_id,
+    ).first() is not None
+
+
+# Not a router root, and declared before nothing that could capture it: the only other
+# `/themes/{theme_id}` routes are PATCH and DELETE.
+@router.post("/{canvas_id}/themes/restore", response_model=ThemeRestoreResponse, status_code=201)
+async def restore_theme_endpoint(
+    project_id: int,
+    canvas_id: int,
+    data: ThemeRestore,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Undo a theme delete (#1301): put back everything the delete destroyed, in ONE
+    transaction, and say what the canvas no longer allowed (`not_restored`)."""
+    _get_project_or_404(db, project_id, user.id)
+    _get_canvas_or_404(db, project_id, canvas_id)
+    # 🔴 A withdrawal rewrites every quote in the project's themes and snapshots
+    # (`canvas_embed_scrub.py`) — but a deleted theme's record lives only in the page's undo
+    # history, which no withdrawal reaches. Restoring it after one could bring a withdrawn
+    # person's words back, so a record holding a quote is refused then.
+    if holds_canvas_quotes(data.content) and _withdrawn_since_delete(
+            db, project_id, data.id, data.deleted_audit_id):
+        raise HTTPException(status_code=409, detail=RESTORE_AFTER_WITHDRAWAL)
+
+    theme, lost = restore_theme(db, canvas_id, data.model_dump())
+
+    log_action(
+        db, action="canvas_theme_restore", entity_type="canvas_theme",
+        entity_id=theme.id, user_id=user.id, project_id=project_id,
+        details={"canvas_id": canvas_id, "name": theme.name, "deleted_id": data.id},
+    )
+    db.commit()
+    db.refresh(theme)
+    return ThemeRestoreResponse(
+        theme=CanvasThemeResponse(**build_theme_response(theme)),
+        not_restored=ThemeRestoreLost(**lost),
+    )
 
 
 # ── Theme Relationships ─────────────────────────────────────────────────────
@@ -813,13 +901,21 @@ _MAX_TABLE_ROWS = 2000
 _MAX_TABLE_COLS = 100
 _MAX_TABLE_CELL_CHARS = 2000
 _MAX_TABLE_TOTAL_CELLS = 20000
+#: The sentence printed under a chart's table (`ExportTable.note`) — a joint display's note's cap.
+_MAX_TABLE_NOTE_CHARS = 20_000
 
 
 def _decode_chart_tables(raw: dict[str, Any]) -> dict[int, ChartTable]:
     """Validate the chart tables the client shaped (#1406 D5). Drops a malformed
     entry (that chart then reads "Chart data unavailable"), pads a short row with
     blanks as the Markdown table shows it, and marks a table over a size limit
-    ``too_large``. Never raises on bad client input."""
+    ``too_large``. Never raises on bad client input.
+
+    A table's ``note`` — the sentence the Markdown and HTML exports print under it (a
+    comparison's method note, the groups left out of its tests) — is validated as a joint
+    display's is: absent reads as none, a non-string drops the entry, one over
+    ``_MAX_TABLE_NOTE_CHARS`` marks it ``too_large``. Before, the server never read it, so
+    Word printed the table without the words that qualify it."""
     out: dict[int, ChartTable] = {}
     total = 0
     for key, value in list(raw.items())[:_MAX_CHART_COUNT]:
@@ -829,8 +925,8 @@ def _decode_chart_tables(raw: dict[str, Any]) -> dict[int, ChartTable]:
             continue
         if not isinstance(value, dict):
             continue
-        headers, rows = value.get("headers"), value.get("rows")
-        if not isinstance(headers, list) or not headers or not isinstance(rows, list):
+        headers, rows, note = value.get("headers"), value.get("rows"), value.get("note", "")
+        if not isinstance(headers, list) or not headers or not isinstance(rows, list) or not isinstance(note, str):
             continue
         width = len(headers)
         cells = width * (len(rows) + 1)
@@ -843,14 +939,109 @@ def _decode_chart_tables(raw: dict[str, Any]) -> dict[int, ChartTable]:
             continue  # a non-string cell, or a value with no column to sit under
         if any(len(c) > _MAX_TABLE_CELL_CHARS for c in headers) or any(
             len(c) > _MAX_TABLE_CELL_CHARS for r in rows for c in r
-        ):
+        ) or len(note) > _MAX_TABLE_NOTE_CHARS:
             out[material_id] = ChartTable(headers=[], rows=[], too_large=True)
             continue
         total += cells
         out[material_id] = ChartTable(
-            headers=list(headers), rows=[r + [""] * (width - len(r)) for r in rows],
+            headers=list(headers), rows=[r + [""] * (width - len(r)) for r in rows], note=note,
         )
     return out
+
+
+# A joint display's report (D174) carries the researcher's own writing — a meta-inference, a
+# quote — so a cell may be longer than a chart's; the shared cell total still bounds the build.
+_MAX_DISPLAY_KEY_CHARS = 64
+_MAX_DISPLAY_CELL_CHARS = 10_000
+_MAX_DISPLAY_NOTE_CHARS = 20_000
+
+
+def _str_grid(headers: Any, rows: Any) -> tuple[list[str], list[list[str]]] | None:
+    """Headers and rows as strings, or None when either is malformed."""
+    if not isinstance(headers, list) or not headers or not all(isinstance(h, str) for h in headers):
+        return None
+    if not isinstance(rows, list) or not all(
+        isinstance(r, list) and all(isinstance(c, str) for c in r) for r in rows
+    ):
+        return None
+    return list(headers), [list(r) for r in rows]
+
+
+def _decode_display_tables(raw: dict[str, Any], cells_used: int) -> dict[str, DisplayTable]:
+    """Validate the joint displays' report tables (D174), as `_decode_chart_tables` validates a
+    chart's: a malformed entry is DROPPED (that display then reads "not available in this
+    export"), a short row is padded, and a display over a size limit — the cell total shared with
+    the chart tables already decoded (``cells_used``) — is marked ``too_large``, never truncated.
+    Never raises on bad client input."""
+    out: dict[str, DisplayTable] = {}
+    total = cells_used
+    for key, value in list(raw.items())[:_MAX_CHART_COUNT]:
+        if not isinstance(key, str) or not key or len(key) > _MAX_DISPLAY_KEY_CHARS or not isinstance(value, dict):
+            continue
+        title, message, note = value.get("title"), value.get("message"), value.get("note", "")
+        if not isinstance(title, str) or not isinstance(note, str) or not (message is None or isinstance(message, str)):
+            continue
+        if len(title) > _MAX_TABLE_CELL_CHARS or len(note) > _MAX_DISPLAY_NOTE_CHARS or (
+            message is not None and len(message) > _MAX_TABLE_CELL_CHARS
+        ):
+            out[key] = DisplayTable(title=title[:_MAX_TABLE_CELL_CHARS], too_large=True)
+            continue
+        if message is not None:
+            out[key] = DisplayTable(title=title, message=message)
+            continue
+        grid = _str_grid(value.get("headers"), value.get("rows"))
+        spans, appendix_raw = value.get("span_rows", []), value.get("appendix", [])
+        if grid is None or not isinstance(spans, list) or not isinstance(appendix_raw, list):
+            continue
+        headers, rows = grid
+        width = len(headers)
+        if not all(isinstance(i, int) and not isinstance(i, bool) and 0 <= i < len(rows) and len(rows[i]) == 1 for i in spans):
+            continue  # a span names a row that is not there, or one with more than its one cell
+        span_rows = frozenset(spans)
+        if any(len(r) > width for r in rows):
+            continue  # a value with no column to sit under
+        appendix: list[DisplayAppendix] = []
+        for a in appendix_raw:
+            a_grid = _str_grid(a.get("headers"), a.get("rows")) if isinstance(a, dict) else None
+            a_title, a_note = (a.get("title"), a.get("note", "")) if isinstance(a, dict) else (None, None)
+            if a_grid is None or not isinstance(a_title, str) or not isinstance(a_note, str) or any(
+                len(r) > len(a_grid[0]) for r in a_grid[1]
+            ):
+                appendix = []
+                grid = None
+                break
+            appendix.append(DisplayAppendix(
+                title=a_title, headers=a_grid[0],
+                rows=[r + [""] * (len(a_grid[0]) - len(r)) for r in a_grid[1]], note=a_note,
+            ))
+        if grid is None:
+            continue
+        cells = width * (len(rows) + 1) + sum(len(a.headers) * (len(a.rows) + 1) for a in appendix)
+        strings = [*headers, *(c for r in rows for c in r)]
+        appendix_strings = [s for a in appendix for s in (a.title, *a.headers, *(c for r in a.rows for c in r))]
+        if (
+            len(rows) > _MAX_TABLE_ROWS or width > _MAX_TABLE_COLS or total + cells > _MAX_TABLE_TOTAL_CELLS
+            or any(len(s) > _MAX_DISPLAY_CELL_CHARS for s in strings)
+            or any(len(s) > _MAX_TABLE_CELL_CHARS for s in appendix_strings)
+            or any(len(a.note) > _MAX_DISPLAY_NOTE_CHARS for a in appendix)
+        ):
+            out[key] = DisplayTable(title=title, too_large=True)
+            continue
+        total += cells
+        out[key] = DisplayTable(
+            title=title,
+            headers=headers,
+            rows=[r if i in span_rows else r + [""] * (width - len(r)) for i, r in enumerate(rows)],
+            span_rows=span_rows,
+            note=note,
+            appendix=appendix,
+        )
+    return out
+
+
+def _chart_cells(tables: dict[int, ChartTable] | None) -> int:
+    """The cells the decoded chart tables will render — the share of the document's total."""
+    return sum(len(t.headers) * (len(t.rows) + 1) for t in (tables or {}).values() if not t.too_large)
 
 
 @router.post("/{canvas_id}/export-docx")
@@ -868,7 +1059,8 @@ async def export_canvas_docx_endpoint(
 
     chart_images = _decode_chart_images(body.chart_images) if body else None
     chart_tables = _decode_chart_tables(body.chart_tables) if body else None
-    buf = export_canvas_docx(canvas, project_id, chart_images, chart_tables)
+    display_tables = _decode_display_tables(body.display_tables, _chart_cells(chart_tables)) if body else None
+    buf = export_canvas_docx(canvas, project_id, chart_images, chart_tables, display_tables)
     filename = sanitize_content_disposition(canvas.name) + ".docx"
 
     log_action(

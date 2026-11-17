@@ -138,6 +138,10 @@ class ColumnFrequenciesResponse(BaseModel):
     column_id: int
     frequencies: list[ValueFrequency]
     total: int
+    #: #1615 — the column is a participant score (or built from one) and the asked
+    #: scope leaves out a colleague whose ratings it holds: no values are sent, and
+    #: ``frequencies`` / ``total`` are empty for THAT reason, never "no data".
+    withheld_while_blind: bool = False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

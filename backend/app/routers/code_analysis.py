@@ -28,6 +28,8 @@ from ..services.code_analysis import (
     get_demographic_comparison,
     get_saturation_data,
     get_text_columns_with_coding,
+    GroupingColumnError,
+    grouping_column,
 )
 from ..services.irr import compute_irr, parse_source_token
 from ..services.machine_agreement import compute_machine_agreement
@@ -70,15 +72,33 @@ from ..schemas.code_analysis import (
 router = APIRouter(prefix="/api/projects/{project_id}/code-analysis", tags=["code-analysis"])
 
 
+def _blind_scope(coder_ids, ratings_follow_coder_ids: bool, *, ratings_viewer_id: int | None):
+    """#1615 — the blind scope of a door whose ``coder_ids`` is ALSO a lead's coder filter
+    (#499): the viewer's ids only when the client says blind mode withholds
+    (``ratings_follow_coder_ids``, D102's shape), else None — a lead filtering to one coder is
+    not blind, and keeps every grouping.
+
+    A Canvas embed's ``coder_ids`` is the FIGURE's saved scope, so it names the viewer
+    instead (``ratings_viewer_id``, sent only while withholding; D297's Canvas path) — the
+    viewer decides the ratings question, never the figure's scope. REQUIRED keyword, so
+    each door decides it (the CSVs have no Canvas caller: None)."""
+    if ratings_viewer_id is not None:
+        return [ratings_viewer_id]
+    return coder_ids if ratings_follow_coder_ids else None
+
+
 @router.get("/demographic-filters", response_model=DemographicFilterOptionsResponse)
 async def demographic_filter_options(
     project_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1615 (C2): the viewer's id, sent ONLY while blind mode withholds — this door has no
+    # coder filter, so the scope is the blind one. Bare default (backend/tests/the internal design notes).
+    coder_ids: str | None = None,
 ):
     """Get available demographic filter options for qualitative analysis."""
     _get_project_or_404(db, project_id, user.id)
-    return get_demographic_filter_options(db, project_id)
+    return get_demographic_filter_options(db, project_id, blind_scope=parse_int_list(coder_ids))
 
 
 @router.get("/coder-coverage", response_model=CoderCoverageResponse)
@@ -319,20 +339,25 @@ def source_frequencies(  # def, not async: #1526 D82 — test_endpoint_event_loo
     """Get per-source, per-code frequency statistics with word counts."""
     _get_project_or_404(db, project_id, user.id)
 
-    result = get_source_frequencies(
-        db, project_id,
-        code_ids=body.code_ids,
-        conversation_ids=body.conversation_ids,
-        text_column_ids=body.text_column_ids,
-        exclude_facilitator=body.exclude_facilitator,
-        participant_ids=body.participant_ids,
-        group_by_subtype=body.group_by_subtype,
-        aggregation=body.aggregation,
-        document_ids=body.document_ids,
-        coder_ids=body.coder_ids,
-        layer_scope=body.layer_scope,
-        observation_ids=body.observation_ids,
-    )
+    try:
+        result = get_source_frequencies(
+            db, project_id,
+            code_ids=body.code_ids,
+            conversation_ids=body.conversation_ids,
+            text_column_ids=body.text_column_ids,
+            exclude_facilitator=body.exclude_facilitator,
+            participant_ids=body.participant_ids,
+            group_by_subtype=body.group_by_subtype,
+            aggregation=body.aggregation,
+            document_ids=body.document_ids,
+            coder_ids=body.coder_ids,
+            layer_scope=body.layer_scope,
+            observation_ids=body.observation_ids,
+            blind_scope=_blind_scope(body.coder_ids, body.ratings_follow_coder_ids,  # #1615
+                                     ratings_viewer_id=body.ratings_viewer_id),
+        )
+    except GroupingColumnError as exc:  # #1615 — a rating-derived subtype while blind
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
     return result
 
 
@@ -346,19 +371,25 @@ def demographic_comparison(  # def, not async: #1323 D11 — test_endpoint_event
     """Compare code frequencies across demographic groups."""
     _get_project_or_404(db, project_id, user.id)
 
-    result = get_demographic_comparison(
-        db, project_id,
-        group_by_subtype=body.group_by_subtype,
-        code_ids=body.code_ids,
-        conversation_ids=body.conversation_ids,
-        text_column_ids=body.text_column_ids,
-        exclude_facilitator=body.exclude_facilitator,
-        participant_ids=body.participant_ids,
-        coder_ids=body.coder_ids,
-        layer_scope=body.layer_scope,
-        document_ids=body.document_ids,
-        observation_ids=body.observation_ids,
-    )
+    try:
+        result = get_demographic_comparison(
+            db, project_id,
+            group_by_subtype=body.group_by_subtype,
+            code_ids=body.code_ids,
+            conversation_ids=body.conversation_ids,
+            text_column_ids=body.text_column_ids,
+            exclude_facilitator=body.exclude_facilitator,
+            participant_ids=body.participant_ids,
+            coder_ids=body.coder_ids,
+            layer_scope=body.layer_scope,
+            document_ids=body.document_ids,
+            observation_ids=body.observation_ids,
+            group_by_column_id=body.group_by_column_id,
+            blind_scope=_blind_scope(body.coder_ids, body.ratings_follow_coder_ids,  # #1615
+                                     ratings_viewer_id=body.ratings_viewer_id),
+        )
+    except GroupingColumnError as exc:  # D166 — before any ValueError arm
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
     return result
 
 
@@ -379,15 +410,20 @@ async def saturation(
     """Get code saturation curve across conversations, documents, and observations."""
     _get_project_or_404(db, project_id, user.id)
 
+    # #1544: the three source lists keep "absent" (every source of the kind) apart from
+    # "present and empty" (none of it) — the comparison's rule (#1297), which the page
+    # and the Canvas send through `lib/qual-comparison.ts::saturationParams`.
+    # `parse_int_list` folded '' into None, so one selected interview walked every
+    # document and clip in the project.
     result = get_saturation_data(
         db, project_id,
         exclude_facilitator=exclude_facilitator,
         category_level=category_level,
-        conversation_ids=parse_int_list(conversation_ids),
-        document_ids=parse_int_list(document_ids),
+        conversation_ids=parse_source_ids(conversation_ids),
+        document_ids=parse_source_ids(document_ids),
         coder_ids=parse_int_list(coder_ids),
         layer_scope=layer_scope,
-        observation_ids=parse_int_list(observation_ids),
+        observation_ids=parse_source_ids(observation_ids),
     )
     return result
 
@@ -730,6 +766,8 @@ def source_frequencies_csv(  # def, not async: #1528 D89 — test_endpoint_event
     # #1545 (1.6.0): the panel's description of the chosen filter values (D124: the server
     # cannot derive it from the ids). Bare default, appended last.
     participant_filter_label: str | None = None,
+    # #1615: sent ONLY while blind mode withholds (D102's shape). Bare default, last.
+    ratings_follow_coder_ids: bool = False,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -741,19 +779,24 @@ def source_frequencies_csv(  # def, not async: #1528 D89 — test_endpoint_event
     # #1528 D88: a SOURCE list keeps "absent" (every source of that kind) apart from "present
     # and empty" (none of that kind) — `helpers.parse_source_ids`, #1297's rule. `parse_int_list`
     # folded `''` into None, so one selected interview listed every document, clip and question.
-    result = get_source_frequencies(
-        db, project_id,
-        code_ids=parse_int_list(code_ids),
-        conversation_ids=parse_source_ids(conversation_ids),
-        text_column_ids=parse_source_ids(text_column_ids),
-        exclude_facilitator=exclude_facilitator,
-        participant_ids=parse_int_list(participant_ids),
-        group_by_subtype=group_by_subtype,
-        document_ids=parse_source_ids(document_ids),
-        coder_ids=parse_int_list(coder_ids),
-        layer_scope=layer_scope,
-        observation_ids=parse_source_ids(observation_ids),
-    )
+    try:
+        result = get_source_frequencies(
+            db, project_id,
+            code_ids=parse_int_list(code_ids),
+            conversation_ids=parse_source_ids(conversation_ids),
+            text_column_ids=parse_source_ids(text_column_ids),
+            exclude_facilitator=exclude_facilitator,
+            participant_ids=parse_int_list(participant_ids),
+            group_by_subtype=group_by_subtype,
+            document_ids=parse_source_ids(document_ids),
+            coder_ids=parse_int_list(coder_ids),
+            layer_scope=layer_scope,
+            observation_ids=parse_source_ids(observation_ids),
+            blind_scope=_blind_scope(parse_int_list(coder_ids), ratings_follow_coder_ids,  # #1615
+                                     ratings_viewer_id=None),  # no Canvas caller
+        )
+    except GroupingColumnError as exc:  # #1615
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -828,7 +871,7 @@ def source_frequencies_csv(  # def, not async: #1528 D89 — test_endpoint_event
 @router.get("/demographic-comparison/csv")
 def demographic_comparison_csv(  # def, not async: #1323 D11 — test_endpoint_event_loop.py::MUST_BE_SYNC
     project_id: int,
-    group_by_subtype: str = Query(...),
+    group_by_subtype: str | None = Query(None),
     code_ids: str | None = Query(None),
     conversation_ids: str | None = Query(None),
     text_column_ids: str | None = Query(None),
@@ -842,29 +885,48 @@ def demographic_comparison_csv(  # def, not async: #1323 D11 — test_endpoint_e
     observation_ids: str | None = None,
     # #1545 (1.6.0): the panel's description of the chosen filter values. Bare default, last.
     participant_filter_label: str | None = None,
+    # D166: the groups by ONE categorical column's id instead of a subtype. Bare default, last.
+    group_by_column_id: int | None = None,
+    # #1615: sent ONLY while blind mode withholds (D102's shape). Bare default, last.
+    ratings_follow_coder_ids: bool = False,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Export demographic comparison as CSV."""
     _get_project_or_404(db, project_id, user.id)
+    if (group_by_subtype is None) == (group_by_column_id is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Name the groups by group_by_subtype or group_by_column_id, exactly one.")
 
     # Forward coder_ids + layer_scope so the export matches the on-screen filter (J2-5 L).
     # ⚠️ A SOURCE list keeps "absent" (every source of that kind) apart from "present
     # and empty" (none of that kind) — `helpers.parse_source_ids` (#1297; shared with
     # the co-occurrence since #1527).
-    result = get_demographic_comparison(
-        db, project_id,
-        group_by_subtype=group_by_subtype,
-        code_ids=parse_int_list(code_ids),
-        conversation_ids=parse_source_ids(conversation_ids),
-        text_column_ids=parse_source_ids(text_column_ids),
-        exclude_facilitator=exclude_facilitator,
-        participant_ids=parse_int_list(participant_ids),
-        coder_ids=parse_int_list(coder_ids),
-        layer_scope=layer_scope,
-        document_ids=parse_source_ids(document_ids),
-        observation_ids=parse_source_ids(observation_ids),
-    )
+    blind_scope = _blind_scope(parse_int_list(coder_ids), ratings_follow_coder_ids,  # #1615
+                               ratings_viewer_id=None)  # no Canvas caller
+    try:
+        grouping_name = group_by_subtype
+        if group_by_column_id is not None:
+            column = grouping_column(db, project_id, group_by_column_id, blind_scope=blind_scope)
+            grouping_name = column.column_name or column.column_text
+        result = get_demographic_comparison(
+            db, project_id,
+            group_by_subtype=group_by_subtype,
+            code_ids=parse_int_list(code_ids),
+            conversation_ids=parse_source_ids(conversation_ids),
+            text_column_ids=parse_source_ids(text_column_ids),
+            exclude_facilitator=exclude_facilitator,
+            participant_ids=parse_int_list(participant_ids),
+            coder_ids=parse_int_list(coder_ids),
+            layer_scope=layer_scope,
+            document_ids=parse_source_ids(document_ids),
+            observation_ids=parse_source_ids(observation_ids),
+            group_by_column_id=group_by_column_id,
+            blind_scope=blind_scope,
+        )
+    except GroupingColumnError as exc:  # D166
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -882,6 +944,14 @@ def demographic_comparison_csv(  # def, not async: #1323 D11 — test_endpoint_e
     )
     if scope:
         writer.writerow([csv_safe(scope)])
+    # #1626 (D244): the participants with no coding in scope, said as the screen says it
+    # (`lib/coding-completeness.ts`) — none when no group has one.
+    no_coding = cmp_basis.no_coding_note(
+        [(g, result["group_totals"][g]["without_coding"]) for g in groups],
+        result["scope"]["no_coding_scope"],
+    )
+    if no_coding:
+        writer.writerow([csv_safe(no_coding)])
 
     # Header — #1323: the UNIT is in every count column's name, the n beside it.
     header = ["Code", "Category"]
@@ -932,7 +1002,7 @@ def demographic_comparison_csv(  # def, not async: #1323 D11 — test_endpoint_e
         writer.writerow(row)
 
     output.seek(0)
-    filename = f"demographic_comparison_{sanitize_csv_filename(group_by_subtype)}.csv"
+    filename = f"demographic_comparison_{sanitize_csv_filename(grouping_name)}.csv"
 
     return StreamingResponse(
         iter([output.getvalue()]),

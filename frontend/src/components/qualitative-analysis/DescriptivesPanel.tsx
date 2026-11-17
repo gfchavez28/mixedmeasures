@@ -228,7 +228,7 @@ export function DescriptivesContent(props: DescriptivesContentProps) {
           saturationLoading ? (
             <div className="text-center py-8 text-mm-text-muted">Loading saturation data...</div>
           ) : saturationData ? (
-            <SaturationCurve data={saturationData} />
+            <SaturationCurve data={saturationData} answersSelected={qa.selectedTextColumnIds.size > 0} />
           ) : null
         ) : sourceFreqLoading ? (
           <div className="text-center py-8 text-mm-text-muted">Loading data...</div>

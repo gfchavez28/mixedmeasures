@@ -180,6 +180,9 @@ class MetricDefinitionResponse(BaseModel):
     stale: bool
     result_type: str
     results: list[ComputedResultResponse] = []
+    #: #1615 — while blind, this item is computed from a participant rating score
+    #: (`services/rating_withholding.py`), so its numbers are left out. Never WHO rated.
+    withheld_while_blind: bool = False
     last_accessed_at: UTCTimestamp | None = None
     created_at: UTCTimestamp
     updated_at: UTCTimestamp
@@ -216,6 +219,9 @@ class MetricDefinitionSummaryResponse(BaseModel):
     # decided by `services/scale_scores.py`. The client reads it and never
     # re-derives it from the grouping fields (a lookalike shares them).
     is_scale_score: bool
+    #: #1615 — while blind, this item is computed from a participant rating score
+    #: (`services/rating_withholding.py`), so its numbers are left out. Never WHO rated.
+    withheld_while_blind: bool = False
     last_accessed_at: UTCTimestamp | None = None
     created_at: UTCTimestamp
     updated_at: UTCTimestamp
@@ -328,6 +334,9 @@ class AnalysisColumnItem(BaseModel):
     #: carried a staleness flag before this (`ProjectColumnInfo` still does not),
     #: which is why the embed's indicator sat unwired for its whole life.
     stale: bool = False
+    #: #1615 — while blind, this item is computed from a participant rating score
+    #: (`services/rating_withholding.py`), so its numbers are left out. Never WHO rated.
+    withheld_while_blind: bool = False
 
 
 class AnalysisDatasetGroup(BaseModel):
@@ -341,6 +350,9 @@ class AnalysisDomainItem(BaseModel):
     name: str
     member_count: int
     datasets: list[str]
+    #: #1615 — while blind, this item is computed from a participant rating score
+    #: (`services/rating_withholding.py`), so its numbers are left out. Never WHO rated.
+    withheld_while_blind: bool = False
 
 
 class AnalysisDemographicItem(BaseModel):
@@ -350,6 +362,9 @@ class AnalysisDemographicItem(BaseModel):
     dataset_id: int
     dataset_name: str
     subtype: str | None = None
+    #: #1615 — while blind, this item is computed from a participant rating score
+    #: (`services/rating_withholding.py`), so its numbers are left out. Never WHO rated.
+    withheld_while_blind: bool = False
 
 
 class AnalysisColumnsResponse(BaseModel):
@@ -414,6 +429,9 @@ class CrossTabResponse(BaseModel):
     row_column_label: str
     col_column_label: str
     chi_square: ChiSquareResult | None = None
+    #: #1615 — how many of the variables asked for were left out because the viewer
+    #: is blind and each is a participant rating score (or computed from one).
+    withheld_rating_variables: int = 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -441,3 +459,6 @@ class MatrixRowItem(BaseModel):
 class RowMatrixResponse(BaseModel):
     columns: list[MatrixColumnInfo]
     rows: list[MatrixRowItem]
+    #: #1615 — how many of the variables asked for were left out because the viewer
+    #: is blind and each is a participant rating score (or computed from one).
+    withheld_rating_variables: int = 0

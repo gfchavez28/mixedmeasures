@@ -37,7 +37,7 @@ const CODE_ID = Object.fromEntries(CODES.map(([id, name]) => [name, id]))
 
 const data: DemographicComparisonResponse = {
   groups: ['East', 'West'],
-  group_totals: { East: { n: 40, participants: 40, total_segments: 40, total_word_count: 900 }, West: { n: 40, participants: 40, total_segments: 40, total_word_count: 900 } },
+  group_totals: { East: { n: 40, participants: 40, total_segments: 40, total_word_count: 900, without_coding: 0 }, West: { n: 40, participants: 40, total_segments: 40, total_word_count: 900, without_coding: 0 } },
   codes: CODES.map(([code_id, code_name, counts]) => ({
     code_id,
     code_name,

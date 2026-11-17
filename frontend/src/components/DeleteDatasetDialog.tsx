@@ -1,4 +1,5 @@
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { DELETE_REACHES_DISPLAYS_TEXT } from '@/lib/joint-display-vocabulary'
 import { RemovalPlanStatus } from '@/components/RemovalPlanStatus'
 import { useDatasetRemovalPlan } from '@/hooks/useRemovalPlan'
 
@@ -33,7 +34,7 @@ export function DeleteDatasetDialog({
       open={dataset !== null}
       onOpenChange={(open) => { if (!open) onCancel() }}
       title="Delete Dataset"
-      description={`Delete "${dataset?.name}"? All columns, rows, recodes, and associated data will be permanently removed.`}
+      description={`Delete "${dataset?.name}"? All columns, rows, recodes, and associated data will be permanently removed. ${DELETE_REACHES_DISPLAYS_TEXT}`}
       details={dataset && plan.sentence ? <p>{plan.sentence}</p> : undefined}
       confirmLabel="Delete"
       loading={isPending}

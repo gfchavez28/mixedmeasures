@@ -88,6 +88,14 @@ export interface AppliedCodeDetail {
   magnitude_conflict: number | null
 }
 
+/**
+ * #1592 — WHO applied a code, identity only (the server's `schemas/common.py::
+ * CodeApplicationIdentity`): the *By Code* passage lists and the Quote Board carry one per
+ * application beside their distinct `applied_code_ids`, so a chip offers *Remove code* only
+ * where the viewer holds the code (`lib/coding-progress.ts::viewerMayRemoveChip`).
+ */
+export type AppliedCodeIdentity = Pick<AppliedCodeDetail, 'code_id' | 'user_id'>
+
 export interface Segment {
   id: number
   conversation_id: number

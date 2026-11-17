@@ -51,6 +51,9 @@ import { reliabilityFacetQualifier } from '@/lib/reliability-basis'
 import { useAnalysisUrlState } from '@/hooks/useAnalysisUrlState'
 import { useAnalysisDerived } from '@/hooks/useAnalysisDerived'
 import { useQuickCompute } from '@/hooks/useQuickCompute'
+import { useAnalysisScope } from '@/hooks/useAnalysisScope'
+import { coderIdsField, withheldSelection } from '@/lib/analysis-scope'
+import { withheldDoorNotice, withheldSelectionNotice } from '@/lib/blind-rating-columns'
 import { useChartAnnouncements, describeChartTypeChange } from '@/hooks/useChartAnnouncements'
 import { useEnsureMaterialCollection } from '@/hooks/useEnsureMaterialCollection'
 import { Button } from '@/components/ui/button'
@@ -122,6 +125,9 @@ function splitNote(test: StatisticalTestResponse): string | null {
 function formatTestResult(test: StatisticalTestResponse): string {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rd = test.result_data as Record<string, any> | null
+  // #1615 — the server held the stored result back: the test reads a rating score hidden from
+  // this viewer while blind. "Not yet computed" would send her to Compute, which cannot help.
+  if (test.withheld_while_blind) return 'Hidden while blind: it reads a rating score, which combines every coder\'s ratings.'
   if (!rd) return 'Not yet computed'
 
   if (test.test_type === 'cronbachs_alpha') {
@@ -193,6 +199,10 @@ export default function AnalysisView() {
     crossTabColumnId, crossTabDisplay,
     setUrlParam,
   } = useAnalysisUrlState()
+
+  // #1615 — every read below that can carry a rating score sends the viewer's scope while
+  // blind (the server leaves the scores out and says so), keys on it, and waits for it.
+  const { coderIds, coderScope, scopeKey, scopeReady } = useAnalysisScope(pid)
 
   // ── Local state ────────────────────────────────────────────────────────
 
@@ -296,26 +306,28 @@ export default function AnalysisView() {
   const hasRcSelection = activeTab === 'rc' && (rcColumnIds.length >= 2 || rcDomainIds.length >= 2)
 
   const { data: corrMatrixData, isFetching: isCorrFetching } = useQuery({
-    queryKey: ['correlation-matrix', pid, rcColumnIds, rcDomainIds, corrType, bonferroniOn],
+    queryKey: ['correlation-matrix', pid, rcColumnIds, rcDomainIds, corrType, bonferroniOn, scopeKey],
     queryFn: () => correlationsApi.correlationMatrix(pid, {
       column_ids: rcColumnIds,
       domain_ids: rcDomainIds,
       correlation_type: corrType,
       bonferroni: bonferroniOn,
+      ...coderIdsField(coderIds),
     }),
-    enabled: hasRcSelection && rcView === 'correlations',
+    enabled: hasRcSelection && rcView === 'correlations' && scopeReady,
     staleTime: 30_000,
   })
 
   const { data: scatterMatrixData, isFetching: isScatterFetching } = useQuery({
-    queryKey: ['scatter-matrix', pid, rcColumnIds, rcDomainIds, showScatter],
+    queryKey: ['scatter-matrix', pid, rcColumnIds, rcDomainIds, showScatter, scopeKey],
     queryFn: () => correlationsApi.scatterMatrix(pid, {
       column_ids: rcColumnIds,
       domain_ids: rcDomainIds,
       id_type: rcColumnIds.length > 0 ? 'column' : 'domain',
       max_variables: 10,
+      ...coderIdsField(coderIds),
     }),
-    enabled: hasRcSelection && rcView === 'correlations' && showScatter,
+    enabled: hasRcSelection && rcView === 'correlations' && showScatter && scopeReady,
     staleTime: 30_000,
   })
 
@@ -331,7 +343,7 @@ export default function AnalysisView() {
   const includeQq = rcChartType === 'comparison_qq'
 
   const { data: comparisonData, isFetching: isComparisonFetching } = useQuery({
-    queryKey: ['group-comparison', pid, rcColumnIds, rcDomainIds, compareBy, compareBy2, testType, excludeGroups, nonparametric, includeQq],
+    queryKey: ['group-comparison', pid, rcColumnIds, rcDomainIds, compareBy, compareBy2, testType, excludeGroups, nonparametric, includeQq, scopeKey],
     queryFn: () => comparisonsApi.groupComparison(pid, {
       column_ids: rcColumnIds,
       domain_ids: rcDomainIds,
@@ -342,8 +354,9 @@ export default function AnalysisView() {
       exclude_groups: excludeGroups.length > 0 ? excludeGroups : undefined,
       nonparametric,
       include_qq: includeQq || undefined,
+      ...coderIdsField(coderIds),
     }),
-    enabled: hasComparisonSelection,
+    enabled: hasComparisonSelection && scopeReady,
     staleTime: 30_000,
   })
 
@@ -369,17 +382,17 @@ export default function AnalysisView() {
   })
 
   const { data: analysisColumnsData } = useQuery({
-    queryKey: ['analysis-columns', pid],
-    queryFn: () => metricsApi.analysisColumns(pid),
+    queryKey: ['analysis-columns', pid, scopeKey],
+    queryFn: () => metricsApi.analysisColumns(pid, coderScope),
     staleTime: 60_000,
-    enabled: !!pid,
+    enabled: !!pid && scopeReady,
   })
 
   // Statistical tests
   const testsQuery = useQuery({
-    queryKey: ['statistical-tests', pid],
-    queryFn: () => statisticalTestsApi.list(pid),
-    enabled: !!pid,
+    queryKey: ['statistical-tests', pid, scopeKey],
+    queryFn: () => statisticalTestsApi.list(pid, coderScope),
+    enabled: !!pid && scopeReady,
     staleTime: 300_000,
     retry: retryUnanswered,
   })
@@ -414,24 +427,26 @@ export default function AnalysisView() {
   const hasDqSelection = activeTab === 'data_quality' && dqColumnIds.length > 0
 
   const { data: dqSummaryData, isFetching: isDqSummaryFetching, error: dqSummaryError } = useQuery({
-    queryKey: ['dq-summary', pid, dqColumnIds, dqIncludeNA, dqIncludeEmpty],
+    queryKey: ['dq-summary', pid, dqColumnIds, dqIncludeNA, dqIncludeEmpty, scopeKey],
     queryFn: () => dataQualityApi.summary(pid, {
       column_ids: dqColumnIds,
       include_na_as_missing: dqIncludeNA,
       include_empty_as_missing: dqIncludeEmpty,
+      ...coderIdsField(coderIds),
     }),
-    enabled: hasDqSelection,
+    enabled: hasDqSelection && scopeReady,
     staleTime: 30_000,
   })
 
   const { data: dqPatternsData, isFetching: isDqPatternsFetching } = useQuery({
-    queryKey: ['dq-patterns', pid, dqColumnIds, dqIncludeNA, dqIncludeEmpty],
+    queryKey: ['dq-patterns', pid, dqColumnIds, dqIncludeNA, dqIncludeEmpty, scopeKey],
     queryFn: () => dataQualityApi.patterns(pid, {
       column_ids: dqColumnIds,
       include_na_as_missing: dqIncludeNA,
       include_empty_as_missing: dqIncludeEmpty,
+      ...coderIdsField(coderIds),
     }),
-    enabled: hasDqSelection && dqView === 'patterns',
+    enabled: hasDqSelection && dqView === 'patterns' && scopeReady,
     staleTime: 30_000,
   })
 
@@ -440,6 +455,7 @@ export default function AnalysisView() {
       column_ids: dqColumnIds,
       include_na_as_missing: dqIncludeNA,
       include_empty_as_missing: dqIncludeEmpty,
+      ...coderIdsField(coderIds),
     }),
   })
 
@@ -488,6 +504,7 @@ export default function AnalysisView() {
 
   // Trigger quick-compute when selections or metric type change
   useEffect(() => {
+    if (!scopeReady) return   // #1615 — never before the blind scope is known (D96)
     const columnIds = columnsRaw
       ? columnsRaw.split(',').map(Number).filter(n => !isNaN(n) && n > 0)
       : []
@@ -504,8 +521,16 @@ export default function AnalysisView() {
       groupingMode: groupingMode !== 'column' ? groupingMode : null,
       excludeValues: excludeValues.length > 0 ? excludeValues : null,
       decompose: decompose || undefined,
+      coderIds,
     })
-  }, [columnsRaw, domainsRaw, metricType, quickComputeConfig, groupingColumnId, groupingColumnId2, groupingMode, excludeValues, decompose, triggerCompute])
+  }, [columnsRaw, domainsRaw, metricType, quickComputeConfig, groupingColumnId, groupingColumnId2, groupingMode, excludeValues, decompose, triggerCompute, scopeReady, coderIds])
+
+  // #1615 — how many selected variables the list marks withheld from this viewer.
+  const withheldSelectionCount = withheldSelection(
+    analysisColumnsData, selectedColumnIds, selectedDomainIds,
+    [groupingColumnId, groupingColumnId2, compareBy, compareBy2, crossTabColumnId],
+  )
+  const withheldSelectionText = withheldSelectionNotice(withheldSelectionCount)
 
   // Quick-compute metrics are the source of truth for chart rendering
   const selectedMetrics: MetricDefinitionResponse[] = qcMetrics
@@ -658,18 +683,35 @@ export default function AnalysisView() {
 
   // Cross-tab query — only when cross_tab chart type + column selected
   const { data: crossTabData } = useQuery({
-    queryKey: ['analysis-cross-tab', pid, selectedColumnIdsKey, crossTabColumnId],
+    queryKey: ['analysis-cross-tab', pid, selectedColumnIdsKey, crossTabColumnId, scopeKey],
     queryFn: () => {
       const rowColId = Array.from(selectedColumnIds)[0]
       return metricsApi.crossTabulation(pid, {
         row_column_id: rowColId,
         col_column_id: crossTabColumnId!,
         include_chi_square: true,
+        ...coderIdsField(coderIds),
       })
     },
-    enabled: !!pid && chartType === 'cross_tab' && selectedColumnIds.size === 1 && crossTabColumnId != null,
+    enabled: !!pid && chartType === 'cross_tab' && selectedColumnIds.size === 1 && crossTabColumnId != null && scopeReady,
     staleTime: 60_000,
   })
+
+  // #1615 D295 — the ACTIVE door's own count of the rating variables it left out while blind
+  // (`withheld_rating_variables`, the server's). The selection line counts the list's marks,
+  // which can miss what a door left out (a metric's sibling grouping column in another
+  // dataset, a variable group holding a score); this line says the server's number when it is
+  // more than that line already said. Only the panel on screen speaks.
+  const doorWithheldCount = activeTab === 'rc'
+    ? (rcView === 'comparisons'
+        ? comparisonData?.withheld_rating_variables ?? 0
+        : Math.max(corrMatrixData?.withheld_rating_variables ?? 0,
+            showScatter ? scatterMatrixData?.withheld_rating_variables ?? 0 : 0))
+    : activeTab === 'data_quality'
+      ? Math.max(dqSummaryData?.withheld_rating_variables ?? 0,
+          dqView === 'patterns' ? dqPatternsData?.withheld_rating_variables ?? 0 : 0)
+      : chartType === 'cross_tab' ? crossTabData?.withheld_rating_variables ?? 0 : 0
+  const withheldDoorText = withheldDoorNotice(doorWithheldCount, withheldSelectionCount)
 
   // Chart announcements (aria-live)
   const chartAnnouncement = useChartAnnouncements({
@@ -884,7 +926,7 @@ export default function AnalysisView() {
       // Re-trigger quick-compute to pick up freshly computed results
       const columnIds = columnsRaw ? columnsRaw.split(',').map(Number).filter(n => !isNaN(n) && n > 0) : []
       const domainIds = domainsRaw ? domainsRaw.split(',').map(Number).filter(n => !isNaN(n) && n > 0) : []
-      triggerCompute({ columnIds, domainIds, metricType, config: quickComputeConfig, groupingColumnId, groupingColumnId2, groupingMode: groupingMode !== 'column' ? groupingMode : null, excludeValues, decompose: decompose || undefined })
+      triggerCompute({ columnIds, domainIds, metricType, config: quickComputeConfig, groupingColumnId, groupingColumnId2, groupingMode: groupingMode !== 'column' ? groupingMode : null, excludeValues, decompose: decompose || undefined, coderIds })
     },
   })
 
@@ -993,7 +1035,7 @@ export default function AnalysisView() {
       setTestDialog({ open: false, step: 1, type: null, targetId: 0 })
       // Auto-compute the newly created test
       try {
-        await statisticalTestsApi.compute(pid, created.id)
+        await statisticalTestsApi.compute(pid, created.id, coderScope)
       } catch { /* ignore compute errors — test stays stale */ }
       queryClient.invalidateQueries({ queryKey: ['statistical-tests', pid] })
     },
@@ -1033,7 +1075,7 @@ export default function AnalysisView() {
   }
 
   const computeTestMutation = useMutation({
-    mutationFn: (testId: number) => statisticalTestsApi.compute(pid, testId),
+    mutationFn: (testId: number) => statisticalTestsApi.compute(pid, testId, coderScope),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['statistical-tests', pid] })
     },
@@ -1315,7 +1357,7 @@ export default function AnalysisView() {
             const ids = selectedMetrics
               .filter(m => m.metric_type !== 'frequency_distribution' && m.results.length > 0)
               .map(m => m.id)
-            metricsApi.rowMatrix(Number(pid), ids, 'csv')
+            metricsApi.rowMatrix(Number(pid), ids, 'csv', coderScope)
           }} title="Export record x variable matrix as CSV">
             <Download className="w-3 h-3 mr-1" /> Export Matrix
           </Button>
@@ -1526,6 +1568,20 @@ export default function AnalysisView() {
         {/* Main area */}
         <Panel id="main" defaultSize="78" minSize="50">
           <div className="h-full overflow-y-auto p-4">
+            {/* #1615 — a selection naming a rating score the viewer cannot see while blind
+                (the picker no longer offers one; a link or a Material still can). One line
+                above every tab, since the score is left out of each. */}
+            {withheldSelectionText && (
+              <p className="mb-3 text-xs text-mm-text-muted" role="status" data-testid="withheld-selection">
+                {withheldSelectionText}
+              </p>
+            )}
+            {/* D295 — the panel on screen says the server's own count when the marks missed some. */}
+            {withheldDoorText && (
+              <p className="mb-3 text-xs text-mm-text-muted" data-testid="withheld-door">
+                {withheldDoorText}
+              </p>
+            )}
             {activeTab === 'rc' ? (
               <CorrelationsComparisonsContent
                 pid={pid}

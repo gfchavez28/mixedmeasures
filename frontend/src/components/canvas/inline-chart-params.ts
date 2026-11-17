@@ -11,9 +11,11 @@ import type {
   SourceFrequenciesRequest,
   CodeAnalysisFilterParams,
   DemographicComparisonRequest,
+  SaturationParams,
 } from '@/lib/api'
 import { asLayerScope, type LayerScope } from '@/lib/coding-layers'
-import { comparisonSources, cooccurrenceFilterParams } from '@/lib/qual-comparison'
+import { serverDetailMessage } from '@/lib/api/error-utils'
+import { comparisonSources, cooccurrenceFilterParams, saturationParams } from '@/lib/qual-comparison'
 import { drawsCodedShare } from '@/components/qualitative-analysis/qual-chart-data'
 import {
   orientationFromToken,
@@ -91,9 +93,21 @@ export function extractComputeParams(content: Record<string, unknown>): {
 //      true), so their defaults are asymmetric and reading them with a uniform
 //      `?? false` inverts two of the three.
 //
-// Blind mode deliberately does NOT apply: the view narrows the sent scope to
-// self while blind, but a canvas embed replays the coder scope that was SAVED.
-// It is a snapshot of a figure, and the quantitative path behaves the same way.
+// Blind mode deliberately does NOT apply to the CODING a figure counts: the view
+// narrows the sent scope to self while blind, but a canvas embed replays the
+// coder scope that was SAVED. It is a snapshot of a figure. (#1615 D281: the
+// quantitative path no longer behaves the same way — a quantitative embed has
+// no saved coder scope and follows the viewer.)
+//
+// 🔴 #1615 (D297's Canvas path): the RATINGS question does follow the viewer. A
+// grouping by a variable worked out from participant scores (a score band) would
+// sort people by every coder's ratings, so the two grouping requests — source
+// frequencies and the comparison — carry the VIEWER's id while withholding
+// (`lib/analysis-scope.ts::ratingsViewerField`, spread at the call site, never
+// here: these builders read the saved config alone). Its own field because this
+// request's `coder_ids` is the figure's, not the viewer's. The server refuses
+// such a grouping (D284, a 409) and the embed and its export print that sentence
+// (`qualChartRefusal`); the counts of every other figure do not move.
 //
 // ── Slab 2 (saturation · co-occurrence · comparisons) ────────────────────────
 //
@@ -105,8 +119,8 @@ export function extractComputeParams(content: Record<string, unknown>): {
 //        ⇒ `[]` means **NONE**
 //   · `demographic-comparison.code_ids` filters `if code_ids:`
 //        ⇒ `[]` means **ALL**
-//   · `saturation` takes **no `code_ids` at all**, and its source-id filters are
-//        truthiness ⇒ empty means **ALL SOURCES**
+//   · `saturation` takes **no `code_ids` at all**, and its source lists read as the
+//        comparison's (#1544): absent ⇒ ALL SOURCES of the kind, `''` ⇒ NONE of it
 //
 // So each builder below mirrors ITS OWN live caller in `QualitativeAnalysisView`
 // field by field. That is the discipline this seam requires; it is not
@@ -119,9 +133,10 @@ export function extractComputeParams(content: Record<string, unknown>): {
 //     `aggregation: 'category' | undefined`. Both derive from
 //     `code_mode === 'categories'`. Copying the wrong one silently changes what
 //     is being counted rather than erroring.
-//   · **Saturation ignores `text_column_ids`, `participant_ids` and `code_ids`**
+//   · **Saturation SENDS no `text_column_ids`, `participant_ids` or `code_ids`**
 //     — the view's own saturation query omits all three, so an embed must too,
-//     even though the config carries them.
+//     even though the config carries them. (#1544: the question selection is still
+//     READ — it decides whether an unselected passage kind is none or all.)
 //
 // **Demographic comparison (#1297/#1298, 1.5.9) counts conversations, documents and
 // open-text answers** — each reaches a person (speaker link, `Document.participant_id`,
@@ -356,8 +371,8 @@ export function sourceFrequencyDrawsCodedShare(params: QualComputeParams): boole
  * "enough to ask":
  *   · the source-frequency four need codes AND a source (an empty `code_ids`
  *     means none, so asking would return an empty chart that reads as our bug);
- *   · **saturation needs nothing** — it has no `code_ids` and empty source lists
- *     mean "all sources", which is exactly what the view sends by default;
+ *   · **saturation needs nothing** — it has no `code_ids`, and a config with no
+ *     source saved is every source (#1544: one with a selection is exactly that);
  *   · **comparisons need `group_by`** — the view builds a null request without
  *     it and never fires;
  *   · **co-occurrence needs nothing from the config** — it is all-codes by
@@ -402,38 +417,32 @@ export function qualChartHasEnoughToFetch(params: QualComputeParams): boolean {
  */
 
 /**
- * Saturation params — mirrors `QualitativeAnalysisView`'s saturation query.
+ * Saturation params — the view's own builder (`lib/qual-comparison.ts::saturationParams`),
+ * so the embed and its export read a saved selection exactly as the view does.
  *
  * ⚠️ Deliberately NARROWER than the other builders: no `code_ids` (the endpoint
- * has no such parameter), no `text_column_ids`, no `participant_ids`. The curve
+ * has no such parameter), no `participant_ids` (`FILTER_NOT_APPLIED.saturation`). The curve
  * is "unique codes accumulated as sources are added", so it is scoped by SOURCE
- * only. Sending the config's other filters would imply a scoping the chart does
- * not have.
+ * only. 🔴 #1544: the saved QUESTION selection is read — never sent (the route walks
+ * passages only) — because it decides whether an empty passage kind means none of it or
+ * every source of it: a saved selection holding only questions is an empty curve.
  *
  * Note `category_level` is a BOOLEAN here where source-frequencies takes
  * `aggregation: 'category'` — same concept, two encodings, both derived from
  * `code_mode`.
  */
-export function buildQualSaturationParams(params: QualComputeParams): {
-  exclude_facilitator?: boolean
-  category_level?: boolean
-  conversation_ids?: string
-  document_ids?: string
-  observation_ids?: string
-  coder_ids?: string
-  layer_scope?: LayerScope
-} {
+export function buildQualSaturationParams(params: QualComputeParams): SaturationParams {
   const req = params.request
   const csv = (ids: number[] | null | undefined) => (ids && ids.length > 0 ? ids.join(',') : undefined)
-  return {
+  return saturationParams({
     exclude_facilitator: req.exclude_facilitator,
     category_level: params.categoryMode,
-    conversation_ids: csv(req.conversation_ids),
-    document_ids: csv(req.document_ids),
-    observation_ids: csv(req.observation_ids),
     coder_ids: csv(req.coder_ids),
     layer_scope: req.layer_scope ?? 'human',
-  }
+  }, {
+    conversations: req.conversation_ids ?? [], textColumns: req.text_column_ids ?? [],
+    documents: req.document_ids ?? [], observations: req.observation_ids ?? [],
+  })
 }
 
 /**
@@ -491,6 +500,18 @@ export function buildQualComparisonRequest(params: QualComputeParams): Demograph
     coder_ids: req.coder_ids ?? null,
     layer_scope: req.layer_scope ?? 'human',
   }
+}
+
+/**
+ * #1615 (D284 on the Canvas) — what a qualitative embed says when its grouping request is
+ * REFUSED: the server's own sentence for a 409 (it names the variable and why — *"“Score group”
+ * cannot form groups while blind: …"*), read by the embed AND by the export, so the chart, its
+ * Markdown/HTML and its Word fallback say the same words. Any other failure → `null`, and the
+ * caller keeps its own words (the embed's *Chart unavailable*).
+ */
+export function qualChartRefusal(error: unknown): string | null {
+  const status = (error as { status?: unknown } | null)?.status
+  return status === 409 ? serverDetailMessage(error) : null
 }
 
 // ── Quantitative CROSS-TAB materials (#823g / #832) ──────────────────────────

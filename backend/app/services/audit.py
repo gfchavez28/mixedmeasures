@@ -15,6 +15,36 @@ PROJECT_DELETED_ACTION = "deleted"
 BLIND_MODE_REVEAL_ACTION = "reveal_codes"
 
 
+def _strip_strings(value):
+    if isinstance(value, str):
+        return None
+    if isinstance(value, list):
+        return [_strip_strings(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _strip_strings(v) for k, v in value.items()}
+    return value
+
+
+def stripped_details(raw: str | None, mark: str) -> str:
+    """An entry's details with every string nulled and `"redacted": mark` added.
+
+    The shape of a withdrawal's redaction (#1320 D9) and of a deleted source's
+    (#1546 D157): keys, numbers and booleans stay — ids and counts are the trail,
+    the words are a person's. Details that are not a JSON object are a string
+    themselves. `mark` says why: `withdrawal_redaction.AUDIT_REDACTION_MARK` or
+    `deleted_source_audit.SOURCE_DELETED_MARK`.
+    """
+    try:
+        parsed = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    out = _strip_strings(parsed)
+    out["redacted"] = mark
+    return json.dumps(out)
+
+
 def forget_project_audit(db: Session, project_id: int) -> int:
     """#1230 — remove a DELETED project's entries, in the delete's own transaction.
 

@@ -42,6 +42,8 @@ vi.mock('@/lib/api', async () => ({
   retryUnanswered: () => false,
 }))
 vi.mock('@/layouts/ProjectLayout', () => ({ useProjectLayout: () => ({ projectId: 1 }) }))
+// #1608 — the profile's read follows blind mode (`useBlindScope`); here it is every coder's.
+vi.mock('@/hooks/useBlindScope', () => ({ useBlindScope: () => ({ coderScope: undefined, scopeReady: true }) }))
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 import ParticipantsPage from './ParticipantsPage'
@@ -59,8 +61,17 @@ function reportFor(p: Participant): WithdrawalReport {
     })),
     total_items: 1 + p.linked_documents.length * 2,
     unlinked_records_with_identifier: 0,
+    canvas_quotes_unplaced: { quotes: 0, sections: [], snapshots: [] },
+    canvas_misfit_cases: 0,  // joint display slice 2 (r3-6)
+    ...NOWHERE_ELSE,
   }
 }
+
+/** #1606 — no other project holds their ID, and the backup folder has no update copy. */
+const NOWHERE_ELSE = {
+  other_projects_with_identifier: { projects: [], total: 0 },
+  pre_update_copies: { count: 0, folder: '/home/r/backups' },
+} satisfies Pick<WithdrawalReport, 'other_projects_with_identifier' | 'pre_update_copies'>
 
 beforeEach(() => {
   jonas = {
@@ -198,7 +209,7 @@ describe('#1152 — the delete confirm reads the report for THIS opening', () =>
   it('waits, then names the document — the sentence no longer says nothing is linked', async () => {
     await cacheThenLinkADocumentElsewhere()
     const release = holdNextReport()
-    fireEvent.click(screen.getByRole('button', { name: "Delete Jonas Berg's participant record only" }))
+    fireEvent.click(screen.getByRole('button', { name: "Delete Jonas Berg's participant record but keep their data" }))
     const dialog = await screen.findByRole('alertdialog')
 
     expect(within(dialog).getByRole('status')).toHaveTextContent('Checking what would be removed…')
@@ -219,7 +230,7 @@ describe('#1139 — the delete confirm', () => {
     jonas.linked_documents = [{ id: 11, name: 'Workplan J', source_format: 'txt' }]
     renderPage()
     await screen.findByText('Jonas Berg')
-    fireEvent.click(screen.getByRole('button', { name: "Delete Jonas Berg's participant record only" }))
+    fireEvent.click(screen.getByRole('button', { name: "Delete Jonas Berg's participant record but keep their data" }))
     const dialog = await screen.findByRole('alertdialog', { name: 'Delete Jonas Berg’s record? (J-03)' })
     for (const c of DIALOG_FITS_VIEWPORT.split(' ')) expect(dialog).toHaveClass(c)
     // #955 d — as `children` the list was on screen and silent.
@@ -239,7 +250,9 @@ describe('#1139 — the delete confirm', () => {
 
 describe('#1139 — the withdrawal names the person, and so does its toast', () => {
   it('"Remove Jonas Berg’s data? (J-03)", then "Jonas Berg (J-03) removed"', async () => {
-    withdraw.mockResolvedValue({ identifier: 'J-03', backup_filename: 'b.mmbackup', documents_unlinked: 0 })
+    withdraw.mockResolvedValue({
+      identifier: 'J-03', backup_filename: 'b.mmbackup', documents_unlinked: 0, ...NOWHERE_ELSE,
+    })
     renderPage()
     await screen.findByText('Jonas Berg')
     fireEvent.click(screen.getByRole('button', { name: "Remove Jonas Berg's data (withdrawal request)" }))
@@ -250,6 +263,69 @@ describe('#1139 — the withdrawal names the person, and so does its toast', () 
     await waitFor(() => expect(withdraw).toHaveBeenCalledWith(1, 3))
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith(
       'Jonas Berg (J-03) removed. Backup saved as b.mmbackup.', expect.anything(),
+    ))
+  })
+
+  it('#1546 (D158): the done note says how many canvas quotes it left', async () => {
+    withdraw.mockResolvedValue({
+      identifier: 'J-03', backup_filename: 'b.mmbackup', documents_unlinked: 0,
+      canvas_quotes_unplaced: 2, ...NOWHERE_ELSE,
+    })
+    renderPage()
+    await screen.findByText('Jonas Berg')
+    fireEvent.click(screen.getByRole('button', { name: "Remove Jonas Berg's data (withdrawal request)" }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Remove Jonas Berg’s data? (J-03)' })
+    const confirm = within(dialog).getByRole('button', { name: 'Back up and remove' })
+    await waitFor(() => expect(confirm).not.toHaveAttribute('aria-disabled'))
+    fireEvent.click(confirm)
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(
+      'Jonas Berg (J-03) removed. Backup saved as b.mmbackup.',
+      expect.objectContaining({
+        description: expect.stringContaining(
+          ' 2 quotes on a canvas stay because their source was deleted or changed'),
+      }),
+    ))
+  })
+})
+
+describe('#1606 (D234, D235) — where their data still is that the withdrawal does not reach', () => {
+  const ELSEWHERE = {
+    other_projects_with_identifier: {
+      projects: [{ project_id: 8, name: 'Wave 2', copy_relation: 'copy' as const }], total: 1,
+    },
+    pre_update_copies: { count: 2, folder: '/home/r/backups' },
+  }
+
+  it('the confirm lists them under what stays, and the note after says them again', async () => {
+    withdrawalReport.mockImplementation(() => Promise.resolve({ ...reportFor(jonas), ...ELSEWHERE }))
+    withdraw.mockResolvedValue({
+      identifier: 'J-03', backup_filename: 'b.mmbackup', documents_unlinked: 0, ...ELSEWHERE,
+    })
+    renderPage()
+    await screen.findByText('Jonas Berg')
+    fireEvent.click(screen.getByRole('button', { name: "Remove Jonas Berg's data (withdrawal request)" }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Remove Jonas Berg’s data? (J-03)' })
+    const other = await within(dialog).findByText(
+      'Another project here holds a participant with this ID: “Wave 2” (a copy of this project). '
+      + 'Check whether it is the same person, and withdraw them there too')
+    expect(other.closest('li')).not.toBeNull()
+    expect(within(dialog).getByText(
+      '2 copies of the whole database taken before updates are in /home/r/backups')).toBeInTheDocument()
+    const confirm = within(dialog).getByRole('button', { name: 'Back up and remove' })
+    await waitFor(() => expect(confirm).not.toHaveAttribute('aria-disabled'))
+    fireEvent.click(confirm)
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(
+      'Jonas Berg (J-03) removed. Backup saved as b.mmbackup.',
+      expect.objectContaining({
+        description: expect.stringContaining(
+          ' Another project here holds a participant with this ID: “Wave 2” (a copy of this '
+          + 'project). Check whether it is the same person, and withdraw them there too. 2 copies '
+          + 'of the whole database taken before updates are in /home/r/backups. The “Before'),
+        // The note can outgrow a short window (458 px at 640×360, driven): capped, it
+        // scrolls, and starts at its top so the "… removed" line is never above the
+        // edge. jsdom computes no layout, so this pins the technique.
+        className: 'max-h-[calc(100dvh-3rem)] overflow-y-auto items-start!',
+      }),
     ))
   })
 })

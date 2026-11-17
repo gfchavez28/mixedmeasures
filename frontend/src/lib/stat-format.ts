@@ -23,6 +23,7 @@ export type UndefinedReason =
   | 'not_numeric'
   | 'scores_not_computed'
   | 'no_segments'
+  | 'zero_cell'
 
 /** What a missing number looks like. One character, everywhere. */
 export const NO_VALUE = '—'
@@ -79,6 +80,10 @@ const REASON_TEXT: Record<UndefinedReason, string> = {
   // documents and open-text answers per PARTICIPANT, so the sentence names
   // material, not turns. The key stays `no_segments` (D10).
   no_segments: 'Nobody in this group has material in the sources compared, so there is no share to compare.',
+  // #1549 (a): a two-group comparison's odds ratio with a zero count — both
+  // directions, because read with the groups the other way round a 0 is an
+  // infinity. The test still ran; only the odds ratio has no value.
+  zero_cell: 'In one group nobody, or everybody, used this code, so the odds ratio would be 0 or infinite.',
 }
 
 /**

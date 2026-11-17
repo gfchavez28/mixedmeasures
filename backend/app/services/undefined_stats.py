@@ -88,9 +88,18 @@ SCORES_NOT_COMPUTED = "scores_not_computed"
 #: DOCUMENT (the comparison counts conversations only, #1298).
 NO_SEGMENTS = "no_segments"
 
+#: A two-group comparison's ODDS RATIO when one of its four counts is zero — in a
+#: group nobody, or everybody, used the code — so the sample odds ratio is 0 or
+#: infinite (#1549 (a), the code-by-group comparison). ⚠️ The TEST is still defined
+#: (Fisher's p needs no odds ratio), so this rides the effect size, not the test.
+#: ⚠️ Not DEGENERATE, whose sentence is about too few categories; and both
+#: directions, because the same table read with the groups the other way round turns
+#: a 0 into an infinity.
+ZERO_CELL = "zero_cell"
+
 UNDEFINED_REASONS = frozenset({
     INSUFFICIENT_N, EMPTY_GROUP, NO_VARIANCE, DEGENERATE, NOT_NUMERIC,
-    SCORES_NOT_COMPUTED, NO_SEGMENTS,
+    SCORES_NOT_COMPUTED, NO_SEGMENTS, ZERO_CELL,
 })
 
 
@@ -145,12 +154,20 @@ NO_GROUP_VALUES = "no_group_values"
 #: described.**
 INSUFFICIENT_GROUPS = "insufficient_groups"
 
+#: #1615 — every variable asked for (or the grouping variable) is a participant
+#: RATING score, or computed from one, and the viewer is blind: the score combines
+#: every coder's ratings, so a chart or test over it would show colleagues'
+#: judgements (`services/rating_withholding.py`). Not a data problem — the remedy
+#: is to reveal, or to wait for the team's comparison.
+RATING_WITHHELD_BLIND = "rating_withheld_blind"
+
 UNAVAILABLE_REASONS = frozenset({
     NO_VARIABLES,
     DOMAIN_SCORES_MISSING,
     DOMAIN_SCORES_NOT_COMPUTED,
     NO_GROUP_VALUES,
     INSUFFICIENT_GROUPS,
+    RATING_WITHHELD_BLIND,
 })
 
 

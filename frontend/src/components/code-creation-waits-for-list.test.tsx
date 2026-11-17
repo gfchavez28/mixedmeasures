@@ -207,7 +207,7 @@ function renderInline(allCodes: Code[], codesStatus: ListLoad['status']) {
     <InlineCodeActions
       projectId={1} itemType="segment" itemId={5} appliedCodeIds={[]}
       codeMap={new Map(allCodes.map(c => [c.id, c]))} allCodes={allCodes}
-      codesStatus={codesStatus} onCodeChange={vi.fn()}
+      codesStatus={codesStatus} viewer={{ coderId: 1 }} onCodeChange={vi.fn()}
     />,
   )
   fireEvent.click(screen.getByRole('button', { name: 'Add code' }))

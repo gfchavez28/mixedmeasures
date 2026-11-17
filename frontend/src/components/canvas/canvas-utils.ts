@@ -1,5 +1,6 @@
 import type { JSONContent } from '@tiptap/core'
 import type { CanvasTheme } from '@/lib/api'
+import { readDisplay } from '@/lib/joint-display'
 
 // ── Material summary extraction from Tiptap JSON ──────────────────────────
 
@@ -63,6 +64,16 @@ export function extractMaterialSummary(tiptapJson: Record<string, unknown> | nul
     } else if (type === 'callout-stat') {
       calloutCount++
       if (attrs.materialTag) hasAnyTag = true
+    } else if (type === 'joint-display') {
+      // ROADMAP row 56 (D163): a pin IS a quote on the canvas — the server's
+      // `referenced_source_ids` lists it too (`joint_display_node.py`), so the Materials
+      // drawer's "already on canvas" must agree. The display lives on its attr, not as children.
+      for (const row of readDisplay(attrs.display).rows) {
+        for (const pin of row.pins) {
+          if (pin.excerptId != null) excerptIds.push(pin.excerptId)
+          if (pin.displayText) previews.push(pin.displayText.length > 60 ? pin.displayText.slice(0, 60) + '...' : pin.displayText)
+        }
+      }
     }
 
     const content = n.content as unknown[] | undefined

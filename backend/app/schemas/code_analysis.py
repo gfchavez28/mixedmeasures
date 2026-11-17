@@ -1,7 +1,9 @@
 """Pydantic response models for code analysis endpoints."""
 
 from typing import Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+
+from .common import CodeApplicationIdentity
 
 
 class CoderCoverageItem(BaseModel):
@@ -96,6 +98,9 @@ class CodedSegmentWithContext(BaseModel):
     # says so. Defaulted, or the splat drops it on conv/doc rows.
     quote_ranges: list[QuoteRange] = []
     applied_code_ids: list[int]
+    # #1592 — who applied each code (`services/code_analysis.py::_unit_chips`, the same
+    # rows as `applied_code_ids`). REQUIRED: a builder that omits it fails validation.
+    applied_code_details: list[CodeApplicationIdentity]
     preceding_context: list[ContextSegment]
     following_context: list[ContextSegment]
     participant_id: int | None
@@ -166,6 +171,9 @@ class ConversationOption(BaseModel):
 class DemographicFilterOptionsResponse(BaseModel):
     filters: list[DemographicFilter]
     conversations: list[ConversationOption]
+    # #1615: subtypes left out while blind (each holds a variable worked out from
+    # participant scores). A count, never which — the Data view's #1608 shape.
+    withheld_rating_filters: int = 0
 
 
 class CooccurrenceCodeInfo(BaseModel):
@@ -198,6 +206,11 @@ class CodedTextInfo(BaseModel):
     dataset_name: str
     column_name: str
     applied_code_ids: list[int]
+    # #1592 — who applied each code, from the same rows (`_unit_chips`).
+    applied_code_details: list[CodeApplicationIdentity]
+    # #1640 — the project counts this answer as no response (`is_empty_text`): it stays
+    # in the list, marked, and out of the Descriptives table's shares.
+    counted_as_no_response: bool
 
 
 class DatasetTextGroup(BaseModel):
@@ -232,6 +245,13 @@ class SourceFrequenciesRequest(BaseModel):
     # Track J · J1 item 4 — scope analysis output to selected coders (None/empty = all coders)
     coder_ids: list[int] | None = None
     layer_scope: str | None = None  # J2 Slab 7: "human" (default) | "consensus"
+    # #1615 — sent ONLY while blind mode withholds (D102's shape): `coder_ids` is then the
+    # blind scope, and a grouping worked out from participant scores is refused.
+    ratings_follow_coder_ids: bool = False
+    # #1615 (D297's Canvas path) — a Canvas embed's `coder_ids` is the FIGURE's saved scope, not
+    # the viewer, so it sends the viewer's own id here, ONLY while blind mode withholds. It is the
+    # grouping gate's blind scope and nothing else: the coding the figure counts does not move.
+    ratings_viewer_id: int | None = None
 
 
 class CodeCountEntry(BaseModel):
@@ -308,7 +328,10 @@ class SourceFrequenciesResponse(BaseModel):
 
 class DemographicComparisonRequest(BaseModel):
     code_ids: list[int] | None = None
-    group_by_subtype: str
+    # D166: the groups are named by a demographic SUBTYPE (what saved materials carry)
+    # or by ONE categorical column's id — exactly one of the two.
+    group_by_subtype: str | None = None
+    group_by_column_id: int | None = None
     # Per source kind: None = every source of that kind; a list = exactly those
     # ([] = none of that kind) — #1297/#1298.
     conversation_ids: list[int] | None = None
@@ -322,6 +345,16 @@ class DemographicComparisonRequest(BaseModel):
     # Track J · J1 item 4 — scope analysis output to selected coders (None/empty = all coders)
     coder_ids: list[int] | None = None
     layer_scope: str | None = None  # J2 Slab 7: "human" (default) | "consensus"
+    # #1615 — sent ONLY while blind mode withholds (D102's shape).
+    ratings_follow_coder_ids: bool = False
+    # #1615 (D297's Canvas path) — the viewer's id from a Canvas embed (see SourceFrequenciesRequest).
+    ratings_viewer_id: int | None = None
+
+    @model_validator(mode="after")
+    def _one_grouping(self):
+        if (self.group_by_subtype is None) == (self.group_by_column_id is None):
+            raise ValueError("name the groups by group_by_subtype or group_by_column_id, exactly one")
+        return self
 
 
 class GroupTotal(BaseModel):
@@ -331,6 +364,9 @@ class GroupTotal(BaseModel):
     participants: int
     total_segments: int  # passages in scope (turns, document segments, answers)
     total_word_count: int
+    # #1626 (D243): of `participants`, those with NO coding in scope under the request's
+    # coder and layer scope — they count as "did not use" every code, and the page says so.
+    without_coding: int
 
 
 class GroupCodeStats(BaseModel):
@@ -352,6 +388,9 @@ class StatTestResult(BaseModel):
     significant: bool
     effect_size: float | None = None
     effect_size_label: str | None = None
+    # #1549 (a): why `effect_size` is None while the test ran (`undefined_stats` —
+    # today only `zero_cell`, an odds ratio of 0 or infinity). A real 0 is a value.
+    effect_size_undefined_reason: str | None = None
     # #1323: the smallest p these margins can produce, and whether — under the
     # stated correction — this code could EVER reach significance at these sizes.
     min_attainable_p: float | None = None
@@ -401,6 +440,10 @@ class ComparisonScope(BaseModel):
     observations_left_out: int
     unassigned_passages: int
     participants_without_group: int
+    # #1626 (D244): whose coding "no coding" is about — `comparison_basis.NO_CODING_SCOPE_*`
+    # (every coder · the coders shown · the consensus layer · the model). Stated, so the
+    # client, the Canvas embed and the export never infer it from a request they lack.
+    no_coding_scope: str
 
 
 class DemographicComparisonResponse(BaseModel):

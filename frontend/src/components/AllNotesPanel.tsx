@@ -1,7 +1,8 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router'
 import {
-  ChevronRight, ChevronDown, ExternalLink, FileText, MessageSquare,
+  ArrowRight, ChevronRight, ChevronDown, FileText, MessageSquare,
   TableProperties, Video
 } from 'lucide-react'
 import { allNotesApi } from '@/lib/api'
@@ -567,10 +568,11 @@ function NoteCard({
 
       {/* Navigate link — visible on hover */}
       <div className="flex justify-end mt-1">
-        <a
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
+        {/* #1625 (D238/D239): navigates in place — the packaged app opens no new
+            window, so `target="_blank"` here did nothing. The arrow is not the
+            "leaves the app" glyph, because the link no longer does. */}
+        <Link
+          to={url}
           // Reveal on ANY focus, not just `:focus-visible`: opacity-0 alone left
           // this control focusable but INVISIBLE (WCAG 2.4.7). `:focus-visible`
           // is a browser heuristic that deliberately does NOT match programmatic
@@ -580,10 +582,10 @@ function NoteCard({
           // hidden control: a mouse user hovered it to click it, so it was
           // already visible.
           className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity rounded-sm"
-          aria-label={`Open this note's ${openInLabel} — opens in a new tab`}
+          aria-label={`Open this note's ${openInLabel}`}
         >
-          <ExternalLink className="h-3 w-3 text-mm-text-muted hover:text-mm-blue-text" aria-hidden="true" />
-        </a>
+          <ArrowRight className="h-3 w-3 text-mm-text-muted hover:text-mm-blue-text" aria-hidden="true" />
+        </Link>
       </div>
     </div>
   )

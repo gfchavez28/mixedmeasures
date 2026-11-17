@@ -10,8 +10,10 @@
  *
  * Two charts do not take the filter (D120): the saturation curve (its route takes no participant
  * list) and the Timeline (it draws an observation's clips, which have no participant link).
- * Making either follow it would change saved Canvas embeds with no fingerprint to flag them
- * (`components/canvas/figure-baseline.ts`), so each says so instead.
+ * Making the Timeline follow it would change saved Canvas embeds with no fingerprint to flag
+ * them (`components/canvas/figure-baseline.ts`), so it says so instead; the saturation curve
+ * has had one since #1544 (generation 3), so following the filter there is a decision not yet
+ * taken rather than a blocker — until then it says so too.
  */
 
 import type { DemographicFilter } from '@/lib/api'
@@ -159,6 +161,18 @@ export function givenFilterNote(count: number): string {
 
 /** D125 — the panel's line under values that match no one. */
 export const NO_PARTICIPANT_MATCHES_VALUES = 'No participant has all of these values.'
+
+/**
+ * #1615 D287 — the *Filters* panel's line while blind: the server leaves out WHOLE every
+ * demographic subtype holding a variable worked out from participant scores (fail closed) and
+ * counts them (`withheld_rating_filters`); its values would name who is in a score band.
+ */
+export function withheldRatingFiltersNotice(count: number): string | null {
+  if (!count) return null
+  return count === 1
+    ? '1 variable worked out from participant scores is hidden while blind.'
+    : `${count} variables worked out from participant scores are hidden while blind.`
+}
 
 /** D125 — the analysis area's notice (and the reason every blocked door names). */
 export function noParticipantMatchesNotice(described: string): string {

@@ -1,5 +1,6 @@
 import api from './client'
 import { namedBlob, EXPORT_TIMEOUT_MS } from './download'
+import { liftCoderIds } from './coder-scope-query'  // #1615
 
 // Comparison types
 /**
@@ -63,7 +64,9 @@ export interface QQSummary {
   ppcc: number | null
   line_slope: number | null
   line_intercept: number | null
-  singleton_group_count: number
+  /** #1549 (b): the groups of one this plot LEFT OUT, by name — the parametric tests'
+   *  rule, so it diagnoses the model they fit (`lib/untested-groups.ts::qqLeftOutNote`). */
+  singleton_groups: string[]
   plotting_position: string
   reference_line: string
   undefined_reason: string | null
@@ -146,6 +149,9 @@ export interface GroupComparisonResponse {
    *  page names them beside the recompute (`StaleScaleScoresNotice`). `[]` when
    *  fresh or when the request used variables, not groups. */
   stale_domain_ids: number[]
+  /** #1615 D295 — how many rating variables the server left out while blind (its own count;
+   *  the page says it through `lib/blind-rating-columns.ts::withheldDoorNotice`). */
+  withheld_rating_variables?: number
 }
 
 // API functions - Comparisons
@@ -162,8 +168,12 @@ export const comparisonsApi = {
     /** #525b — OPT-IN. The QQ points are the only O(n) field in the response,
      *  so the four chart types that never draw them do not pay for them. */
     include_qq?: boolean
-  }) =>
-    api.post<GroupComparisonResponse>(`/projects/${projectId}/metrics/group-comparison`, data).then(res => res.data),
+    /** #1615 — the viewer alone while blind (`lib/analysis-scope.ts`); absent = every coder. */
+    coder_ids?: number[] | null
+  }) => {
+    const [body, params] = liftCoderIds(data)  // #1615: the route reads the scope from the query
+    return api.post<GroupComparisonResponse>(`/projects/${projectId}/metrics/group-comparison`, body, { params }).then(res => res.data)
+  },
   /** Resolves to the blob AND the server's filename — see `namedBlob` (#743). */
   groupComparisonCsv: (projectId: number, params: {
     column_ids: number[]
@@ -173,6 +183,8 @@ export const comparisonsApi = {
     test_type: string
     exclude_groups?: string[]
     nonparametric?: boolean
+    /** #1615 — the viewer alone while blind (`AnalysisScope.coderScope`); absent = every coder. */
+    coderScope?: string
   }) =>
     api.get(`/projects/${projectId}/metrics/group-comparison/csv`, {
       params: {
@@ -183,6 +195,7 @@ export const comparisonsApi = {
         test_type: params.test_type,
         exclude_groups: params.exclude_groups?.length ? params.exclude_groups.join(',') : undefined,
         nonparametric: params.nonparametric || undefined,
+        coder_ids: params.coderScope || undefined,
       },
       responseType: 'blob',
       // #833 — the project-scale export budget, not the 30 s client default.

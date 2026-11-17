@@ -60,6 +60,7 @@ import {
   quantChartKind,
   extractCrossTabParams,
   extractGroupDisplayOptions,
+  qualChartRefusal,
 } from './inline-chart-params'
 import ComparisonChartRouter from './ComparisonChartRouter'
 import {
@@ -67,12 +68,15 @@ import {
   fingerprintCooccurrence,
   fingerprintMetrics,
   fingerprintQualComparison,
+  fingerprintSaturation,
   fingerprintSourceFrequencies,
   type FigureFingerprint,
 } from './figure-baseline'
 import QualChartRouter from './QualChartRouter'
 import { isQualitativeMaterialConfig } from '@/lib/material-kind'
 import { describeUnavailable } from '@/lib/comparison-unavailable'
+import { useAnalysisScope } from '@/hooks/useAnalysisScope'
+import { coderIdsField, ratingsViewerField } from '@/lib/analysis-scope'
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -134,6 +138,12 @@ export default function InlineChartRenderer({
   embedTitle,
   onFigure,
 }: InlineChartRendererProps) {
+  // #1615 — a QUANTITATIVE embed recomputes through the same doors as the Quantitative page,
+  // so it sends the same scope: the viewer alone while blind (the server leaves a rating
+  // score out and says so), in the key, and nothing before the scope is known (D96). A
+  // QUALITATIVE embed's two grouping reads send the same viewer as `ratings_viewer_id`
+  // (D297's Canvas path) — never as `coder_ids`, which stays the figure's saved scope.
+  const { coderIds, scopeKey, scopeReady } = useAnalysisScope(projectId)
   // #652: a material is quantitative or qualitative by its CONFIG — the same
   // discriminator the "Open in Analysis" link routes on. Both branches' queries
   // are declared unconditionally and gated by `enabled`, so hook order is
@@ -171,9 +181,9 @@ export default function InlineChartRenderer({
   )
 
   const { data: computeResult, isLoading, isError } = useQuery({
-    queryKey: ['canvas-chart', projectId, materialId, request],
-    queryFn: () => metricsApi.quickCompute(projectId, request!),
-    enabled: hasSelection && request != null,
+    queryKey: ['canvas-chart', projectId, materialId, request, scopeKey],
+    queryFn: () => metricsApi.quickCompute(projectId, { ...request!, ...coderIdsField(coderIds) }),
+    enabled: hasSelection && request != null && scopeReady,
     staleTime: 5 * 60 * 1000,
   })
 
@@ -188,9 +198,9 @@ export default function InlineChartRenderer({
     data: crossTabData,
     isLoading: crossTabLoading,
   } = useQuery({
-    queryKey: ['canvas-cross-tab', projectId, materialId, crossTabParams.request],
-    queryFn: () => metricsApi.crossTabulation(projectId, crossTabParams.request!),
-    enabled: quantKind === 'cross_tab' && crossTabParams.request != null,
+    queryKey: ['canvas-cross-tab', projectId, materialId, crossTabParams.request, scopeKey],
+    queryFn: () => metricsApi.crossTabulation(projectId, { ...crossTabParams.request!, ...coderIdsField(coderIds) }),
+    enabled: quantKind === 'cross_tab' && crossTabParams.request != null && scopeReady,
     staleTime: 5 * 60 * 1000,
   })
 
@@ -199,9 +209,9 @@ export default function InlineChartRenderer({
     isLoading: comparisonEmbedLoading,
     isError: comparisonEmbedError,
   } = useQuery({
-    queryKey: ['canvas-comparison', projectId, materialId, comparisonParams.request],
-    queryFn: () => comparisonsApi.groupComparison(projectId, comparisonParams.request!),
-    enabled: isComparisonMaterial && comparisonParams.request != null,
+    queryKey: ['canvas-comparison', projectId, materialId, comparisonParams.request, scopeKey],
+    queryFn: () => comparisonsApi.groupComparison(projectId, { ...comparisonParams.request!, ...coderIdsField(coderIds) }),
+    enabled: isComparisonMaterial && comparisonParams.request != null && scopeReady,
     staleTime: 5 * 60 * 1000,
   })
 
@@ -220,14 +230,18 @@ export default function InlineChartRenderer({
     data: qualData,
     isLoading: qualLoading,
     isError: qualError,
+    error: qualFailure,
   } = useQuery({
     // The coder scope rides inside `request`, so a material saved under a
     // narrowed coder filter can never read another material's cache entry
     // (the #454 keying rule, satisfied by construction here because the embed
     // sends exactly the scope it stored).
-    queryKey: ['canvas-qual-chart', projectId, materialId, qualParams.request],
-    queryFn: () => codeAnalysisApi.sourceFrequencies(projectId, qualParams.request),
-    enabled: qualEnabled && isSourceFrequencyChart,
+    // #1615 (D297's Canvas path): the VIEWER rides beside it for the ratings question only
+    // (a bar grouped by a score band is refused while blind) — in the key, and nothing sent
+    // before the scope is known (D96).
+    queryKey: ['canvas-qual-chart', projectId, materialId, qualParams.request, scopeKey],
+    queryFn: () => codeAnalysisApi.sourceFrequencies(projectId, { ...qualParams.request, ...ratingsViewerField(coderIds) }),
+    enabled: qualEnabled && isSourceFrequencyChart && scopeReady,
     staleTime: 5 * 60 * 1000,
   })
 
@@ -248,10 +262,12 @@ export default function InlineChartRenderer({
     data: qualComparison,
     isLoading: comparisonLoading,
     isError: comparisonError,
+    error: comparisonFailure,
   } = useQuery({
-    queryKey: ['canvas-qual-comparison', projectId, materialId, comparisonRequest],
-    queryFn: () => codeAnalysisApi.demographicComparison(projectId, comparisonRequest!),
-    enabled: qualEnabled && isComparison && comparisonRequest != null,
+    // #1615 (D297's Canvas path): the viewer, for the ratings question only — see above.
+    queryKey: ['canvas-qual-comparison', projectId, materialId, comparisonRequest, scopeKey],
+    queryFn: () => codeAnalysisApi.demographicComparison(projectId, { ...comparisonRequest!, ...ratingsViewerField(coderIds) }),
+    enabled: qualEnabled && isComparison && comparisonRequest != null && scopeReady,
     staleTime: 5 * 60 * 1000,
   })
 
@@ -287,6 +303,10 @@ export default function InlineChartRenderer({
       if (kind === 'cooccurrence') {
         return cooccurrenceData ? fingerprintCooccurrence(cooccurrenceData) : null
       }
+      // #1544 — the saturation curve, from its own query (generation 3).
+      if (kind === 'saturation') {
+        return qualSaturation ? fingerprintSaturation(qualSaturation) : null
+      }
       // #1529 D94 — whether the embed draws a share of the coded total decides whether its
       // universal rows (withheld there) are part of what it drew.
       return qualData
@@ -295,7 +315,7 @@ export default function InlineChartRenderer({
     }
     const ms = computeResult?.metrics ?? []
     return ms.length > 0 ? fingerprintMetrics(ms) : null
-  }, [isComparisonMaterial, isQual, isComparison, kind, comparisonData, qualComparison, cooccurrenceData, qualData, qualParams, computeResult])
+  }, [isComparisonMaterial, isQual, isComparison, kind, comparisonData, qualComparison, cooccurrenceData, qualSaturation, qualData, qualParams, computeResult])
 
   useEffect(() => { onFigure(figure) }, [figure, onFigure])
 
@@ -420,7 +440,8 @@ export default function InlineChartRenderer({
 
     if (isComparison) {
       if (comparisonLoading) return spinner
-      if (comparisonError || !qualComparison) return notice('Chart unavailable')
+      // #1615: a grouping refused while blind (D284) says why, in the server's words.
+      if (comparisonError || !qualComparison) return notice(qualChartRefusal(comparisonFailure) ?? 'Chart unavailable')
       // #1323: N in the result's unit, as the analysis view counts it.
       const comparisonN = Object.values(qualComparison.group_totals ?? {})
         .reduce((sum, g) => sum + g.n, 0)
@@ -460,7 +481,7 @@ export default function InlineChartRenderer({
     }
 
     if (qualLoading) return spinner
-    if (qualError || !qualData) return notice('Chart unavailable')
+    if (qualError || !qualData) return notice(qualChartRefusal(qualFailure) ?? 'Chart unavailable')   // #1615
 
     return frame(
       <QualChartRouter

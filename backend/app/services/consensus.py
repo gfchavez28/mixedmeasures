@@ -70,6 +70,7 @@ from .coding_layers import (
     CONSENSUS_ORIGIN,
     build_effective_code_map,
     consensus_eligible_segment_clause,
+    coder_scope_clause,
     consensus_scoped_segments,
     non_consensus_filter,
     project_scoped_segments,
@@ -734,13 +735,27 @@ class TargetVotes:
     Each call re-reads the database; iterate it once.
     """
 
-    def __init__(self, db: Session, project_id: int, scope, min_voters: int, group_units: bool):
+    def __init__(
+        self, db: Session, project_id: int, scope, min_voters: int, group_units: bool,
+        coder_ids=None, target_codes=None,
+    ):
         self._db = db
         self._project_id = project_id
         self._scope = scope
         self._min_voters = min_voters
         self._group_units = group_units
+        # #1608 — the voters' INCLUDE list (`coding_layers.coder_scope_clause`), or None
+        # for every voter. Applied inside both query builders, so the ≥N-voter subqueries
+        # count voters under the same scope as the ballots.
+        self._coder_ids = list(coder_ids) if coder_ids else None
         self.effective_map: dict[int, int] = build_effective_code_map(db, project_id)
+        #: D168 — the EFFECTIVE codes the stream is narrowed to (`gather_target_votes`'
+        #: ``target_codes``, each resolved here), or None for every target. ``is None``,
+        #: never truthiness: an empty set asks for no target at all (#1297's rule).
+        self.target_effective_codes: frozenset[int] | None = (
+            None if target_codes is None
+            else frozenset(resolve_effective_code(self.effective_map, c) for c in target_codes)
+        )
         # #35 — the declared instruments, once per gather.
         self.scales: dict[int, dict] = scales_for_project(db, project_id)
         #: The project's code sets, resolved into the same effective-code space
@@ -755,11 +770,11 @@ class TargetVotes:
         """Every target with at least ``min_voters`` eligible voters, segments
         then (with ``group_units``) segment groups, then dataset values, each in
         ascending id."""
-        db, project_id, scope = self._db, self._project_id, self._scope
+        db, project_id, scope, coders = self._db, self._project_id, self._scope, self._coder_ids
         seg_query = _seg_votes(db, project_id, scope, (
             CodeApplication.segment_id, CodeApplication.user_id, CodeApplication.code_id,
             CodeApplication.magnitude,
-        ))
+        ), coders)
         if self._group_units:
             # #1334 unit 3 (D32) — a grouped turn is not a target of its own: its
             # votes reach the GROUP arm below. A filter on the already-joined
@@ -768,7 +783,7 @@ class TargetVotes:
         val_query = _val_votes(db, project_id, (
             CodeApplication.dataset_value_id, CodeApplication.user_id, CodeApplication.code_id,
             CodeApplication.magnitude,
-        ))
+        ), coders)
         if self._min_voters > 1:
             # 🔴 The ≥N-voter target set is built from the SAME two query builders,
             # so "a voter" here means exactly what it means in the ballots — never
@@ -776,16 +791,38 @@ class TargetVotes:
             # coder the six filters drop (a machine or an archived coder).
             seg_query = seg_query.filter(CodeApplication.segment_id.in_(
                 _targets_with_voters(
-                    _seg_votes(db, project_id, scope, ()), CodeApplication.segment_id,
+                    _seg_votes(db, project_id, scope, (), coders), CodeApplication.segment_id,
                     self._min_voters,
                 )
             ))
             val_query = val_query.filter(CodeApplication.dataset_value_id.in_(
                 _targets_with_voters(
-                    _val_votes(db, project_id, ()), CodeApplication.dataset_value_id,
+                    _val_votes(db, project_id, (), coders), CodeApplication.dataset_value_id,
                     self._min_voters,
                 )
             ))
+        if self.target_effective_codes is not None:
+            # D168 — only the targets whose ballot holds an asked code, each ballot WHOLE:
+            # the filter is on the TARGET, never on a row's code, because a target's other
+            # codes are its other voters (`decide_target` and the sole-voter arm count
+            # them). The raw ids are the asked codes and every equivalence-group member
+            # that resolves to one — a ballot's `per_coder` holds effective codes.
+            raw = sorted(self.target_effective_codes | {
+                code for code, eff in self.effective_map.items()
+                if eff in self.target_effective_codes
+            })
+            seg_query = seg_query.filter(CodeApplication.segment_id.in_(
+                _segments_holding(db, project_id, scope, raw, coders)
+            ))
+            held_values = (
+                _val_votes(db, project_id, (CodeApplication.dataset_value_id.label("target"),),
+                           coders)
+                .filter(CodeApplication.code_id.in_(raw))
+                .subquery()
+            )
+            val_query = val_query.filter(
+                CodeApplication.dataset_value_id.in_(select(held_values.c.target))
+            )
         yield from _stream_ballots(
             seg_query, CodeApplication.segment_id, TARGET_SEGMENT, self.effective_map,
         )
@@ -799,7 +836,7 @@ class TargetVotes:
             group_query = _seg_votes(db, project_id, scope, (
                 Segment.group_id, CodeApplication.user_id, CodeApplication.code_id,
                 CodeApplication.magnitude,
-            )).filter(Segment.group_id.isnot(None))
+            ), coders).filter(Segment.group_id.isnot(None))
             for ballot in _stream_ballots(
                 group_query, Segment.group_id, TARGET_GROUP, self.effective_map,
             ):
@@ -837,10 +874,15 @@ def _vote_filters():
     )
 
 
-def _seg_votes(db: Session, project_id: int, scope, columns: tuple):
+def _scoped(query, coder_ids):
+    """#1608 — narrowed to the voters' INCLUDE list, or unchanged for every voter."""
+    return query.filter(coder_scope_clause(coder_ids)) if coder_ids else query
+
+
+def _seg_votes(db: Session, project_id: int, scope, columns: tuple, coder_ids=None):
     """Segment-target voter applications. ``columns`` empty = the target id only
-    (the ≥N-voter subquery replaces it with its own)."""
-    return (
+    (the ≥N-voter subquery replaces it with its own). ``coder_ids``: see `TargetVotes`."""
+    return _scoped(
         scope(
             db.query(*(columns or (CodeApplication.segment_id,)))
             .join(Segment, CodeApplication.segment_id == Segment.id)
@@ -848,21 +890,59 @@ def _seg_votes(db: Session, project_id: int, scope, columns: tuple):
             .join(User, CodeApplication.user_id == User.id),
             project_id,
         )
-        .filter(*visible_segment_filter(), *_vote_filters())
+        .filter(*visible_segment_filter(), *_vote_filters()),
+        coder_ids,
     )
 
 
-def _val_votes(db: Session, project_id: int, columns: tuple):
+def _val_votes(db: Session, project_id: int, columns: tuple, coder_ids=None):
     """Dataset-value-target voter applications (see `_seg_votes`)."""
-    return (
+    return _scoped(
         db.query(*(columns or (CodeApplication.dataset_value_id,)))
         .join(DatasetValue, CodeApplication.dataset_value_id == DatasetValue.id)
         .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
         .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
         .join(Code, CodeApplication.code_id == Code.id)
         .join(User, CodeApplication.user_id == User.id)
-        .filter(Dataset.project_id == project_id, *_vote_filters())
+        .filter(Dataset.project_id == project_id, *_vote_filters()),
+        coder_ids,
     )
+
+
+def _segments_holding(db: Session, project_id: int, scope, raw_codes: list[int], coder_ids):
+    """D168 — the segment ids a narrowed stream reads: every turn whose own ballot holds
+    one of ``raw_codes``, AND every turn of a segment GROUP one of whose turns does.
+
+    🔴 **The group half is what keeps a FOLDED ballot whole.** The rollup reads turns
+    (``group_units=False``) and folds a group's turns into one ballot per participant
+    (#1334, D21/D32), so a turn holding none of the codes still carries the voters of a
+    turn that does — a colleague who coded only that turn is a voter on the group. Left
+    out, the group would read one voter where it has two, and the sole-voter arm would
+    score what the team did not agree on.
+
+    One IN on the segment id, never an OR across the two tables in the caller: SQLite
+    seeks the turns by id from this list, where an OR spanning `code_applications` and
+    `segments` is planned as a walk of every segment in the project (measured on D12,
+    2026-11-12d, one code: 2.83 s against 1.40 s for this form, the same 180,024 rows).
+    """
+    holding = (
+        _seg_votes(db, project_id, scope, (CodeApplication.segment_id.label("target"),),
+                   coder_ids)
+        .filter(CodeApplication.code_id.in_(raw_codes))
+        .subquery()
+    )
+    groups = (
+        # A `code_applications` column beside the group id, as the writer's group arm
+        # has: with `segments` alone selected, the builder's join has no left side.
+        _seg_votes(db, project_id, scope,
+                   (Segment.group_id.label("target"), CodeApplication.segment_id), coder_ids)
+        .filter(CodeApplication.code_id.in_(raw_codes), Segment.group_id.isnot(None))
+        .subquery()
+    )
+    return select(Segment.id).where(or_(
+        Segment.id.in_(select(holding.c.target)),
+        Segment.group_id.in_(select(groups.c.target)),
+    ))
 
 
 def _targets_with_voters(votes_query, target_col, min_voters: int):
@@ -879,6 +959,7 @@ def _targets_with_voters(votes_query, target_col, min_voters: int):
 
 def gather_target_votes(
     db: Session, project_id: int, *, segment_scope: str, min_voters: int, group_units: bool,
+    coder_ids, target_codes=None,
 ) -> TargetVotes:
     """Every voter application in one project, as a STREAM of per-target ballots.
 
@@ -917,7 +998,34 @@ def gather_target_votes(
     people is one passage of EACH, D21) and folds the group itself. A consumer
     that inherited either reading silently would decide a group per turn, or
     attribute one person's turn to another.
+
+    🔴 **`coder_ids` has NO DEFAULT either (#1608).** None = every voter: the
+    consensus WRITER's only value (the stored layer is the team's) and the
+    participant table's refresh. A list = only those coders vote — the live
+    rollup a BLIND reader asks for (the joint display's rated cells), where a
+    self scope leaves every target one voter, so Decision 3's sole-voter arm
+    returns the coder's own rating. A reader that inherited None while blind
+    would show a score built from colleagues' ratings — #1608 itself.
+
+    **`target_codes` (D168, the joint display's rated cells) narrows the STREAM, never
+    a ballot.** None = every target. Code ids = only the targets whose ballot holds one
+    of them, resolved to effective codes (`TargetVotes.target_effective_codes`), each
+    ballot whole — plus every turn of a segment group one of whose turns holds one
+    (`_segments_holding`). The rollup is the only caller that narrows: on a 3.6M-coding
+    project one rated code read every coding (61 s on D12) for the ~60,000 it scores.
+    ⚠️ **It DEFAULTS to None, unlike the parameters above, and that is deliberate:**
+    each of those has a value that is silently WRONG to inherit; inheriting None here
+    is only slower. ⚠️ **What a narrowed stream does not see is the consumer's to
+    state** — a disclosure built from it covers the asked codes only.
+    🔴 **Refused with ``group_units=True``:** the writer decides every target and has
+    no use for it, and its group arm is not narrowed — a narrowed writer would decide
+    a group from part of its votes.
     """
+    if target_codes is not None and group_units:
+        raise ValueError(
+            "target_codes narrows the per-turn stream only (group_units=False); "
+            "the consensus writer decides every target"
+        )
     try:
         scope = _SEGMENT_SCOPES[segment_scope]
     except KeyError:
@@ -929,7 +1037,7 @@ def gather_target_votes(
         raise ValueError(f"min_voters must be a positive int, not {min_voters!r}")
     if not isinstance(group_units, bool):
         raise ValueError(f"group_units must be True or False, not {group_units!r}")
-    return TargetVotes(db, project_id, scope, min_voters, group_units)
+    return TargetVotes(db, project_id, scope, min_voters, group_units, coder_ids, target_codes)
 
 
 def _insert_consensus_rows(db: Session, rows: list[dict]) -> None:
@@ -977,6 +1085,8 @@ def materialize_consensus_for_project(db: Session, project_id: int) -> dict:
         min_voters=MIN_CONSENSUS_VOTERS,
         # #1334 unit 3 — a group is decided once (module docstring).
         group_units=True,
+        # #1608 — the stored layer is the team's: every voter, never a viewer's scope.
+        coder_ids=None,
     )
     scales = votes.scales
     # Where each GROUP's decision is written: its visible, eligible members, as

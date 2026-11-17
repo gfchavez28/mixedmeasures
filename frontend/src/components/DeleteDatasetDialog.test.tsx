@@ -63,6 +63,13 @@ describe('#1175 — the removal plan in the dataset delete confirm', () => {
     expect(onConfirm).toHaveBeenCalledWith(11)
   })
 
+  it('#1639 (r1-4): says what the delete does to a joint display, in the description', async () => {
+    api.getDatasetRemovalPlan.mockResolvedValue(plan())
+    const { dialog } = mount()
+    expect(dialog).toHaveAccessibleDescription(
+      /will be permanently removed\. A joint display that uses it will show it as no longer in the project\./)
+  })
+
   it('while the plan loads: no paragraph, a loading line, and Delete WAITS', () => {
     api.getDatasetRemovalPlan.mockReturnValue(new Promise(() => {}))
     const { onConfirm } = mount()

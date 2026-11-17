@@ -711,6 +711,9 @@ class DatasetDataResponse(BaseModel):
     total_rows: int
     offset: int
     limit: int
+    # #1608 — how many rating columns a blind request left out of ``columns`` (and
+    # their cells out of ``rows``). 0 when nothing was withheld.
+    withheld_rating_columns: int = 0
     # participant_id (as a string key, JSON-object friendly) -> row_identifier.
     # DATASET-scoped, not page-scoped — see the endpoint docstring.
     linked_participants: dict[str, str] = {}

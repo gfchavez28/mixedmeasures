@@ -70,6 +70,8 @@ import {
 } from '@/lib/magnitude-rollup-basis'
 import { isManagedDataset, managedDatasetRefusal } from '@/lib/managed-dataset'
 import { useHistory } from '@/hooks/useHistory'
+import { useBlindScope } from '@/hooks/useBlindScope'
+import { withheldRatingColumnsNotice } from '@/lib/blind-rating-columns'
 import { focusedElementOwnsKey, focusIsOnAnotherControl } from '@/lib/keyboard-scope'
 import DatasetTabs from '@/components/DatasetTabs'
 
@@ -235,6 +237,10 @@ export default function DatasetView() {
   const { projectId, datasetId } = useParams<{ projectId: string; datasetId: string }>()
   const pid = parseInt(projectId || '0')
   const iid = parseInt(datasetId || '0')
+  // #1608 — while blind the participant table's rating columns are left out by the server
+  // (a shared snapshot of every coder's ratings). Fail closed: no fetch before the blind
+  // state is settled, nor while withholding with no one to scope to (`useBlindScope`).
+  const { coderScope, scopeReady } = useBlindScope(pid)
   // The Append item navigates from `onSelect` rather than wrapping a `<Link>`:
   // a menu item IS the interactive element, and nesting an anchor inside one
   // gives the row two roles and two tab targets.
@@ -261,16 +267,20 @@ export default function DatasetView() {
    * fetch. All of them take this key.
    */
   const dataPageKey = useMemo(
-    () => ['dataset-data', pid, iid, pageOffset] as const,
-    [pid, iid, pageOffset],
+    // #1608 — the scope rides the key (the patches below write this exact key).
+    () => ['dataset-data', pid, iid, pageOffset, coderScope ?? 'every-coder'] as const,
+    [pid, iid, pageOffset, coderScope],
   )
 
   const dataQuery = useQuery({
-    queryKey: ['dataset-data', pid, iid, pageOffset],
-    queryFn: () => datasetsApi.getData(pid, iid, { offset: pageOffset }),
+    // Spelled out, not `dataPageKey`: #1337's population guard reads a key's root from
+    // its literal. The two must stay equal — `blind-scope-doors-1530.test.ts` pins both.
+    queryKey: ['dataset-data', pid, iid, pageOffset, coderScope ?? 'every-coder'],
+    queryFn: () => datasetsApi.getData(pid, iid, { offset: pageOffset }, coderScope),
     placeholderData: (prev: DatasetDataResponse | undefined) => prev,
-    enabled: !!pid && !!iid,
+    enabled: !!pid && !!iid && scopeReady,
   })
+  const withheldNotice = withheldRatingColumnsNotice(dataQuery.data?.withheld_rating_columns ?? 0)
   const { data, isLoading, error, isFetching } = dataQuery
   /**
    * #963 Tier 2 — the nav strip's *"Variables N"* badge, which both dataset
@@ -1729,6 +1739,11 @@ export default function DatasetView() {
               />
             </table>
           </div>
+          {withheldNotice && (
+            <p className="px-1 pt-2 text-xs text-muted-foreground" data-testid="withheld-rating-columns">
+              {withheldNotice}
+            </p>
+          )}
           {/* #800: the pager. Shown only when there is more than one page, so a
               120-row dataset looks exactly as it did before this change. */}
           {hasPaging && (

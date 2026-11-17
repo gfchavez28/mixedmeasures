@@ -120,8 +120,11 @@ export const participantsApi = {
     api.get<{ participants: Participant[]; total: number }>(`/projects/${projectId}/participants`).then(res => res.data),
   get: (projectId: number, participantId: number) =>
     api.get<Participant>(`/projects/${projectId}/participants/${participantId}`).then(res => res.data),
-  getDetail: (projectId: number, participantId: number) =>
-    api.get<ParticipantDetail>(`/projects/${projectId}/participants/${participantId}`).then(res => res.data),
+  /** #1608 — `coderIds` (sent while blind) leaves the participant table's rating columns out. */
+  getDetail: (projectId: number, participantId: number, coderIds?: string) =>
+    api.get<ParticipantDetail>(`/projects/${projectId}/participants/${participantId}`, {
+      params: coderIds ? { coder_ids: coderIds } : undefined,
+    }).then(res => res.data),
   /**
    * #1190 (D12) — an identifier that belongs to someone who WITHDREW from this project is
    * refused with a 409 whose `detail` is `{ error: 'withdrawn_identifier', message }`;
@@ -210,7 +213,40 @@ export interface WithdrawalOutcome {
    *  turn's are kept; these cannot outlive what they hang off). */
   notes_deleted: number
   code_applications_deleted: number
+  /** #1546 (D158) — canvas quotes LEFT because nothing says whose words they hold
+   *  (themes and snapshot copies); the report named where, before the act. */
+  canvas_quotes_unplaced: number
+  /** Joint display slice 2 (r3-6) — picked "cases that don't fit" naming them, removed with
+   *  the researcher's reason (sections and snapshot copies together). */
+  canvas_misfit_cases_removed: number
   backup_filename: string
+  /** #1606 (D234, D235) — the report's two fields, read by the endpoint before it acted,
+   *  so the note after can say them. Returned only: the audit entry never stores them. */
+  other_projects_with_identifier: OtherProjectsWithIdentifier
+  pre_update_copies: PreUpdateCopies
+}
+
+/**
+ * #1606 (D234) — the OTHER projects here holding a participant with this ID (any
+ * Unicode form, capitals counting). A project duplicated from this one before the
+ * withdrawal keeps everything about the person; a project merely sharing the ID may
+ * hold someone else — the copy says to check. `copy_relation`: `'copy'` — duplicated
+ * FROM this project; `'source'` — this project was duplicated from it. Copies first,
+ * then by name, at most 20; `total` counts every one.
+ */
+export interface OtherProjectsWithIdentifier {
+  projects: { project_id: number; name: string; copy_relation: 'copy' | 'source' | null }[]
+  total: number
+}
+
+/**
+ * #1606 (D235) — the copies of the whole database taken before each update, which
+ * Settings does not list: how many, and the folder they are in. `count` is null when
+ * the folder could not be read — never 0, which says there are none.
+ */
+export interface PreUpdateCopies {
+  count: number | null
+  folder: string
 }
 
 export interface WithdrawalReport {
@@ -264,4 +300,36 @@ export interface WithdrawalReport {
    * sentence that reads the report cannot forget it.
    */
   unlinked_records_with_identifier: number
+  /**
+   * #1546 (D158) — canvas quotes whose source is gone (a deleted conversation, or an
+   * answer's or a document's quote that is no longer there), so nothing says whose
+   * words they hold: the withdrawal LEAVES them. Counted with the sections and
+   * snapshots that hold them — never the words — and not part of `total_items`.
+   * REQUIRED (#1123's rule).
+   */
+  canvas_quotes_unplaced: UnplacedCanvasQuotes
+  /** Joint display slice 2 (r3-6) — REQUIRED (#1123's rule); not part of `total_items`:
+   *  picked "cases that don't fit" naming them, which the withdrawal removes with the reasons. */
+  canvas_misfit_cases: number
+  /** #1606 (D234) — REQUIRED (#1123's rule); not part of `total_items`. */
+  other_projects_with_identifier: OtherProjectsWithIdentifier
+  /** #1606 (D235) — REQUIRED (#1123's rule); a fact of the install. */
+  pre_update_copies: PreUpdateCopies
+}
+
+/** #1546 (D158) — one canvas section, or one snapshot, holding such quotes. */
+export interface UnplacedCanvasPlace {
+  canvas_id: number
+  canvas_name: string
+  /** The section's id, or the snapshot's. */
+  id: number
+  name: string
+  quotes: number
+}
+
+export interface UnplacedCanvasQuotes {
+  /** Every embed, a snapshot's copy included (a restore brings it back). */
+  quotes: number
+  sections: UnplacedCanvasPlace[]
+  snapshots: UnplacedCanvasPlace[]
 }

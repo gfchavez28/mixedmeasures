@@ -62,6 +62,17 @@ export default tseslint.config(
           selector: "TemplateElement[value.raw=/\\b(?:blue|gray|slate|zinc|stone)-\\d/]",
           message: 'Raw Tailwind palette banned (the internal design notes) — use mm-*/shadcn tokens or lib/selection.ts.',
         },
+        // #1625 (D240): the packaged app denies every new window, so a same-origin
+        // `target="_blank"` link does nothing there. In-app links are router <Link>s
+        // (navigate in place); a link that leaves the app is components/OutboundLink.
+        {
+          selector: "JSXAttribute[name.name='target'][value.value='_blank']",
+          message: 'target="_blank" does nothing in the desktop app (#1625) — use a router <Link> in the app, or components/OutboundLink for an https link that leaves it.',
+        },
+        {
+          selector: "JSXAttribute[name.name='target'] > JSXExpressionContainer > Literal[value='_blank']",
+          message: 'target="_blank" does nothing in the desktop app (#1625) — use a router <Link> in the app, or components/OutboundLink for an https link that leaves it.',
+        },
       ],
     },
   },

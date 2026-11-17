@@ -75,6 +75,7 @@ export type CiMethod =
   | 'alpha_bootstrap_units'
   | 'passage_level_t'
   | 'newcombe_hybrid_score'
+  | 'hedges_olkin_d'
   | 'record_cluster_t'
   | 'wilson_effective_n'
   | 'wilson_per_category_effective_n'
@@ -121,6 +122,13 @@ const CI_DESCRIPTORS = {
     qualifier: '(unadjusted)',
     caveat:
       'Newcombe’s interval for the difference between the two groups’ shares of participants who used the code. It is not adjusted for the number of codes compared, so across many codes some intervals will leave out zero by chance alone.',
+  },
+  // The joint display (D168.3) — a survey strand's Cohen's d between two groups. An
+  // effect size's own interval, approximate, and the display tests nothing (D172).
+  hedges_olkin_d: {
+    qualifier: '',
+    caveat:
+      'Hedges and Olkin’s large-sample interval for the standardised difference between the two groups’ means. It is approximate when the groups are small, and it describes this sample: no test is run.',
   },
   // #1330 (1.5.9, D53/D54) — a variable GROUP's pooled answers come several to a
   // record. These intervals count each record once; the ones they replaced treated

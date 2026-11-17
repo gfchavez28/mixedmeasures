@@ -186,16 +186,19 @@ def test_the_migration_marks_the_shape_up_and_down(tmp_path):
             p = Project(name="P", user_id=1)
             s.add(p)
             s.flush()
-            ds = Dataset(project_id=p.id, name="D")
-            s.add(ds)
-            s.flush()
+            # A Core insert, not `Dataset(...)`: the ORM names every column TODAY's model
+            # declares, and the scratch database stands at `BEFORE` — a column a later
+            # revision adds (`managed_rater_ids`, `f2a6c8d4b1e7`) is not there yet.
+            ds_id = s.execute(
+                sa.insert(Dataset.__table__).values(project_id=p.id, name="D")
+            ).inserted_primary_key[0]
             n = 0
 
             def col(text, *, source="computed", expression=None, stale=False):
                 nonlocal n
                 n += 1
                 s.add(DatasetColumn(
-                    dataset_id=ds.id, column_code=f"c{n}", column_text=text,
+                    dataset_id=ds_id, column_code=f"c{n}", column_text=text,
                     column_type=ColumnType.NUMERIC, sequence_order=n, display_order=n,
                     source=source, expression=expression, stale=stale,
                 ))

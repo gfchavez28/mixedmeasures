@@ -582,7 +582,13 @@ class TestSourceDeletes:
 class TestTheCostDoesNotGrowWithTheData:
     @pytest.mark.parametrize("turns", [5, 60])
     def test_a_conversation_delete_runs_a_fixed_number_of_statements(self, db_session, turns):
-        """2026-10-13: 5,023 SELECTs for a 1,000-turn conversation before #1035; one after."""
+        """2026-10-13: 5,023 SELECTs for a 1,000-turn conversation before #1035; one after.
+
+        #1546 (D157, 2026-11-08) adds the two reads of the AUDIT trail that decide which
+        edit wording leaves with the conversation — the hand edits, and the merges and
+        splits — and, with nothing found there, no read of its turns at all. Still the
+        same statements at 5 turns and at 60.
+        """
         db = db_session
         p = Project(name="P", user_id=1)
         db.add(p)
@@ -604,5 +610,5 @@ class TestTheCostDoesNotGrowWithTheData:
         with _Statements(db) as spy:
             _run(delete_conversation(pid, cid, user=user, db=db))
         selects = [t for verb, t in spy.seen if verb == "SELECT"]
-        assert selects == ["projects", "conversations"], selects
+        assert selects == ["projects", "conversations", "audit_entries", "audit_entries"], selects
         assert db.execute(text("SELECT count(*) FROM segments")).scalar() == 0

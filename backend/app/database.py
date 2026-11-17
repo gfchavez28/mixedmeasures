@@ -546,6 +546,16 @@ _PRE_MIGRATION_RE = re.compile(
     r"^(?P<stem>.+)_(?P<date>\d{8})_(?P<time>\d{6})\.db\Z", re.ASCII
 )
 
+
+def is_pre_migration_copy_of(name: str, stem: str) -> bool:
+    """Whether a backup-folder file NAME is one of THIS database's pre-migration copies:
+    `_PRE_MIGRATION_RE` and an EXACT stem (#1039 e — a prefix glob took `dev_bes_…`'s
+    copies for `dev`'s). The one answer, read by the rotation below and by the
+    withdrawal report's count of these copies (#1606, D235), so the two never disagree
+    about which files are this database's."""
+    m = _PRE_MIGRATION_RE.match(name)
+    return m is not None and m["stem"] == stem
+
 #: SQLite's companion files beside a pre-migration copy. The app never opens one,
 #: but anyone inspecting a copy with a SQLite tool leaves them — MEASURED on the
 #: developer's folder: `vl_20260714_235953.db-wal`/`-shm` outliving their database,
@@ -742,7 +752,7 @@ def _backup_database(db_path: Path) -> Path | None:
 
         own = sorted(
             (p for p in backup_dir.iterdir()
-             if (m := _PRE_MIGRATION_RE.match(p.name)) is not None and m["stem"] == db_path.stem
+             if is_pre_migration_copy_of(p.name, db_path.stem)
              and p.name != backup_path.name),
             key=lambda p: p.name,
             reverse=True,

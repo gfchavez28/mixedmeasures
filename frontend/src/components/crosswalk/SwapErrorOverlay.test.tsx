@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
+import { MemoryRouter } from 'react-router'
 import { SwapErrorOverlay } from './SwapErrorOverlay'
 import type { ProjectColumnInfo } from './crosswalk-types'
 
@@ -34,19 +35,31 @@ const columns: ProjectColumnInfo[] = [
 ]
 
 function renderOverlay(overrides: Partial<Parameters<typeof SwapErrorOverlay>[0]> = {}) {
+  // #1625 (D241): the column link is a router <Link> now, so it needs a router.
   return render(
-    <SwapErrorOverlay
-      open
-      message="Type mismatch"
-      affectedColumnIds={[1]}
-      allColumns={columns}
-      projectId={42}
-      onRetry={vi.fn()}
-      onClose={vi.fn()}
-      {...overrides}
-    />,
+    <MemoryRouter>
+      <SwapErrorOverlay
+        open
+        message="Type mismatch"
+        affectedColumnIds={[1]}
+        allColumns={columns}
+        projectId={42}
+        onRetry={vi.fn()}
+        onClose={vi.fn()}
+        {...overrides}
+      />
+    </MemoryRouter>,
   )
 }
+
+describe('SwapErrorOverlay — the column link stays in the app (#1625, D241)', () => {
+  it('is a router link to the Data view, with no target, named for the view', () => {
+    renderOverlay()
+    const link = screen.getByRole('link', { name: 'Open in the Data view' })
+    expect(link).toHaveAttribute('href', '/projects/42/datasets/10?column=1')
+    expect(link).not.toHaveAttribute('target')
+  })
+})
 
 describe('SwapErrorOverlay — isRetrying disabled-state (#340)', () => {
   it('Retry button is enabled and labeled "Retry swap" by default', () => {

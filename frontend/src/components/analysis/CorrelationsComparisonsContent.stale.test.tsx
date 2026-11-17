@@ -14,6 +14,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import type { CorrelationMatrixResponse, GroupComparisonResponse, ScatterMatrixResponse } from '@/lib/api'
 
+// #1615 — the quantitative reads take the blind scope from this hook; every coder here.
+vi.mock('@/hooks/useAnalysisScope', () => ({ useAnalysisScope: () => ({ coderIds: null, coderScope: undefined, scopeKey: 'every-coder', scopeReady: true }) }))
 vi.mock('@/lib/api', () => ({
   correlationsApi: {}, comparisonsApi: {}, domainsApi: { createScoreMetric: vi.fn() },
   downloadBlob: vi.fn(), extractApiError: (_e: unknown, f: string) => f,

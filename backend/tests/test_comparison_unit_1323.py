@@ -533,7 +533,12 @@ def _csv(db, **params):
         )
         chunks = [c async for c in resp.body_iterator]
         return "".join(c if isinstance(c, str) else c.decode() for c in chunks)
-    return list(csv.reader(io.StringIO(asyncio.run(go()))))
+    rows = list(csv.reader(io.StringIO(asyncio.run(go()))))
+    # #1626 (D244): a note can sit above the header (participants with no coding — this
+    # fixture's Staff have material nobody coded); the table these tests read starts at
+    # its "Code" row. The note itself is `test_without_coding_1626.py`'s.
+    start = next(i for i, r in enumerate(rows) if r and r[0] == "Code")
+    return rows[start:]
 
 
 def test_the_csv_names_the_unit_and_carries_both_p_values(four_codes):

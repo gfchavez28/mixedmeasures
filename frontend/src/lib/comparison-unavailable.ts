@@ -37,6 +37,7 @@ export type ComparisonUnavailableReason =
   | 'domain_scores_not_computed'
   | 'no_group_values'
   | 'insufficient_groups'
+  | 'rating_withheld_blind'
 
 export interface UnavailableCopy {
   /** The headline: what happened. */
@@ -73,6 +74,14 @@ const COPY = {
     detail:
       'A comparison needs at least two. Check whether groups have been excluded, ' +
       'or whether the variable’s values are declared missing.',
+  },
+  // #1615 — the server left out every variable asked for (or the grouping variable):
+  // each is a participant rating score, and the viewer is blind (the server decides,
+  // `services/rating_withholding.py`). The Data view's words (#1608).
+  rating_withheld_blind: {
+    title: 'This comparison uses a rating score, which is hidden while blind.',
+    detail:
+      'A participant score combines every coder’s ratings, so it would show your colleagues’ judgements.',
   },
 } satisfies Record<ComparisonUnavailableReason, UnavailableCopy>
 

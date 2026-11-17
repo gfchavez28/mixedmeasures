@@ -3,9 +3,20 @@ import {
   withdrawalLocations, describeDeleteConsequence, withdrawalHeadline,
   keptSummary, removedSummary, withdrawalDoneNote, WITHDRAWAL_SCOPE_NOTE,
   WITHDRAWAL_RESIDUAL_NOTE, WITHDRAWAL_BACKUP_RESIDUAL, WITHDRAWAL_RECORD_NOTE,
-  unlinkedRecordsNote,
+  unlinkedRecordsNote, unplacedCanvasQuotesNote, otherProjectsNote, preUpdateCopiesNote,
 } from './withdrawal-copy'
-import type { WithdrawalReport } from '@/lib/api/participants'
+import type { WithdrawalOutcome, WithdrawalReport } from '@/lib/api/participants'
+
+/** What the done note reads from a withdrawal's outcome. */
+const done = (
+  documents_unlinked: number, canvas_quotes_unplaced = 0,
+  elsewhere: Partial<Pick<WithdrawalOutcome, 'other_projects_with_identifier' | 'pre_update_copies'>> = {},
+) => ({
+  documents_unlinked, canvas_quotes_unplaced,
+  other_projects_with_identifier: { projects: [], total: 0 },
+  pre_update_copies: { count: 0, folder: '/home/r/backups' },
+  ...elsewhere,
+})
 
 /**
  * #702(2) — the copy that replaces "Speaker links will be removed."
@@ -34,6 +45,10 @@ const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   documents: [],
   total_items: 59,
   unlinked_records_with_identifier: 0,
+  canvas_quotes_unplaced: { quotes: 0, sections: [], snapshots: [] },
+  canvas_misfit_cases: 0,  // joint display slice 2 (r3-6)
+  other_projects_with_identifier: { projects: [], total: 0 },
+  pre_update_copies: { count: 0, folder: '/home/r/backups' },
   ...over,
 })
 
@@ -99,6 +114,20 @@ describe('describeDeleteConsequence', () => {
   it('does not promise erasure anywhere', () => {
     const msg = describeDeleteConsequence(report())
     expect(msg).not.toMatch(/will be (deleted|erased|removed) permanently|erases their data/i)
+  })
+
+  it('D314: a delete that removes their entries from lists of cases that don’t fit says so — never "only"', () => {
+    // Joint display slice 2: the delete endpoint removes each entry naming them (D314), so
+    // "removes the participant record only" became false where they are named.
+    const named = describeDeleteConsequence(report({ canvas_misfit_cases: 2 }))
+    expect(named).toContain('This removes the participant record — ')
+    expect(named).not.toMatch(/record only/)
+    expect(named).toContain('They are named, with your reason, in 2 lists of cases that don’t fit')
+    const bare = describeDeleteConsequence(report({
+      conversations: [], datasets: [], speaker_names: [], total_items: 1, canvas_misfit_cases: 1 }))
+    expect(bare).toMatch(/removes the record\. They are named, with your reason, in 1 list/)
+    // POSITIVE CONTROL: named nowhere, the sentence is as before.
+    expect(describeDeleteConsequence(report())).toContain('This removes the participant record only — ')
   })
 
   it('is honest about a participant with nothing linked', () => {
@@ -182,25 +211,31 @@ describe('WITHDRAWAL_SCOPE_NOTE (#1136)', () => {
     expect(WITHDRAWAL_SCOPE_NOTE).toMatch(/not compliance advice/)
   })
 
-  it('#1320 (D12): says what it does not reach — recordings and every earlier copy', () => {
+  it('#1320 (D12), #1606 (D233): says what it does not reach — recordings and every earlier copy', () => {
     expect(WITHDRAWAL_SCOPE_NOTE).toContain(
-      'It does not edit recordings, and backups, safety copies and files exported before '
-      + 'the withdrawal still hold their data.')
+      'It does not edit recordings, and backups, safety copies, database copies taken before '
+      + 'an update, projects duplicated from this one and files exported before the withdrawal '
+      + 'still hold their data.')
   })
 })
 
 describe('#1320 (D12) — the disclosure, as decided', () => {
   it('the confirm names every copy that still holds the data, and recordings', () => {
-    // Pinned whole: the developer decided this wording (#1320 D12); #1190 appends the
-    // sentence about the withdrawal's own record, pinned on its own below.
+    // Pinned whole: the developer decided this wording (#1320 D12, and #1606 D233's
+    // duplicated projects and update copies); #1190 appends the sentence about the
+    // withdrawal's own record, pinned on its own below.
     expect(WITHDRAWAL_RESIDUAL_NOTE).toBe(
       'For honouring a withdrawal request. A full backup is taken first. That backup, your '
-      + 'earlier backups, the safety copies kept before a merge or overwrite, and any file '
-      + 'already exported or shared still hold everything this removes until they are '
-      + 'deleted. Automatic and On quit backups are replaced over time; the others stay '
-      + 'until you delete them in Settings › Backup & Data. Recordings are not edited — '
-      + 'their voice stays in the audio or video. There is no per-person undo: restoring '
-      + 'a backup also undoes any work done after it. ' + WITHDRAWAL_RECORD_NOTE)
+      + 'earlier backups, the safety copies kept before a merge or overwrite, any project '
+      + 'duplicated from this one before now, and any file already exported or shared still '
+      + 'hold everything this removes until they are deleted. So do the copies of the whole '
+      + 'database taken before each update; they are in the backup folder, which Settings '
+      + 'does not list, and the five most recent are kept. Automatic and On quit backups are '
+      + 'replaced over time; the others stay until you delete them in Settings › Backup & '
+      + 'Data. A duplicated project is a project of its own: withdraw them there too. '
+      + 'Recordings are not edited — their voice stays in the audio or video. There is no '
+      + 'per-person undo: restoring a backup also undoes any work done after it. '
+      + WITHDRAWAL_RECORD_NOTE)
   })
 })
 
@@ -211,19 +246,38 @@ describe('#1190 — what the withdrawal leaves behind on purpose', () => {
       + 'of it, or linking records or speakers to participants, does not bring them back, and '
       + 'adding a participant with their ID asks first. A transcript that names a speaker with '
       + 'their ID, or with a name this project knew them by, does not make them a participant '
-      + 'again, and its import says so; a name this project never used for them is not '
-      + 'recognised. Project files exported afterwards carry that record. It keeps their ID and '
-      + 'those names as one-way codes, which is not anonymisation — anyone who can guess one can '
-      + 'confirm it from the code. A withdrawal made in an earlier version of Mixed Measures kept '
-      + 'their ID only.')
+      + 'again — even written with different capitals or spacing, or with its accents encoded '
+      + 'differently — and its import says so; a name this project never used for them is not '
+      + 'recognised. Elsewhere their ID is recognised with its accents encoded either way, but '
+      + 'its capitals count (P01 and p01 can be two people). Project files exported afterwards '
+      + 'carry that record. It keeps their ID and those names as one-way codes, which is not '
+      + 'anonymisation — anyone who can guess one can confirm it from the code, and the audit '
+      + 'trail records the withdrawal under their ID. A withdrawal made '
+      + 'in an earlier version of Mixed Measures recognises the names it kept only as they were '
+      + 'written, and the oldest versions kept their ID only.')
+  })
+
+  it('#1606 (D233): says the audit trail keeps their ID — not only as a one-way code', () => {
+    // D9 keeps the ID in plain text in the `withdrawn` entry; "one-way codes" alone read
+    // as if it were kept plainly nowhere.
+    expect(WITHDRAWAL_RECORD_NOTE).toMatch(/the audit trail records the withdrawal under their ID/)
   })
 
   it('#1472 (D76): says the NAMES are remembered, what is not caught, and what older withdrawals kept', () => {
     expect(WITHDRAWAL_RECORD_NOTE).toMatch(/a name this project knew them by/)
     expect(WITHDRAWAL_RECORD_NOTE).toMatch(/a name this project never used for them is not recognised/)
-    expect(WITHDRAWAL_RECORD_NOTE).toMatch(/earlier version of Mixed Measures kept their ID only/)
-    // The next release's number is not decided, so the note names none.
+    expect(WITHDRAWAL_RECORD_NOTE).toMatch(/recognises the names it kept only as they were written/)
+    expect(WITHDRAWAL_RECORD_NOTE).toMatch(/oldest versions kept their ID only/)
+    // No version is named: the record has outlived two, and the next number is not decided.
     expect(WITHDRAWAL_RECORD_NOTE).not.toMatch(/\d+\.\d+/)
+  })
+
+  it('#1605 (D227–D229, D237): capitals, spacing and accent ENCODING — never the accents themselves', () => {
+    expect(WITHDRAWAL_RECORD_NOTE).toMatch(/different capitals or spacing/)
+    expect(WITHDRAWAL_RECORD_NOTE).toMatch(/accents encoded differently/)
+    expect(WITHDRAWAL_RECORD_NOTE).toMatch(/its capitals count \(P01 and p01 can be two people\)/)
+    // The fold never makes `Maria` and `María` one name, so nothing may read that way.
+    expect(WITHDRAWAL_RECORD_NOTE).not.toMatch(/with or without (its |their )?accents|any accent|ignor\w* accents/i)
   })
 
   it('D9: never calls the kept ID anonymous', () => {
@@ -252,10 +306,22 @@ describe('#1190 — what the withdrawal leaves behind on purpose', () => {
   })
 
   it('the note after a withdrawal ends on the backups, whatever else it says', () => {
-    const backups = 'The “Before a withdrawal” backup taken now, and every earlier backup, '
-      + 'still hold their data until you delete them in Settings › Backup & Data.'
+    // #1606 (D233, the developer's wording) — the update copies and a duplicated project.
+    const backups = 'The “Before a withdrawal” backup taken now, every earlier backup and the '
+      + 'database copies taken before each update still hold their data until you delete them '
+      + '— backups in Settings › Backup & Data, update copies in the backup folder. A project '
+      + 'duplicated from this one before now still holds them; withdraw them there too.'
     expect(WITHDRAWAL_BACKUP_RESIDUAL).toBe(backups)
-    for (const docs of [0, 1, 3]) expect(withdrawalDoneNote(docs).endsWith(backups)).toBe(true)
+    const elsewhere = {
+      other_projects_with_identifier: { projects: [{ project_id: 2, name: 'B', copy_relation: null }], total: 1 },
+      pre_update_copies: { count: 3, folder: '/b' },
+    }
+    for (const docs of [0, 1, 3]) {
+      for (const quotes of [0, 2]) {
+        expect(withdrawalDoneNote(done(docs, quotes)).endsWith(backups)).toBe(true)
+        expect(withdrawalDoneNote(done(docs, quotes, elsewhere)).endsWith(backups)).toBe(true)
+      }
+    }
   })
 })
 
@@ -300,11 +366,145 @@ describe('#1123 — the document arm, on every sentence that reads the report', 
   })
 
   it('the note after a withdrawal counts the documents it unlinked', () => {
-    expect(withdrawalDoneNote(0)).toBe(
+    expect(withdrawalDoneNote(done(0))).toBe(
       'Now search your transcripts and free-text answers for their name — that part cannot be automated. '
       + WITHDRAWAL_BACKUP_RESIDUAL)
-    expect(withdrawalDoneNote(1)).toContain(' 1 document no longer says who it is about — read it too. ')
-    expect(withdrawalDoneNote(3)).toContain(' 3 documents no longer say who they are about — read them too. ')
-    expect(withdrawalDoneNote(0)).not.toMatch(/document/)
+    expect(withdrawalDoneNote(done(1))).toContain(' 1 document no longer says who it is about — read it too. ')
+    expect(withdrawalDoneNote(done(3))).toContain(' 3 documents no longer say who they are about — read them too. ')
+    expect(withdrawalDoneNote(done(0))).not.toMatch(/document/)
+  })
+})
+
+describe('#1546 (D158) — canvas quotes the withdrawal cannot place', () => {
+  const place = (name: string, quotes = 1, canvas = 'Main', id = 1) => ({
+    canvas_id: 1, canvas_name: canvas, id, name, quotes,
+  })
+  const withCanvas = (
+    sections: ReturnType<typeof place>[], snapshots: ReturnType<typeof place>[] = [],
+  ) => report({
+    canvas_quotes_unplaced: {
+      quotes: [...sections, ...snapshots].reduce((t, p) => t + p.quotes, 0), sections, snapshots,
+    },
+  })
+
+  it('says nothing when there are none', () => {
+    expect(unplacedCanvasQuotesNote(report())).toBeNull()
+    expect(keptSummary(report()).join(' ')).not.toMatch(/canvas/)
+  })
+
+  it('one quote: why it stays, and where to read it', () => {
+    expect(unplacedCanvasQuotesNote(withCanvas([place('Findings')]))).toBe(
+      '1 quote on a canvas comes from a quote, conversation or dataset deleted or changed since '
+      + 'it was put there, so the withdrawal cannot tell whose words it holds. It stays — read it '
+      + 'yourself: “Main › Findings”')
+  })
+
+  it('names every section with its canvas, and every snapshot, with their counts', () => {
+    const note = unplacedCanvasQuotesNote(withCanvas(
+      [place('Findings', 2), place('Findings', 1, 'Second', 2)],
+      [place('Draft 1', 3, 'Main', 9)],
+    ))
+    expect(note).toMatch(/^6 quotes on a canvas come from quotes, conversations or datasets deleted/)
+    expect(note).toMatch(/They stay — read them yourself: “Main › Findings” \(2\), “Second › Findings” and the snapshot “Draft 1” of “Main” \(3\)$/)
+  })
+
+  it('is said where the decision is made: the confirm’s “This will stay” list', () => {
+    const r = withCanvas([place('Findings')])
+    expect(keptSummary(r)).toContain(unplacedCanvasQuotesNote(r))
+    expect(removedSummary(r).join(' ')).not.toMatch(/canvas/)
+  })
+
+  it('the note after a withdrawal says how many it left', () => {
+    expect(withdrawalDoneNote(done(0, 1))).toContain(
+      ' 1 quote on a canvas stays because its source was deleted or changed and nothing says '
+      + 'whose words it holds — read it too. ')
+    expect(withdrawalDoneNote(done(0, 4))).toContain(
+      ' 4 quotes on a canvas stay because their source was deleted or changed and nothing says '
+      + 'whose words they hold — read them too. ')
+    expect(withdrawalDoneNote(done(0, 0))).not.toMatch(/canvas/)
+  })
+
+  it('the scope note says such quotes stay, and never promises it leaves every one', () => {
+    expect(WITHDRAWAL_SCOPE_NOTE).toContain(
+      'Quotes on a canvas taken from a conversation or dataset deleted before the withdrawal '
+      + 'stay when it cannot tell whose words they hold.')
+  })
+})
+
+describe('#1606 (D234) — other projects here holding someone with this ID', () => {
+  type Rel = 'copy' | 'source' | null
+  const proj = (name: string, copy_relation: Rel = null, project_id = 2) =>
+    ({ project_id, name, copy_relation })
+  const holding = (projects: ReturnType<typeof proj>[], total = projects.length) =>
+    report({ other_projects_with_identifier: { projects, total } })
+
+  it('says nothing when no other project holds the ID', () => {
+    expect(otherProjectsNote(report())).toBeNull()
+    expect(keptSummary(report()).join(' ')).not.toMatch(/Other projects|Another project/)
+  })
+
+  it('one project: names it, and asks the researcher to check rather than claiming it is them', () => {
+    expect(otherProjectsNote(holding([proj('Pilot')]))).toBe(
+      'Another project here holds a participant with this ID: “Pilot”. Check whether it is '
+      + 'the same person, and withdraw them there too')
+  })
+
+  it('names a Duplicate in its direction — the original is never "a copy of this project"', () => {
+    expect(otherProjectsNote(holding([
+      proj('Wave 2', 'copy'), proj('Baseline', 'source', 3), proj('Pilot', null, 4),
+    ]))).toBe(
+      'Other projects here hold a participant with this ID: “Wave 2” (a copy of this project), '
+      + '“Baseline” (the project this one was copied from) and “Pilot”. Check whether it is '
+      + 'the same person, and withdraw them there too')
+  })
+
+  it('counts the ones past the cap rather than dropping them', () => {
+    const named = Array.from({ length: 20 }, (_, i) => proj(`S${i}`, null, i + 2))
+    const note = otherProjectsNote(holding(named, 23))
+    expect(note).toMatch(/“S18”, “S19” and 3 more\. Check whether/)
+  })
+
+  it('is said where the decision is made, under what STAYS — never what is removed', () => {
+    const r = holding([proj('Pilot')])
+    expect(keptSummary(r)).toContain(otherProjectsNote(r))
+    expect(removedSummary(r).join(' ')).not.toMatch(/Pilot/)
+  })
+
+  it('the note after a withdrawal says it, before the backups', () => {
+    const note = withdrawalDoneNote(done(0, 0, {
+      other_projects_with_identifier: { projects: [proj('Wave 2', 'copy')], total: 1 },
+    }))
+    expect(note).toContain(' Another project here holds a participant with this ID: “Wave 2” '
+      + '(a copy of this project). Check whether it is the same person, and withdraw them there too. ')
+    expect(withdrawalDoneNote(done(0)).match(/Another project|Other projects/)).toBeNull()
+  })
+})
+
+describe('#1606 (D235) — the copies of the whole database taken before updates', () => {
+  const copies = (count: number | null) =>
+    report({ pre_update_copies: { count, folder: '/home/r/backups' } })
+
+  it('says nothing when there are none — and a real 0 is none', () => {
+    expect(preUpdateCopiesNote(copies(0))).toBeNull()
+    expect(keptSummary(copies(0)).join(' ')).not.toMatch(/whole database/)
+  })
+
+  it('says how many and the folder the server named', () => {
+    expect(preUpdateCopiesNote(copies(1))).toBe(
+      '1 copy of the whole database taken before an update is in /home/r/backups')
+    expect(preUpdateCopiesNote(copies(5))).toBe(
+      '5 copies of the whole database taken before updates are in /home/r/backups')
+    expect(keptSummary(copies(2))).toContain(preUpdateCopiesNote(copies(2)))
+  })
+
+  it('a folder the server could not read is unknown, never "none"', () => {
+    expect(preUpdateCopiesNote(copies(null))).toBe(
+      'The backup folder, /home/r/backups, could not be read, so whether it holds copies of '
+      + 'the whole database taken before updates is not known')
+  })
+
+  it('the note after a withdrawal says it, before the backups', () => {
+    expect(withdrawalDoneNote(done(0, 0, { pre_update_copies: { count: 2, folder: '/b' } })))
+      .toContain(' 2 copies of the whole database taken before updates are in /b. The “Before')
   })
 })

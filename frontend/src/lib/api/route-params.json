@@ -347,17 +347,21 @@
    "conversation_ids",
    "document_ids",
    "exclude_facilitator",
+   "group_by_column_id",
    "group_by_subtype",
    "layer_scope",
    "observation_ids",
    "participant_filter_label",
    "participant_ids",
+   "ratings_follow_coder_ids",
    "text_column_ids"
   ]
  },
  "GET /api/projects/{project_id}/code-analysis/demographic-filters": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "GET /api/projects/{project_id}/code-analysis/frequencies": {
   "body": null,
@@ -422,6 +426,7 @@
    "observation_ids",
    "participant_filter_label",
    "participant_ids",
+   "ratings_follow_coder_ids",
    "text_column_ids"
   ]
  },
@@ -483,6 +488,7 @@
  "GET /api/projects/{project_id}/data-quality/summary/csv": {
   "body": null,
   "query": [
+   "coder_ids",
    "column_ids",
    "include_empty_as_missing",
    "include_na_as_missing"
@@ -510,7 +516,9 @@
  },
  "GET /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/frequencies": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "GET /api/projects/{project_id}/datasets/{dataset_id}/columns/{column_id}/re-key/plan": {
   "body": null,
@@ -539,13 +547,16 @@
  "GET /api/projects/{project_id}/datasets/{dataset_id}/data": {
   "body": null,
   "query": [
+   "coder_ids",
    "limit",
    "offset"
   ]
  },
  "GET /api/projects/{project_id}/datasets/{dataset_id}/domain-scores": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "GET /api/projects/{project_id}/datasets/{dataset_id}/linkable-rows": {
   "body": null,
@@ -684,7 +695,9 @@
  },
  "GET /api/projects/{project_id}/export/datasets-excel": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "GET /api/projects/{project_id}/export/excel": {
   "body": null,
@@ -734,16 +747,21 @@
  },
  "GET /api/projects/{project_id}/metrics": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "GET /api/projects/{project_id}/metrics/analysis-columns": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "GET /api/projects/{project_id}/metrics/correlation-matrix/csv": {
   "body": null,
   "query": [
    "bonferroni",
+   "coder_ids",
    "column_ids",
    "correlation_type",
    "domain_ids"
@@ -752,6 +770,7 @@
  "GET /api/projects/{project_id}/metrics/group-comparison/csv": {
   "body": null,
   "query": [
+   "coder_ids",
    "column_ids",
    "domain_ids",
    "exclude_groups",
@@ -764,18 +783,21 @@
  "GET /api/projects/{project_id}/metrics/row-matrix": {
   "body": null,
   "query": [
+   "coder_ids",
    "metric_ids"
   ]
  },
  "GET /api/projects/{project_id}/metrics/row-matrix/csv": {
   "body": null,
   "query": [
+   "coder_ids",
    "metric_ids"
   ]
  },
  "GET /api/projects/{project_id}/metrics/scatter-data/csv": {
   "body": null,
   "query": [
+   "coder_ids",
    "column_ids",
    "domain_ids",
    "group_column_id",
@@ -784,11 +806,15 @@
  },
  "GET /api/projects/{project_id}/metrics/{metric_id}": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "GET /api/projects/{project_id}/metrics/{metric_id}/results": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "GET /api/projects/{project_id}/notes/{note_id}": {
   "body": null,
@@ -820,7 +846,9 @@
  },
  "GET /api/projects/{project_id}/participants/{participant_id}": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "GET /api/projects/{project_id}/participants/{participant_id}/withdrawal-report": {
   "body": null,
@@ -864,11 +892,15 @@
  },
  "GET /api/projects/{project_id}/statistical-tests/": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "GET /api/projects/{project_id}/statistical-tests/{test_id}": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "GET /api/projects/{project_id}/storage": {
   "body": null,
@@ -884,7 +916,8 @@
    "coder_ids",
    "column_ids",
    "group_by_column_id",
-   "layer_scope"
+   "layer_scope",
+   "ratings_follow_coder_ids"
   ]
  },
  "GET /api/projects/{project_id}/text-analysis/export": {
@@ -893,7 +926,8 @@
    "coder_ids",
    "column_ids",
    "filters_json",
-   "layer_scope"
+   "layer_scope",
+   "ratings_follow_coder_ids"
   ]
  },
  "GET /api/projects/{project_id}/text-analysis/response-length-by-code": {
@@ -1239,7 +1273,9 @@
    "name",
    "sequence_order"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "PATCH /api/projects/{project_id}/notes/{note_id}": {
   "body": [
@@ -1297,7 +1333,9 @@
   "body": [
    "config"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "PATCH /api/projects/{project_id}/text-coding/code/magnitude": {
   "body": [
@@ -1492,7 +1530,9 @@
  },
  "POST /api/projects/{project_id}/analysis-domains/{domain_id}/create-score-metric": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/analysis-domains/{domain_id}/members": {
   "body": [
@@ -1530,7 +1570,8 @@
  "POST /api/projects/{project_id}/canvases/{canvas_id}/export-docx": {
   "body": [
    "chart_images",
-   "chart_tables"
+   "chart_tables",
+   "display_tables"
   ],
   "query": []
  },
@@ -1572,6 +1613,25 @@
    "name",
    "parent_theme_id",
    "section_type",
+   "viz_x",
+   "viz_y"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/canvases/{canvas_id}/themes/restore": {
+  "body": [
+   "child_ids",
+   "color",
+   "content",
+   "deleted_audit_id",
+   "description",
+   "doc_order",
+   "id",
+   "name",
+   "parent_theme_id",
+   "relationships",
+   "section_type",
+   "table_column_order",
    "viz_x",
    "viz_y"
   ],
@@ -1627,10 +1687,13 @@
    "conversation_ids",
    "document_ids",
    "exclude_facilitator",
+   "group_by_column_id",
    "group_by_subtype",
    "layer_scope",
    "observation_ids",
    "participant_ids",
+   "ratings_follow_coder_ids",
+   "ratings_viewer_id",
    "text_column_ids"
   ],
   "query": []
@@ -1657,6 +1720,8 @@
    "layer_scope",
    "observation_ids",
    "participant_ids",
+   "ratings_follow_coder_ids",
+   "ratings_viewer_id",
    "text_column_ids"
   ],
   "query": []
@@ -1783,7 +1848,9 @@
    "include_empty_as_missing",
    "include_na_as_missing"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/data-quality/patterns": {
   "body": [
@@ -1792,7 +1859,9 @@
    "include_na_as_missing",
    "max_patterns"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/data-quality/summary": {
   "body": [
@@ -1800,7 +1869,9 @@
    "include_empty_as_missing",
    "include_na_as_missing"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/datasets": {
   "body": [
@@ -1860,7 +1931,9 @@
    "column_type",
    "expression"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/datasets/{dataset_id}/columns/manual": {
   "body": [
@@ -2071,8 +2144,71 @@
   ],
   "query": []
  },
+ "POST /api/projects/{project_id}/excerpts/whole-passage": {
+  "body": [
+   "dataset_value_id",
+   "segment_id"
+  ],
+  "query": []
+ },
  "POST /api/projects/{project_id}/import-codebook": {
   "body": null,
+  "query": []
+ },
+ "POST /api/projects/{project_id}/joint-display/cases": {
+  "body": [
+   "added_participant_ids",
+   "bindings",
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "group_by_column_id",
+   "layer_scope",
+   "limit",
+   "offset",
+   "only",
+   "removed_participant_ids",
+   "row_key",
+   "rule",
+   "strands"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/joint-display/compute": {
+  "body": [
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "group_by_column_id",
+   "layer_scope",
+   "newcombe",
+   "rows",
+   "strands"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/joint-display/passages": {
+  "body": [
+   "chips_follow_coder_ids",
+   "code_id",
+   "coder_ids",
+   "conversation_ids",
+   "document_ids",
+   "group",
+   "group_by_column_id",
+   "layer_scope",
+   "limit",
+   "offset",
+   "text_column_ids"
+  ],
+  "query": []
+ },
+ "POST /api/projects/{project_id}/joint-display/pin-facts": {
+  "body": [
+   "coder_ids",
+   "column_id",
+   "excerpt_ids"
+  ],
   "query": []
  },
  "POST /api/projects/{project_id}/material-collections": {
@@ -2141,7 +2277,9 @@
    "correlation_type",
    "domain_ids"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/metrics/cross-tabulation": {
   "body": [
@@ -2149,7 +2287,9 @@
    "include_chi_square",
    "row_column_id"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/metrics/group-comparison": {
   "body": [
@@ -2163,7 +2303,9 @@
    "nonparametric",
    "test_type"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/metrics/quick-compute": {
   "body": [
@@ -2176,7 +2318,9 @@
    "metric_type",
    "sources"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/metrics/reorder": {
   "body": [
@@ -2191,7 +2335,9 @@
    "x_id",
    "y_id"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/metrics/scatter-matrix": {
   "body": [
@@ -2201,7 +2347,9 @@
    "id_type",
    "max_variables"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/metrics/validate-config": {
   "body": [
@@ -2214,7 +2362,9 @@
  },
  "POST /api/projects/{project_id}/metrics/{metric_id}/compute": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/observations": {
   "body": [
@@ -2333,7 +2483,9 @@
    "target_type",
    "test_type"
   ],
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/statistical-tests/compute-all": {
   "body": [
@@ -2343,7 +2495,9 @@
  },
  "POST /api/projects/{project_id}/statistical-tests/{test_id}/compute": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "POST /api/projects/{project_id}/text-analysis/cross-tabulation": {
   "body": [
@@ -2351,6 +2505,7 @@
    "coder_ids",
    "cross_column_id",
    "layer_scope",
+   "ratings_follow_coder_ids",
    "text_column_ids"
   ],
   "query": []
@@ -2361,7 +2516,8 @@
    "column_ids",
    "filters",
    "include_overall",
-   "layer_scope"
+   "layer_scope",
+   "ratings_follow_coder_ids"
   ],
   "query": []
  },

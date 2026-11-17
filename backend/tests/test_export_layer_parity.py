@@ -295,9 +295,9 @@ def test_every_cooccurrence_reader_counts_a_pair_by_one_coder_and_says_so(
 
 # ── #732 — the group-comparison CSV vs the two screens that show the same test ──
 #
-# The strip (`ComparisonTestStrip.tsx:34`) and the comparison table
-# (`GroupComparisonTable.tsx:357`) both display OMEGA-squared for a one-way
-# ANOVA. The CSV wrote `test['effect_size']`, which is ETA-squared, under a
+# The strip (`ComparisonTestStrip.tsx`) and the comparison table
+# (`GroupComparisonTable.tsx`) both display OMEGA-squared for a one-way ANOVA —
+# since #1424 through one resolver, `lib/group-comparison-display.ts::displayedEffect`. The CSV wrote `test['effect_size']`, which is ETA-squared, under a
 # header that said `eta_sq`. Nothing was mislabelled and nothing was wrong —
 # which is why it survived: a researcher who quotes the screen and attaches the
 # file simply has two different effect sizes for one test in one deliverable.

@@ -61,6 +61,11 @@ from .helpers import (
     visible_segment_filter,
 )
 from ..services.timestamp import format_timecode
+from ..services.participant_scores import (  # #1608
+    RATING_COLUMNS_WITHHELD_NOTE,
+    withheld_rating_column_ids,
+)
+from ..services.rating_withholding import rating_withholding  # #1615
 from ..services.xml_text import xml_safe_text
 from .excerpts import _base_excerpt_query, _excerpt_to_response
 from .export_helpers import (
@@ -918,10 +923,20 @@ def export_study_excel(
 def export_datasets_excel(
     project_id: int,
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    # #1608 — bare default, LAST; the Export dialog sends it while blind.
+    coder_ids: str | None = None,
 ):
-    """Export all datasets as Excel with one sheet per dataset plus a Data Dictionary."""
+    """Export all datasets as Excel with one sheet per dataset plus a Data Dictionary.
+
+    🔴 #1608: scoped by ``coder_ids`` (while blind), the participant table's rating
+    columns are left out of its sheet and the dictionary, the dictionary's last row
+    says so, and the file's NAME ends ``_coder-<name>``. Every other column is data,
+    not coding, and is unchanged."""
     project = _get_project_or_404(db, project_id, user.id)
+    scope = parse_int_list(coder_ids)
+    any_withheld = False
+    withheld_all: set[int] = set()  # #1615
 
     # Get all datasets for this project
     datasets = db.query(Dataset).filter(
@@ -965,8 +980,11 @@ def export_datasets_excel(
         worksheets.append(ws)
 
         # Load columns (skip SKIP type), ordered by sequence_order
+        withheld = withheld_rating_column_ids(db, dataset, scope)  # #1608
+        any_withheld = any_withheld or bool(withheld)
+        withheld_all |= withheld  # #1615 — the metrics below read these too
         columns = [col for col in dataset.columns
-                   if col.column_type != ColumnType.SKIP]
+                   if col.column_type != ColumnType.SKIP and col.id not in withheld]
 
         # #592: per-column missing rules for on-the-fly recode computation
         # (parsed once, not per cell). #1048: the EFFECTIVE rules — a
@@ -1182,6 +1200,35 @@ def export_datasets_excel(
         excel_set_safe(ws_dict.cell(row=row_idx, column=8), row_data["recode_name"])
         ws_dict.cell(row=row_idx, column=9, value=row_data["recode_type"])
         excel_set_safe(ws_dict.cell(row=row_idx, column=10), row_data["mapping"])
+    # #1615 — a saved metric over a withheld column (its input, a variable group holding
+    # one, or a column that decides its groups) was computed over every coder's ratings,
+    # and its sheets print the numbers; while blind it is left out with them, and
+    # counted. Judged by the analysis doors' ONE rule (`rating_withholding.metric`).
+    metrics_withheld: set[int] = set()
+    if withheld_all:
+        withholding = rating_withholding(db, project_id, scope)
+        for m in (
+            db.query(MetricDefinition)
+            .filter(MetricDefinition.project_id == project_id,
+                    MetricDefinition.results.any())
+            .all()
+        ):
+            if withholding.metric(db, m):
+                metrics_withheld.add(m.id)
+    if any_withheld:
+        # #1608 — the last row says what the sheets do not hold, and for whom.
+        metrics_clause = ""
+        if metrics_withheld:
+            n = len(metrics_withheld)
+            metrics_clause = (
+                " 1 computed metric that uses them is left out too." if n == 1 else
+                f" {n} computed metrics that use them are left out too."
+            )
+        excel_set_safe(
+            ws_dict.cell(row=len(dict_rows) + 2, column=1),
+            f"{RATING_COLUMNS_WITHHELD_NOTE}{metrics_clause} This file holds "
+            f"{', '.join(coder_scope_names(db, scope))}'s view.",
+        )
 
     # ==================== Computed Metrics Sheets ====================
 
@@ -1210,7 +1257,8 @@ def export_datasets_excel(
         .all()
     )
 
-    metrics_with_results = [m for m in all_metrics if len(m.results) > 0]
+    metrics_with_results = [m for m in all_metrics
+                            if len(m.results) > 0 and m.id not in metrics_withheld]  # #1615
 
     if metrics_with_results:
         # Batch resolve labels
@@ -1623,7 +1671,8 @@ def export_datasets_excel(
     wb.save(output)
     output.seek(0)
 
-    filename = f"{sanitize_content_disposition(project.name)}_datasets_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    suffix = coder_scope_filename_suffix(db, scope) if any_withheld else ""  # #1608
+    filename = f"{sanitize_content_disposition(project.name)}_datasets_{datetime.now().strftime('%Y%m%d')}{suffix}.xlsx"
 
     return StreamingResponse(
         output,

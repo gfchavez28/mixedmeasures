@@ -14,8 +14,10 @@ import {
   CURRENT_FIGURE_EPOCH,
   fingerprintComparison,
   fingerprintCooccurrence,
+  fingerprintJointDisplayRow,
   fingerprintMetrics,
   fingerprintQualComparison,
+  fingerprintSaturation,
   fingerprintSourceFrequencies,
   figureDrift,
   figurePredatesBaseline,
@@ -226,6 +228,10 @@ describe('an embed placed before its kind had a fingerprint speaks (#1323 D12)',
       fingerprintSourceFrequencies: fingerprintSourceFrequencies({ sources: [], totals: null }, { codedShare: false }).epoch,
       fingerprintQualComparison: qualFigure.epoch,
       fingerprintCooccurrence: fingerprintCooccurrence(cooccurrence()).epoch,
+      // #1544: generation 3 (`figure-baseline.saturation-1544.test.ts`).
+      fingerprintSaturation: fingerprintSaturation({ points: [], total_unique_codes: 0, total_sources: 0, category_level: false }).epoch,
+      // Joint display session B: the first generation — no display predates its fingerprint.
+      fingerprintJointDisplayRow: fingerprintJointDisplayRow({}).epoch,
     }
     const exported = Object.keys(baseline).filter(k => k.startsWith('fingerprint')).sort()
     expect(exported).toEqual(Object.keys(epochs).sort())

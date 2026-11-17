@@ -21,6 +21,9 @@ class FilteredFrequenciesRequest(BaseModel):
     coder_ids: list[int] | None = None
     # Track J · J2 slab 3b — coder layer: None/'human' (default) or 'consensus'
     layer_scope: str | None = None
+    # #1615 — sent ONLY while blind mode withholds (D102's shape, D273): `coder_ids` is then
+    # the blind scope, and a filter on a variable worked out from participant scores is refused.
+    ratings_follow_coder_ids: bool = False
 
 
 class CrossTabulationRequest(BaseModel):
@@ -31,6 +34,8 @@ class CrossTabulationRequest(BaseModel):
     coder_ids: list[int] | None = None
     # Track J · J2 slab 3b — coder layer: None/'human' (default) or 'consensus'
     layer_scope: str | None = None
+    # #1615 — as `FilteredFrequenciesRequest`'s: a cross-tab by a rating-derived column is refused.
+    ratings_follow_coder_ids: bool = False
 
 
 # ── Response schemas ─────────────────────────────────────────────────────────

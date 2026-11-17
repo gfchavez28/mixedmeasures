@@ -88,12 +88,21 @@ would be one more copy of the data a researcher is trying to remove, stored in
 one more place.
 """
 
+import json
+import unicodedata
 from dataclasses import dataclass, asdict, field
+from pathlib import Path
+from typing import Literal
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from ..config import get_backup_dir, get_settings
+from ..database import is_pre_migration_copy_of
+from ..models.audit import AuditEntry
 from ..models.participant import Participant
+from ..models.project import Project
+from ..routers.helpers import apply_project_owner_filter
 from ..models.speaker import Speaker
 from ..models.segment import Segment
 from ..models.conversation import Conversation
@@ -104,8 +113,9 @@ from ..models.excerpt import Excerpt
 from ..models.note import Note
 from ..models.memo import Memo
 from ..models.row_score import RowScore
-from .identifier_match import normalize_key
+from .canvas_embed_scrub import ACT_REPORT, UnplacedCanvasQuotes, count_misfit_cases
 from .participant_dataset import MANAGED_COLUMN_SOURCE
+from .tombstones import identifier_key
 
 
 @dataclass
@@ -173,6 +183,44 @@ class DocumentTouchpoint:
     notes: int = 0
 
 
+#: How a project is linked to this one by a Duplicate (#1606, D234): ``"copy"`` — it was
+#: duplicated FROM this project; ``"source"`` — this project was duplicated from IT.
+CopyRelation = Literal["copy", "source"]
+
+
+@dataclass
+class OtherProject:
+    """#1606 (D234) — another project on this install holding a participant with the
+    same ID. ``copy_relation`` from the ``project_duplicate`` audit entries, in either
+    direction (D234's ``is_copy``, given its direction: the project a copy was made
+    FROM must not read "a copy of this project"); None when no Duplicate links them."""
+
+    project_id: int
+    name: str
+    copy_relation: CopyRelation | None = None
+
+
+@dataclass
+class OtherProjectsWithIdentifier:
+    """#1606 (D234). ``projects`` — copies first, then by name — is capped at
+    `OTHER_PROJECTS_CAP`; ``total`` counts every one."""
+
+    projects: list[OtherProject] = field(default_factory=list)
+    total: int = 0
+
+
+@dataclass
+class PreUpdateCopies:
+    """#1606 (D235) — the copies of the whole database taken before each update
+    (`database._backup_database`), which Settings does not list. A fact of the
+    install, not of the participant: carried here because the report is where the
+    researcher reads where their data still is. ``count`` is None when the folder
+    could not be read — never 0, which would say there are none."""
+
+    count: int | None = 0
+    folder: str = ""
+
+
 @dataclass
 class WithdrawalReport:
     participant_id: int
@@ -191,6 +239,22 @@ class WithdrawalReport:
     # so counted beside the report and NOT in `total_items` (the withdrawal does not
     # touch them). See `_unlinked_records_with_identifier`.
     unlinked_records_with_identifier: int = 0
+    # #1546 D158 — canvas quotes whose source is gone, so the withdrawal cannot tell
+    # whose words they hold and LEAVES them: counted with the sections and snapshots
+    # holding them, beside the report and NOT in `total_items`, as D14's are.
+    canvas_quotes_unplaced: UnplacedCanvasQuotes = field(default_factory=UnplacedCanvasQuotes)
+    # Joint display slice 2 (r3-6) — cases picked as "not fitting" in a joint display that
+    # name them, each with the researcher's reason: the withdrawal REMOVES them (sections
+    # and snapshot copies), so the confirm says how many. Beside `total_items`, as the
+    # canvas quotes are (the withdrawal's data items stay the count they were).
+    canvas_misfit_cases: int = 0
+    # #1606 D234 — other projects here holding someone with this ID (a Duplicate made
+    # before the withdrawal keeps everything). Possibly the same person, never provably:
+    # beside the report, NOT in `total_items` — the withdrawal does not reach them.
+    other_projects_with_identifier: OtherProjectsWithIdentifier = field(
+        default_factory=OtherProjectsWithIdentifier)
+    # #1606 D235 — the install's pre-update database copies, which hold everything.
+    pre_update_copies: PreUpdateCopies = field(default_factory=PreUpdateCopies)
 
     @property
     def total_items(self) -> int:
@@ -225,19 +289,25 @@ def _unlinked_records_with_identifier(db: Session, participant: Participant) -> 
     the researcher picks at that moment (`link-by-column`'s `column_id`; the append
     offer and the import's `participant_link_column_index` likewise) and keeps no
     record of it. So this counts what ANY identifier-typed column could link: a
-    record whose cell in a column of type `identifier` matches under linking's own
-    rule (`identifier_match.normalize_key`, trim-then-exact, case-sensitive). The
-    record number (`row_identifier`, "R0001") is not an identifier of a person and is
-    not read. A record with two such cells is counted once.
+    record whose cell in a column of type `identifier` is the same ID under the
+    withdrawal record's rule (`tombstones.identifier_key`: trimmed, any canonically
+    equivalent Unicode form, capitals kept — #1605, D227). The record number
+    (`row_identifier`, "R0001") is not an identifier of a person and is not read. A
+    record with two such cells is counted once.
 
     A count, never which records, and nothing is deleted: a matching cell is evidence,
     not proof (a code can be reused across studies), which is why D14 reports it.
+    ⚠️ A cell holding the ID in a MIXED form (one accent composed, another decomposed)
+    contains neither the composed nor the decomposed key, so `instr` passes it by: a
+    stated residual of a count that is already only "may be theirs".
     """
-    key = normalize_key(participant.identifier)
+    key = identifier_key(participant.identifier)
     if not key:
         return 0
-    # SQLite's trim() trims spaces only; `instr` narrows to candidate cells in SQL and
-    # Python applies the one normalisation, so the two can never disagree.
+    forms = sorted({key, unicodedata.normalize("NFD", key)})
+    # SQLite's trim() trims spaces only; `instr` narrows to candidate cells in SQL (in
+    # the ID's composed and decomposed forms) and Python applies the one rule, so the
+    # two can never disagree.
     candidates = (
         db.query(DatasetRow.id, DatasetValue.value_text)
         .join(DatasetValue, DatasetValue.row_id == DatasetRow.id)
@@ -247,10 +317,127 @@ def _unlinked_records_with_identifier(db: Session, participant: Participant) -> 
             Dataset.project_id == participant.project_id,
             DatasetColumn.column_type == ColumnType.IDENTIFIER,
             DatasetRow.participant_id.is_(None),
-            func.instr(DatasetValue.value_text, key) > 0,
+            or_(*(func.instr(DatasetValue.value_text, f) > 0 for f in forms)),
         )
     )
-    return len({row_id for row_id, text in candidates if normalize_key(text) == key})
+    return len({row_id for row_id, text in candidates if identifier_key(text) == key})
+
+
+#: #1606 (D234) — how many other projects are named; `total` says how many there are.
+OTHER_PROJECTS_CAP = 20
+
+
+def _duplicate_links(db: Session, project_id: int) -> dict[int, CopyRelation]:
+    """#1606 (D234) — the projects a Duplicate links to this one, from the
+    ``project_duplicate`` entry every Duplicate writes in the COPY's trail
+    (``details.source_project_id``, `routers/project_portability.py`).
+
+    Both directions: copies' entries name this project, and this project's own entry
+    names what it was copied from — so a withdrawal made in the copy finds the
+    original too. ⚠️ Only a Duplicate leaves a link: an "Import as an independent
+    project" records the file's name, and a copy of a copy is linked to its own
+    source only. ⚠️ The entry keeps an id, which goes stale when the original is
+    later replaced by an overwrite import; the flag is a hint beside a list that
+    already says "check whether it is the same person".
+    """
+    links: dict[int, CopyRelation] = {}
+    entries = (
+        db.query(AuditEntry.project_id, AuditEntry.details)
+        .filter(AuditEntry.action == "project_duplicate")
+        .all()
+    )
+    for copy_id, details in entries:
+        try:
+            source_id = json.loads(details or "{}").get("source_project_id")
+        except (ValueError, AttributeError):
+            continue  # an entry this reader cannot parse links nothing
+        if not isinstance(source_id, int) or copy_id is None:
+            continue
+        if source_id == project_id and copy_id != project_id:
+            links[copy_id] = "copy"
+        elif copy_id == project_id and source_id != project_id:
+            links.setdefault(source_id, "source")
+    return links
+
+
+def other_projects_with_identifier(
+    db: Session, project_id: int, identifier: str | None,
+) -> OtherProjectsWithIdentifier:
+    """#1606 (D234) — the OTHER projects on this install holding a participant whose ID
+    is this one under the withdrawal record's rule (`tombstones.identifier_key`:
+    trimmed, any canonically equivalent Unicode form, capitals kept — D227).
+
+    A project duplicated from this one before the withdrawal keeps everything about the
+    person, and nothing stops it being copied on (its own record is empty). So the
+    report names it, and the projects that merely share the ID too: a short code
+    (``P01``) can be another study's person, which is why the copy says "check
+    whether it is the same person". Visible projects only — the ownership gate's own
+    predicate, `apply_project_owner_filter`, with this project's owner (the caller
+    passed `_get_project_or_404` for it). Names only, never what they hold.
+
+    ⚠️ Misses, stated: a copy whose participant was renamed, a copy exported and sent
+    away, another install — and, as D14's count, an ID held in a MIXED Unicode form.
+    """
+    key = identifier_key(identifier)
+    if not key:
+        return OtherProjectsWithIdentifier()
+    owner_id = db.query(Project.user_id).filter(Project.id == project_id).scalar()
+    forms = sorted({key, unicodedata.normalize("NFD", key)})
+    # `instr` narrows in SQL (case-sensitive, as the rule is) and Python applies the one
+    # rule, as `_unlinked_records_with_identifier` does.
+    candidates = apply_project_owner_filter(
+        db.query(Project.id, Project.name, Participant.identifier)
+        .join(Participant, Participant.project_id == Project.id)
+        .filter(
+            Project.id != project_id,
+            or_(*(func.instr(Participant.identifier, f) > 0 for f in forms)),
+        ),
+        owner_id,
+    )
+    holding = {pid: name for pid, name, ident in candidates if identifier_key(ident) == key}
+    if not holding:
+        return OtherProjectsWithIdentifier()
+    links = _duplicate_links(db, project_id)
+    projects = sorted(
+        (OtherProject(project_id=pid, name=name, copy_relation=links.get(pid))
+         for pid, name in holding.items()),
+        key=lambda p: (p.copy_relation is None, p.name.casefold(), p.project_id),
+    )
+    return OtherProjectsWithIdentifier(
+        projects=projects[:OTHER_PROJECTS_CAP], total=len(projects))
+
+
+def pre_update_copies() -> PreUpdateCopies:
+    """#1606 (D235) — how many copies of THIS database the updates left, and where.
+
+    `database._backup_database` writes one before every update that changes the
+    database, five kept; Settings lists none of them, so the withdrawal's own wording
+    could not point at them. The folder is `get_backup_dir()`'s, made absolute for
+    display — never composed. ⚠️ It can contain the computer's user name: it is shown
+    in the app and returned to the page, and never stored (the withdrawal's audit
+    entry does not carry it — it travels in every export).
+    """
+    folder = get_backup_dir()
+    shown = str(folder.absolute())
+    stem = Path(get_settings().mm_database_path).stem
+    try:
+        if not folder.is_dir():
+            return PreUpdateCopies(count=0, folder=shown)
+        count = sum(1 for p in folder.iterdir() if is_pre_migration_copy_of(p.name, stem))
+    except OSError:
+        # Unknown is said as unknown: 0 would tell the researcher there are none.
+        return PreUpdateCopies(count=None, folder=shown)
+    return PreUpdateCopies(count=count, folder=shown)
+
+
+def copies_elsewhere(db: Session, project_id: int, identifier: str | None) -> dict:
+    """#1606 — the two wire fields as the withdraw endpoint returns them beside its
+    outcome, read BEFORE it changes anything. The report carries the same two."""
+    return {
+        "other_projects_with_identifier": asdict(
+            other_projects_with_identifier(db, project_id, identifier)),
+        "pre_update_copies": asdict(pre_update_copies()),
+    }
 
 
 def _count(db: Session, model, column, ids: list[int]) -> int:
@@ -416,12 +603,17 @@ def reached_turns(db: Session, speaker_ids: list[int]) -> ReachedTurns:
 
 
 def build_withdrawal_report(
-    db: Session, participant: Participant,
+    db: Session, participant: Participant, *, act: str = ACT_REPORT,
 ) -> WithdrawalReport:
     """Everything in this project that traces back to `participant`.
 
     Counts only — see the module docstring for what is deliberately excluded and
     why the segment count is unfiltered.
+
+    Raises `canvas_embed_scrub.CanvasScrubError` on a canvas copy it cannot read, naming the
+    copy in ``act``'s words (#1667, D341): the report's own (`ACT_REPORT`, read by both
+    Participants-page confirms and the panel), or `ACT_WITHDRAWAL` when `apply_withdrawal`
+    builds it as its first step — the act's refusal keeps the act's words.
     """
     # ── The conversation side, via Speaker ────────────────────────────────
     #
@@ -475,6 +667,8 @@ def build_withdrawal_report(
     rows_by_dataset: dict[int, list[int]] = {}
     for r in rows:
         rows_by_dataset.setdefault(r.dataset_id, []).append(r.id)
+    # Every answer of theirs — what an answer's orphan on a canvas is matched against.
+    answer_ids: list[int] = []
 
     for ds_id, row_ids in rows_by_dataset.items():
         ds = db.query(Dataset).filter(Dataset.id == ds_id).first()
@@ -485,6 +679,7 @@ def build_withdrawal_report(
             v[0] for v in
             db.query(DatasetValue.id).filter(DatasetValue.row_id.in_(row_ids)).all()
         ]
+        answer_ids += value_ids
         # #896 — split the cells by who wrote them. `source == "managed"` is
         # the tool's own; everything else is the researcher's data, which is
         # what "responses" has always meant on an ordinary dataset (where the
@@ -548,6 +743,14 @@ def build_withdrawal_report(
         tp.notes = _count(db, Note, Note.segment_id, seg_ids)
         documents.append(tp)
 
+    # ── The canvas quotes the withdrawal cannot place (#1546 D158) ────────
+    #
+    # An embed names no speaker, so one whose source is gone cannot be tied to
+    # anyone, and the withdrawal leaves it. Asked of the withdrawal's OWN predicate,
+    # against the answer wordings it will match with, so the count here is the one
+    # the act leaves. ⚠️ Imported here: `withdrawal_redaction` imports this module.
+    from .withdrawal_redaction import canvas_quotes_unplaced
+
     return WithdrawalReport(
         participant_id=participant.id,
         identifier=participant.identifier,
@@ -559,4 +762,11 @@ def build_withdrawal_report(
         datasets=sorted(datasets.values(), key=lambda d: d.dataset_id),
         documents=sorted(documents, key=lambda d: d.document_id),
         unlinked_records_with_identifier=_unlinked_records_with_identifier(db, participant),
+        canvas_quotes_unplaced=canvas_quotes_unplaced(
+            db, participant.project_id, answer_ids, act=act),
+        canvas_misfit_cases=count_misfit_cases(
+            db, participant.project_id, participant.id, act=act),
+        other_projects_with_identifier=other_projects_with_identifier(
+            db, participant.project_id, participant.identifier),
+        pre_update_copies=pre_update_copies(),
     )

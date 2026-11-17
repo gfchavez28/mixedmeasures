@@ -45,6 +45,12 @@ rides the refresh report, which is where a researcher can act on it.
 `Dataset.managed_stale` is a positive signal only — see the model comment and the
 migration for the eight input classes that move a score, of which a rating write
 is one. **Nothing here ever claims a score is up to date.**
+
+## …and the snapshot also records WHOSE ratings it holds (#1617 / #1623, D222)
+
+`Dataset.managed_rater_ids` — when, whether, whose. It is what a blind reader is
+kept from the table by (`withheld_rating_column_ids`), and it is written by the
+refresh, never on the wire.
 """
 from __future__ import annotations
 
@@ -56,13 +62,17 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterator
 
-from sqlalchemy import bindparam, delete, insert, select, update
+from sqlalchemy import bindparam, delete, exists, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..auth import reliability_coder_clause
 from ..models.code import Code
+from ..models.code_application import CodeApplication
 from ..models.dataset import ColumnType, Dataset, DatasetColumn, DatasetRow, DatasetValue
+from ..models.user import User
 from . import magnitude
+from .coding_layers import non_consensus_filter
 from .column_cleanup import delete_column_references
 from .magnitude_rollup import (
     MAGNITUDE_ROLLUP_BASIS_MEAN_OF_TARGET_RATINGS,
@@ -211,6 +221,180 @@ def parse_managed_spec(raw: str | None) -> dict | None:
     if not isinstance(spec.get("code_id"), int):
         return None
     return spec
+
+
+# ── #1608: a blind reader and the shared snapshot ────────────────────────────
+#
+# The score columns are ONE shared snapshot of every coder's ratings (the refresh
+# passes `coder_ids=None`), so they cannot follow a viewer. A door a blind coder
+# reads asks `withheld_rating_column_ids` with the viewer's scope and leaves those
+# columns out, saying so. Same test as the R export's agreement files (#1530 D98):
+# a scope that holds every coder whose ratings the table can carry keeps them.
+#
+# 🔴 "Whose ratings the table can carry" is a fact about the SNAPSHOT, so it is
+# asked of the snapshot (#1623, D222): the refresh records the raters its rollup
+# read (`Dataset.managed_rater_ids`). Asking who rates NOW missed a colleague whose
+# every rating went after the refresh — the cells still held it, and a blind reader
+# could read it back out of the score. The live rule (`score_rater_ids`) answers
+# only for a table with no record (D223: an older build's refresh, an import).
+#
+# #1615: the same columns are withheld from everything COMPUTED over them — a chart,
+# a test, a correlation, a group or filter made from a score band, a joint display's
+# survey row or a quote's attribution, the Variables view's values, a computed
+# preview, the files' metric sheets. Those doors ask the project-level door below
+# (`withheld_rating_columns_in_project`), mostly through
+# `services/rating_withholding.py`, never a test of their own.
+
+#: The files' line where the rating columns were left out (the workbook's note
+#: row, `setup.R`'s comment). The Data view and the Participants page say it in
+#: their own words (`frontend/src/lib/blind-rating-columns.ts`).
+RATING_COLUMNS_WITHHELD_NOTE = (
+    "Rating scores are left out while blind: each combines every coder's "
+    "ratings, so it would show your colleagues' judgements."
+)
+
+
+def score_rater_ids(db: Session, project_id: int) -> set[int]:
+    """The LIVE rule: every coder who holds a rating in this project NOW.
+
+    The answer for a participant table with no recorded raters (D223 — refreshed by
+    an older build, or imported). It is NOT "every coder whose ratings a score can
+    hold": the cells are a snapshot, and a colleague whose every rating went after
+    the refresh is not here while the cells still hold them (#1623) — which is why
+    the refresh records its own set (`snapshot_rater_ids`).
+
+    Human coders (`auth.reliability_coder_clause` — the rollup's voters; a machine
+    never votes) holding at least one rating on a non-consensus application here.
+    🔴 ARCHIVED coders are counted, on purpose: the rollup leaves them out today,
+    but a snapshot refreshed before the archive still holds their ratings (fail
+    closed — the #1541 class). Asked per coder, `coded_in_project_clause`'s shape
+    (#1463 D59): the roster is coders, never respondents. Each coder's question is
+    a seek on `ix_code_applications_rated` (#1617, D224) — without it SQLite walked
+    the coder's every application of each code until a rated one, 25.7–27.6 s on an
+    encrypted 4.9M-coding project.
+    """
+    rows = db.query(User.id).filter(
+        reliability_coder_clause(),
+        exists()
+        .where(
+            CodeApplication.user_id == User.id,
+            CodeApplication.code_id == Code.id,
+            Code.project_id == project_id,
+            CodeApplication.magnitude.isnot(None),
+            non_consensus_filter(),
+        )
+        .correlate(User),
+    )
+    return {uid for (uid,) in rows}
+
+
+def parse_managed_rater_ids(raw: str | None) -> frozenset[int] | None:
+    """The coders a participant table's snapshot records, or None for NO record.
+
+    Tolerant on the way out, like `parse_managed_spec`: a value that is not JSON,
+    not a list, or holds anything but integer ids (a bool is not one) reads as NO
+    record — so the live rule answers, rather than a 500 on every dataset request.
+    🔴 ``[]`` is a record (nobody's ratings are in the cells) and stays distinct from
+    None: test the result with ``is None``, never truthiness.
+    """
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(value, list) or not all(
+        isinstance(v, int) and not isinstance(v, bool) for v in value
+    ):
+        return None
+    return frozenset(value)
+
+
+def _rater_ids_text(rater_ids) -> str:
+    """`Dataset.managed_rater_ids`' stored form: a sorted JSON list."""
+    return json.dumps(sorted(rater_ids))
+
+
+def snapshot_rater_ids(db: Session, dataset: Dataset) -> set[int]:
+    """Whose ratings this participant table's cells can hold (D222 / D223).
+
+    The refresh's record when the table has one — no query at all — else the live
+    rule (`score_rater_ids`), until the first refresh by this build.
+    """
+    recorded = parse_managed_rater_ids(dataset.managed_rater_ids)
+    if recorded is not None:
+        return set(recorded)
+    return score_rater_ids(db, dataset.project_id)
+
+
+def withheld_rating_column_ids(
+    db: Session, dataset: Dataset | None, coder_ids,
+) -> frozenset[int]:
+    """The columns of ``dataset`` a reader scoped to ``coder_ids`` must not see.
+
+    Empty unless all three hold: the dataset is the participant table, a scope was
+    asked (None or empty = every coder, the convention of every ``coder_ids``), and
+    some coder whose ratings the table's snapshot holds (`snapshot_rater_ids`) is
+    outside it. Then: both managed kinds (the score AND its rated-passage count — the
+    count says how many passages colleagues rated), plus every column computed from
+    or derived from one, to any depth (a band of a score is a score).
+
+    ⚠️ A rating added AFTER the refresh is in no cell, so a recorded table does not
+    withhold for it — exact, where the live rule over-withheld.
+
+    For ONE dataset (the doors that show the table). A door whose column ids can span
+    datasets asks `withheld_rating_columns_in_project` — this rule over the project's
+    one participant table (#1615).
+    """
+    if dataset is None or dataset.managed_kind != MANAGED_KIND_PARTICIPANTS or not coder_ids:
+        return frozenset()
+    columns = (
+        db.query(
+            DatasetColumn.id, DatasetColumn.managed_spec,
+            DatasetColumn.depends_on_column_ids, DatasetColumn.derived_from_column_id,
+        )
+        .filter(DatasetColumn.dataset_id == dataset.id)
+        .all()
+    )
+    withheld = {cid for cid, spec, _, _ in columns if parse_managed_spec(spec)}
+    if not withheld or snapshot_rater_ids(db, dataset) <= set(coder_ids):
+        return frozenset()
+
+    def _sources(deps_json, derived_from) -> set[int]:
+        try:
+            deps = json.loads(deps_json) if deps_json else []
+        except (ValueError, TypeError):
+            deps = []
+        out = {d for d in deps if isinstance(d, int)} if isinstance(deps, list) else set()
+        if derived_from is not None:
+            out.add(derived_from)
+        return out
+
+    grew = True
+    while grew:
+        grew = False
+        for cid, _, deps_json, derived_from in columns:
+            if cid not in withheld and _sources(deps_json, derived_from) & withheld:
+                withheld.add(cid)
+                grew = True
+    return frozenset(withheld)
+
+
+def withheld_rating_columns_in_project(
+    db: Session, project_id: int, coder_ids,
+) -> frozenset[int]:
+    """#1615 — the column ids anywhere in this project a reader scoped to
+    ``coder_ids`` must not have computed over or shown.
+
+    For a door whose column ids can span datasets (a correlation over two surveys,
+    a variable group, a metric's grouping siblings). A project holds at most one
+    participant table (`uq_datasets_project_managed_kind`), so this is
+    `withheld_rating_column_ids` over it — the ONE rule, asked once — and empty for
+    no scope, or for a project with no table, without a column read.
+    """
+    if not coder_ids:
+        return frozenset()
+    return withheld_rating_column_ids(db, get_participant_dataset(db, project_id), coder_ids)
 
 
 @dataclass(frozen=True)
@@ -693,13 +877,35 @@ def _refresh_in_turn(db: Session, project_id: int) -> RefreshReport | None:
     plan: _CellPlan | None = None
     try:
         # (2) READ — nothing may write before this returns.
-        rollup = compute_magnitude_rollup(db, project_id)
+        # #1608 — the snapshot is SHARED: every coder's ratings, never a viewer's
+        # scope. A blind reader is kept from it by `withheld_rating_column_ids`.
+        rollup = compute_magnitude_rollup(db, project_id, coder_ids=None)
+        # D225 — WHOSE ratings the cells can hold while (4) rewrites them. The
+        # batches commit one by one before the stamp, so between them the table
+        # mixes the previous snapshot's cells with this one's: the record must
+        # cover both, or a blind reader meets a NEW rater's rating judged against
+        # the OLD record. The previous snapshot's set is its record, or — none
+        # recorded — the live rule (D223's answer for it). Read here, before (3)
+        # writes anything; written with (3)'s commit, before any cell moves. The
+        # stamp in (4) narrows it to this rollup's own set; a failure in between
+        # leaves the union, which over-withholds — the fail-closed direction.
+        previous = parse_managed_rater_ids(
+            db.query(Dataset.managed_rater_ids).filter(Dataset.id == dataset_id).scalar()
+        )
+        if previous is None:
+            previous = score_rater_ids(db, project_id)
+        raters_while_writing = _rater_ids_text(set(previous) | rollup.rater_ids)
 
         # (3) STRUCTURE — rows and columns, committed on their own so the cell
         # read below holds no lock (#1073 a).
         dataset = db.get(Dataset, dataset_id)
         row_report = sync_rows(db, dataset)
         columns_added, columns_removed, metrics_removed = sync_score_columns(db, dataset)
+        # After both syncs: `sync_rows` ends with `expire_all()`, which would drop
+        # an unflushed attribute change, so this is a statement of its own.
+        db.query(Dataset).filter(Dataset.id == dataset_id).update(
+            {"managed_rater_ids": raters_while_writing}, synchronize_session="fetch",
+        )
         db.commit()
 
         # (4) CELLS — planned with no lock held, written in committed batches.
@@ -707,6 +913,9 @@ def _refresh_in_turn(db: Session, project_id: int) -> RefreshReport | None:
         written, cleared = _write_cell_plan(db, plan)
         dataset = db.get(Dataset, dataset_id)
         dataset.managed_synced_at = synced_at
+        # D222 — every cell is this rollup's now, so the record is its set: whose
+        # ratings the snapshot holds, beside when it was taken. Never on the wire.
+        dataset.managed_rater_ids = _rater_ids_text(rollup.rater_ids)
 
         # (5) #1144 — the metrics built on what moved. AFTER the cells, in the
         # transaction that stamps `managed_synced_at`: marked before them, a quick

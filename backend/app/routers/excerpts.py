@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, aliased, contains_eager, joinedload
 from sqlalchemy import and_, or_, exists
+from sqlalchemy.exc import IntegrityError
 
 from ..database import get_db
 from ..models.user import User
@@ -28,6 +29,8 @@ from ..schemas.excerpt import (
     QuotedExcerptItem,
     QuotedExcerptCode,
     QuotedExcerptsResponse,
+    WholePassageQuoteRequest,
+    WholePassageQuoteResponse,
 )
 from ..auth import get_current_user
 from ..services.audit import log_action
@@ -37,7 +40,7 @@ from ..services.participant_filter import ANSWER, participant_clause, segment_pa
 from ..services.timestamp import format_timecode
 from .helpers import _get_project_or_404, parse_int_list, TEXT_TYPES, visible_segment_filter as _visible_segment_filter
 from .export_helpers import csv_safe
-from ..schemas.common import utc_wire
+from ..schemas.common import CodeApplicationIdentity, utc_wire
 
 router = APIRouter(prefix="/api/projects/{project_id}/excerpts", tags=["excerpts"])
 
@@ -205,6 +208,19 @@ def _same_parent_segment_filter(seg: Segment):
     return None
 
 
+def _quote_applications(applications, scope: list[int] | None):
+    """A quote's code applications in the board's coder scope (#1531 D99: the scope's own,
+    when one is asked), as its two wire fields from ONE pass (#1592): ``applied_code_ids``
+    (one per application, as before) and ``applied_code_details`` — who applied each, so
+    the card can offer *Remove code* only on the viewer's own (the remove door deletes the
+    caller's application alone). One pass, so the two cannot follow different scopes."""
+    scoped = [ca for ca in applications if in_coder_scope(ca.user_id, scope)]
+    return (
+        [ca.code_id for ca in scoped],
+        [CodeApplicationIdentity(code_id=ca.code_id, user_id=ca.user_id) for ca in scoped],
+    )
+
+
 @router.get("", response_model=ExcerptListResponse)
 async def list_excerpts(
     project_id: int,
@@ -352,6 +368,106 @@ async def create_excerpt(
     # Re-fetch with eager loading
     excerpt = _base_excerpt_query(db, project_id).filter(Excerpt.id == excerpt.id).first()
     return _excerpt_to_response(excerpt)
+
+
+@router.post("/whole-passage", response_model=WholePassageQuoteResponse)
+def get_or_create_whole_passage_quote(  # def: no await, and it writes
+    project_id: int,
+    data: WholePassageQuoteRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """D163 — the WHOLE-passage quote of a passage: the existing one, else a new one.
+
+    A joint display pins a passage its code strand suggests (`GET /code-analysis/codes/
+    {id}/segments` lists passages, not quotes), and a pin is a QUOTE — on the Quote Board,
+    in the quote exports, deleted by a withdrawal, judged by the canvas scrub. Creating a
+    second whole quote of a passage answers 409 (`create_excerpt`), so pinning one already
+    quoted needs this: it returns that quote (``created: false``) or makes it
+    (``created: true``, logged as `create_excerpt` logs). Only the WHOLE shape: a char-range
+    or time-range quote of the passage is a different quote and is neither returned nor
+    a reason to refuse. A passage a merge or split has hidden is not found — the
+    suggestions list only visible ones.
+    """
+    _get_project_or_404(db, project_id, user.id)
+
+    if data.segment_id is not None:
+        segment = (
+            project_scoped_segments(db.query(Segment), project_id)
+            .filter(Segment.id == data.segment_id, *_visible_segment_filter())
+            .first()
+        )
+        if not segment:
+            raise HTTPException(status_code=404, detail="Passage not found in this project")
+
+        def _existing():
+            return (db.query(Excerpt)
+                    .filter(Excerpt.segment_id == segment.id, whole_segment_excerpt_filter())
+                    .first())
+    else:
+        dv = (
+            db.query(DatasetValue)
+            .join(DatasetColumn, DatasetValue.column_id == DatasetColumn.id)
+            .join(Dataset, DatasetColumn.dataset_id == Dataset.id)
+            .filter(
+                DatasetValue.id == data.dataset_value_id,
+                Dataset.project_id == project_id,
+                DatasetColumn.column_type.in_(TEXT_TYPES),
+            )
+            .first()
+        )
+        if not dv:
+            raise HTTPException(status_code=404, detail="Answer not found in this project")
+
+        def _existing():
+            return (db.query(Excerpt)
+                    .filter(Excerpt.dataset_value_id == dv.id, Excerpt.start_offset == None)
+                    .first())
+
+    def _respond(excerpt_id: int, created: bool) -> WholePassageQuoteResponse:
+        excerpt = _base_excerpt_query(db, project_id).filter(Excerpt.id == excerpt_id).first()
+        return WholePassageQuoteResponse(
+            **_excerpt_to_response(excerpt).model_dump(), created=created)
+
+    found = _existing()
+    if found is not None:
+        return _respond(found.id, created=False)
+
+    excerpt = Excerpt(
+        project_id=project_id,
+        segment_id=data.segment_id,
+        dataset_value_id=data.dataset_value_id,
+    )
+    db.add(excerpt)
+    try:
+        db.flush()
+    except IntegrityError:
+        # Another request made it between the read and the write (the whole-quote
+        # unique index): that quote is the answer.
+        db.rollback()
+        found = _existing()
+        if found is None:
+            raise
+        return _respond(found.id, created=False)
+
+    log_action(
+        db,
+        action="created",
+        entity_type="excerpt",
+        entity_id=excerpt.id,
+        user_id=user.id,
+        project_id=project_id,
+        details={
+            "segment_id": data.segment_id,
+            "dataset_value_id": data.dataset_value_id,
+            "start_offset": None,
+            "end_offset": None,
+            "start_time": None,
+            "end_time": None,
+        },
+    )
+    db.commit()
+    return _respond(excerpt.id, created=True)
 
 
 @router.post("/bulk", status_code=201)
@@ -771,10 +887,8 @@ def list_quoted_excerpts(
                     ctx_before = prev_seg.text
                     ctx_before_speaker = prev_seg.speaker.name if prev_seg.speaker else None
 
-            # Code applications (#1531 D99: the scope's own, when one is asked)
-            ca_ids = [
-                ca.code_id for ca in seg.code_applications if in_coder_scope(ca.user_id, scope)
-            ]
+            # Code applications (#1531 D99: the scope's own, when one is asked; #1592: who)
+            ca_ids, ca_details = _quote_applications(seg.code_applications, scope)
             codes_detail = []
             for cid in ca_ids:
                 c = code_map.get(cid)
@@ -817,6 +931,7 @@ def list_quoted_excerpts(
                 observation_id=obs.id if obs else None,
                 observation_name=obs.name if obs else None,
                 applied_code_ids=ca_ids,
+                applied_code_details=ca_details,
                 applied_codes=codes_detail,
                 excerpt_note=note_content,
                 context_before=ctx_before,
@@ -879,9 +994,7 @@ def list_quoted_excerpts(
             ds_name = ds.name if ds else ""
             source_name = f"{ds_name} › {col_name}"
 
-            ca_ids = [
-                ca.code_id for ca in dv.code_applications if in_coder_scope(ca.user_id, scope)
-            ]
+            ca_ids, ca_details = _quote_applications(dv.code_applications, scope)  # #1592
             codes_detail = []
             for cid in ca_ids:
                 c = code_map.get(cid)
@@ -914,6 +1027,7 @@ def list_quoted_excerpts(
                 column_id=col.id if col else None,
                 column_name=col_name,
                 applied_code_ids=ca_ids,
+                applied_code_details=ca_details,
                 applied_codes=codes_detail,
                 excerpt_note=note_content,
                 created_at=exc.created_at,

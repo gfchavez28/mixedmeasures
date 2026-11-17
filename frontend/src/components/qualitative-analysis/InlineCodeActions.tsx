@@ -8,7 +8,10 @@ import CodeChip from './CodeChip'
 import { findCodeByName } from '@/lib/code-name'
 import { codingApi, textCodingApi, codesApi, type Code, type Coder } from '@/lib/api'
 import { getCodeColor } from '@/lib/utils'
-import { visibleCodeChipRows, distinctVisibleCodeIds, type AppliedCodeDetailLike, type CodeChipRow } from '@/lib/coding-progress'
+import {
+  visibleCodeChipRows, distinctVisibleCodeIds, viewerMayRemoveChip, viewerHoldsCode,
+  type AppliedCodeDetailLike, type CodeChipRow, type ChipViewer,
+} from '@/lib/coding-progress'
 import type { CoderLens } from '@/lib/coder-color'
 import type { ListStatus } from '@/lib/list-status'
 
@@ -28,6 +31,14 @@ interface InlineCodeActionsProps {
    * `QualitativeAnalysisView`'s codes gate and pass what that gate read.
    */
   codesStatus: ListStatus
+  /**
+   * #1592 — whose codings these controls act on (`lib/coding-progress.ts::ChipViewer`).
+   * REQUIRED, so every mount decides: a chip offers *Remove code* only when it is the
+   * viewer's own application, and the `+ Add code` list marks a code applied only when
+   * the viewer applied it. The remove doors delete only the caller's application, so a
+   * remove on a colleague's chip removed nothing, silently (driven, run 16).
+   */
+  viewer: ChipViewer
   onCodeChange: () => void
   excludeCodeId?: number
   onFocusCode?: (codeId: number) => void
@@ -101,6 +112,7 @@ export default function InlineCodeActions({
   codeMap,
   allCodes,
   codesStatus,
+  viewer,
   onCodeChange,
   excludeCodeId,
   onFocusCode,
@@ -184,7 +196,10 @@ export default function InlineCodeActions({
     onError: () => { toast.error('Failed to create and apply code') },
   })
 
-  const appliedSet = new Set(appliedCodeIds)
+  // #1592 — the VIEWER's applied codes, never any coder's: a code only a colleague
+  // applied is one the viewer can still add (the server keeps one application per
+  // coder), and while blind a check on it showed a coding the chips hide.
+  const viewerApplied = (codeId: number) => viewerHoldsCode(codeId, viewer, appliedCodeDetails, appliedCodeIds)
   const searchTrimmed = codeSearch.trim()
   const searchLower = searchTrimmed.toLowerCase()
   const filteredCodes = allCodes.filter(c =>
@@ -243,13 +258,17 @@ export default function InlineCodeActions({
               magnitudeConflict={row.magnitudeConflict}
               scale={detailsKnown ? c.magnitude_scale ?? null : null}
             />
-            {/* The reveal carries `focus:` AND `group-focus-within/chip:` for
+            {/* #1592 — only the viewer's own chip carries a remove: the door deletes the
+                caller's application alone. This also leaves ONE "Remove code X" on a row
+                where the viewer and a colleague both hold X. */}
+            {viewerMayRemoveChip(row, viewer, detailsKnown) && (
+            /* The reveal carries `focus:` AND `group-focus-within/chip:` for
                 the same reason the hover pair does: a keyboard user arriving by
                 Tab must SEE this control (WCAG 2.4.7), and focusing the chip
                 must reveal the remove button beside it just as hovering does.
                 Without them the button was focusable at `opacity-0` — an
                 invisible focus ring on an invisible control, which is what the
-                sibling Add button's `focus:opacity-100` had always avoided. */}
+                sibling Add button's `focus:opacity-100` had always avoided. */
             <button
               type="button"
               className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-mm-surface border border-mm-border-subtle flex items-center justify-center opacity-0 group-hover/chip:opacity-100 group-focus-within/chip:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity hover:bg-red-100 dark:hover:bg-red-900/30"
@@ -264,6 +283,7 @@ export default function InlineCodeActions({
             >
               <X aria-hidden className="w-2.5 h-2.5 text-mm-text-muted" />
             </button>
+            )}
           </span>
         )
       })}
@@ -305,7 +325,7 @@ export default function InlineCodeActions({
           />
           <div className="max-h-48 overflow-y-auto space-y-0.5">
             {filteredCodes.map(c => {
-              const applied = appliedSet.has(c.id)
+              const applied = viewerApplied(c.id)
               return (
                 <button
                   key={c.id}

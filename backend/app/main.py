@@ -53,7 +53,7 @@ from .startup_errors import emit_fatal_startup
 from .models.user import Session as SessionModel
 from slowapi.errors import RateLimitExceeded
 from starlette.responses import JSONResponse
-from .routers import auth, projects, conversations, segments, codes, coding, notes, memos, export, search, participants, dataset, recode, equivalence, code_equivalence, code_sets, coding_import, analysis_domains, crosswalk, metrics, materials, code_analysis, statistical_tests, text_coding, text_analysis, excerpts, all_notes, correlations, comparisons, scratchpad, data_quality, quote_board, codebook, documents, backup, project_portability, canvas, media, observations
+from .routers import auth, projects, conversations, segments, codes, coding, notes, memos, export, search, participants, dataset, recode, equivalence, code_equivalence, code_sets, coding_import, analysis_domains, crosswalk, metrics, materials, code_analysis, statistical_tests, text_coding, text_analysis, excerpts, all_notes, correlations, comparisons, joint_display, scratchpad, data_quality, quote_board, codebook, documents, backup, project_portability, canvas, media, observations
 
 
 def cleanup_expired_sessions():
@@ -431,7 +431,7 @@ _startup_settings = get_settings()
 app = FastAPI(
     title="Mixed Measures",
     description="Mixed-methods research analysis platform",
-    version="1.6.0",
+    version="1.7.0",
     lifespan=lifespan,
     docs_url="/docs" if _startup_settings.enable_api_docs else None,
     redoc_url="/redoc" if _startup_settings.enable_api_docs else None,
@@ -661,6 +661,7 @@ app.include_router(excerpts.router)
 app.include_router(all_notes.router)
 app.include_router(correlations.router)
 app.include_router(comparisons.router)
+app.include_router(joint_display.router)
 app.include_router(scratchpad.router)
 app.include_router(data_quality.router)
 app.include_router(quote_board.router)

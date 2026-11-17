@@ -20,13 +20,30 @@ fixpoint, through what was made from a deleted segment while it lived.
 
 ## A segment id names several segments over time
 
-SQLite reuses the newest row's id (no AUTOINCREMENT), so an Unmerge followed by any
+`segments` reuses the newest row's id (no AUTOINCREMENT — #1639's D319 gave it to nine
+other tables and left `segments` out on purpose), so an Unmerge followed by any
 merge gives the new result the deleted one's id, and its audit entries sit under the same
 `entity_id`. So a deleted segment is read as a LIFETIME: the entries from the one that
 created it to the one that deleted it. Audit ids rise in the order the entries were
 written (#1230: audit rows are never deleted below a live project's own), so no clock
 is needed. A live turn's own history starts after the last entry that created or deleted
 its id — anything earlier was a previous holder's.
+
+🔴 **Since #1547 (D159) that start is ONE function, `history_starts`, and every reader of a
+live turn's entries asks it** — this walk's seeds, `apply_withdrawal`'s two reads (the
+words an orphan quote is matched against, and the redaction set) and the conversation
+delete (#1546). It also reads a THIRD bound: a conversation import makes its turns before
+it writes its `imported` entry, so no entry before that entry is one of its turns'. Without
+it, a turn an import gave a deleted interview's id took that interview's edits as its own
+(an Unmerge is not the only way an id is freed — a conversation delete is another).
+
+## A live original is read as it was AT THE MERGE (#1552 a)
+
+A merge result's text is rebuilt from its originals. An original that still exists
+may have been edited since the Unmerge, so its row's text is not what the merge
+joined; the first text edit after the merge recorded that text as its `old_text`.
+An original whose id an Unmerge or Unsplit freed after the merge, and whose words no
+edit recorded, offers nothing: the row holding that id now is another segment.
 
 ## What it does NOT do
 
@@ -46,11 +63,21 @@ import json
 from dataclasses import dataclass
 from itertools import islice, product
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..models.audit import AuditEntry
 from ..models.segment import Segment
 from .withdrawal_report import ReachedTurns
+
+#: The conversation door's import entry (`routers/conversations.py::import_conversation`
+#: — its only writer), keyed on the NEW conversation and written AFTER the turns it makes.
+CONVERSATION_IMPORTED = "imported"
+
+#: The conversation door's edit entry (`routers/segments.py::update_segment`). A TEXT
+#: edit records `old_text`, the text it replaced (since before 1.0); a speaker-only
+#: change records none.
+SEGMENT_UPDATED = "segment_updated"
 
 #: The keys of a conversation turn's `segment_updated` details that hold its WORDS. The
 #: same entries carry structural strings too (#1319's `quote_rebase` outcomes "silent" /
@@ -75,6 +102,21 @@ MAX_REBUILT = 256
 
 _IN_CHUNK = 5000
 
+#: `[start, end)` ranges of a text (#1613: where the withdrawn person's words sit).
+Spans = tuple[tuple[int, int], ...]
+
+
+def _joined_spans(combo) -> Spans | None:
+    """Where their parts sit once `combo`'s `(text, spans)` are joined by the merge."""
+    out: list[tuple[int, int]] = []
+    at = 0
+    for text, spans in combo:
+        if spans is None:
+            return None
+        out.extend((at + s, at + e) for s, e in spans)
+        at += len(text) + len(MERGE_JOINER)
+    return tuple(out)
+
 
 @dataclass(frozen=True)
 class DeletedSegment:
@@ -88,12 +130,20 @@ class DeletedSegment:
     #: What it held: a merge result's text rebuilt from its originals, and every
     #: wording its edits recorded.
     wordings: tuple[str, ...]
-    #: Its originals' texts as they were when it was made (a live original's as its
-    #: row holds it). A quote wholly inside ONE of these is that original's quote, and
+    #: Its originals' texts as they were when it was made (a live original's from the
+    #: first edit after the merge, else as its row holds it — #1552 a). A quote wholly
+    #: inside ONE of these is that original's quote, and
     #: that original decides it — D8 when the turn is theirs, this walk when it is
     #: another deleted segment of theirs, nobody when it is someone else's turn. Only a
     #: quote across a join is this segment's to decide.
     parts: tuple[str, ...]
+    #: #1613 — per wording (same order), WHERE their words sit in it: the `[start, end)`
+    #: ranges of the parts that are theirs — their own turn, a turn holding theirs
+    #: combined (D7 blanks it whole), what a deleted segment of theirs held there. A
+    #: quote across a join is theirs only if it reaches one of these: across two OTHER
+    #: people's join it is neither's to lose. `None` where that is not known — an
+    #: EDIT's wording of a segment that also held someone else's words.
+    spans: tuple[Spans | None, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -102,11 +152,14 @@ class DeletedLineage:
     #: Every audit entry keyed on one of `segments` within its lifetime.
     audit_entry_ids: frozenset[int]
 
-    def wordings_by_conversation(self) -> dict[int, list[tuple[str, tuple[str, ...]]]]:
-        out: dict[int, list[tuple[str, tuple[str, ...]]]] = {}
+    def wordings_by_conversation(
+        self,
+    ) -> dict[int, list[tuple[str, tuple[str, ...], Spans | None]]]:
+        out: dict[int, list[tuple[str, tuple[str, ...], Spans | None]]] = {}
         for seg in self.segments:
-            for wording in seg.wordings:
-                out.setdefault(seg.conversation_id, []).append((wording, seg.parts))
+            for i, wording in enumerate(seg.wordings):
+                spans = seg.spans[i] if i < len(seg.spans) else None
+                out.setdefault(seg.conversation_id, []).append((wording, seg.parts, spans))
         return out
 
 
@@ -153,26 +206,38 @@ def wording_in(raw: str | None, keys=SEGMENT_WORDING_KEYS) -> list[str]:
     return [v for k in keys if isinstance(v := parsed.get(k), str) and v]
 
 
-def deleted_lineage(db: Session, project_id: int, reached: ReachedTurns) -> DeletedLineage:
-    """The deleted segments their words passed through (see the module).
+@dataclass(frozen=True)
+class SegmentHistory:
+    """Every structural entry of a project, read once (#1547: shared by the walk, the
+    history starts, the conversation delete and the startup repair)."""
 
-    Call it BEFORE the reached turns are blanked: a merge result's text is rebuilt from
-    its originals' texts as they stand, theirs included.
-    """
-    seeds: dict[int, int] = {}
-    for by_conv in (reached.own, reached.combined):
-        for conv_id, ids in by_conv.items():
-            for sid in ids:
-                seeds[sid] = conv_id
-    if not seeds:
-        return DeletedLineage((), frozenset())
+    #: an original's id → the entries that took it
+    made_from: dict[int, list[_Made]]
+    #: a result's id → the entries that made it
+    made: dict[int, list[int]]
+    #: a segment id → the entries that deleted it (an Unmerge or an Unsplit)
+    deleted: dict[int, list[int]]
 
-    # Every structural entry of the project — one per merge or split a researcher made,
-    # so the set is small next to the project. Nothing below reads them in row order:
-    # the entry ids alone say which came first.
-    made_from: dict[int, list[_Made]] = {}   # an original's id → the entries that took it
-    made: dict[int, list[int]] = {}           # a result's id → the entries that made it
-    deleted: dict[int, list[int]] = {}        # a segment id → the entries that deleted it
+    def lifetimes(self) -> dict[int, list[tuple[int, int]]]:
+        """Each id's closed lifetimes `(made by, deleted by)` — a merge result or split
+        child an Unmerge or Unsplit deleted. The entries inside one belong to that
+        segment, which the walk can still find (#1473 b)."""
+        out: dict[int, list[tuple[int, int]]] = {}
+        for sid, makers in self.made.items():
+            for m in makers:
+                end = min((d for d in self.deleted.get(sid, ()) if d > m), default=None)
+                if end is not None:
+                    out.setdefault(sid, []).append((m, end))
+        return out
+
+
+def segment_history(db: Session, project_id: int) -> SegmentHistory:
+    """Every structural entry of the project — one per merge or split a researcher made,
+    so the set is small next to the project. Nothing reads them in row order: the entry
+    ids alone say which came first."""
+    made_from: dict[int, list[_Made]] = {}
+    made: dict[int, list[int]] = {}
+    deleted: dict[int, list[int]] = {}
     for entry_id, action, entity_id, raw in (
         db.query(AuditEntry.id, AuditEntry.action, AuditEntry.entity_id, AuditEntry.details)
         .filter(
@@ -203,10 +268,88 @@ def deleted_lineage(db: Session, project_id: int, reached: ReachedTurns) -> Dele
             made_from.setdefault(o, []).append(ev)
         for r in ev.results:
             made.setdefault(r, []).append(entry_id)
+    return SegmentHistory(made_from, made, deleted)
 
-    def _start_of_live(sid: int) -> int:
-        # The last entry that made or deleted this id: before it, a previous holder.
-        return max([*made.get(sid, ()), *deleted.get(sid, ())], default=0)
+
+def _conversation_floors(db: Session, project_id: int, conversation_ids) -> dict[int, int]:
+    """The LATEST `imported` entry per conversation id. Conversation ids are reused too,
+    so an earlier holder's entry may be found — it can only be EARLIER than the live
+    conversation's own, never later, so a bound built on it never cuts real history."""
+    out: dict[int, int] = {}
+    for chunk in _chunks(set(conversation_ids)):
+        for cid, top in (
+            db.query(AuditEntry.entity_id, func.max(AuditEntry.id))
+            .filter(
+                AuditEntry.project_id == project_id,
+                AuditEntry.entity_type == "conversation",
+                AuditEntry.action == CONVERSATION_IMPORTED,
+                AuditEntry.entity_id.in_(chunk),
+            )
+            .group_by(AuditEntry.entity_id)
+        ):
+            out[cid] = top
+    return out
+
+
+def history_starts(
+    db: Session,
+    project_id: int,
+    conv_of: dict[int, int],
+    history: SegmentHistory | None = None,
+) -> dict[int, int]:
+    """#1547 (D159) — per live turn (`{turn id: its conversation id}`), the lowest audit
+    entry id that can be its own. Its entries are those with `id >= start`.
+
+    The max of three lower bounds, each never later than the truth, so the max never
+    cuts a turn's real history (an entry it misses would keep a withdrawn person's words):
+    - the last entry that MADE its id — a merge or split, which is its own;
+    - one past the last entry that DELETED its id — an Unmerge or Unsplit; before it, a
+      previous holder;
+    - one past its conversation's latest `imported` entry, which the import writes after
+      the turns it makes.
+    A turn a `.mmproject` merge inserted has neither of the last two to read (stated in
+    #1547's review as a residual; since #1546 D157 a previous holder's entry there holds
+    no words).
+    """
+    h = history or segment_history(db, project_id)
+    floors = _conversation_floors(db, project_id, conv_of.values())
+    out: dict[int, int] = {}
+    for sid, cid in conv_of.items():
+        start = 0
+        if h.made.get(sid):
+            start = max(start, max(h.made[sid]))
+        if h.deleted.get(sid):
+            start = max(start, max(h.deleted[sid]) + 1)
+        if cid in floors:
+            start = max(start, floors[cid] + 1)
+        out[sid] = start
+    return out
+
+
+def deleted_lineage(
+    db: Session,
+    project_id: int,
+    reached: ReachedTurns,
+    history: SegmentHistory | None = None,
+) -> DeletedLineage:
+    """The deleted segments their words passed through (see the module).
+
+    Call it BEFORE the reached turns are blanked: a merge result's text is rebuilt from
+    its originals' texts as they stand, theirs included. `history` saves a caller that
+    already read the structural entries a second pass.
+    """
+    seeds: dict[int, int] = {}
+    for by_conv in (reached.own, reached.combined):
+        for conv_id, ids in by_conv.items():
+            for sid in ids:
+                seeds[sid] = conv_id
+    if not seeds:
+        return DeletedLineage((), frozenset())
+
+    h = history or segment_history(db, project_id)
+    made_from, deleted = h.made_from, h.deleted
+    # A seed's own history starts where `history_starts` says; `lo` is exclusive.
+    starts = history_starts(db, project_id, seeds, h)
 
     def _end_of(sid: int, after: int) -> int | None:
         # The first entry after its making that deleted this id ends the lifetime.
@@ -214,7 +357,7 @@ def deleted_lineage(db: Session, project_id: int, reached: ReachedTurns) -> Dele
 
     # ── The walk, to a fixpoint: (id, lifetime start, lifetime end, conversation) ──
     found: dict[tuple[int, int], tuple[int, int, _Made]] = {}  # (id, made by) → (end, conv, entry)
-    queue = [(sid, _start_of_live(sid), float("inf"), conv) for sid, conv in seeds.items()]
+    queue = [(sid, starts[sid] - 1, float("inf"), conv) for sid, conv in seeds.items()]
     while queue:
         sid, lo, hi, conv = queue.pop()
         for ev in made_from.get(sid, ()):
@@ -257,22 +400,75 @@ def deleted_lineage(db: Session, project_id: int, reached: ReachedTurns) -> Dele
         ).filter(Segment.id.in_(chunk)):
             live[sid] = (text or "", order)
 
+    # #1552 (a) — a LIVE original's text WHEN the merge was made. Its row holds today's
+    # text, and an edit after the Unmerge changed it, so a merge rebuilt from it no
+    # longer held a quote made across the join. The edit door acts on visible turns
+    # only (`routers/segments.py::_editable_segment_or_404`), so nothing edits an
+    # original while it is merged away, and it records the text it replaced: the FIRST
+    # text edit after the merge, inside the original's own lifetime, replaced exactly
+    # what the merge joined. One text per live original, so this adds nothing to the
+    # product `MAX_REBUILT` caps (only a DELETED original offers several wordings).
+    replaced: dict[int, list[tuple[int, object]]] = {}  # id → [(entry id, old_text)]
+    for chunk in _chunks(live):
+        for entry_id, entity_id, raw in db.query(
+            AuditEntry.id, AuditEntry.entity_id, AuditEntry.details,
+        ).filter(
+            AuditEntry.project_id == project_id,
+            AuditEntry.entity_type == "segment",
+            AuditEntry.action == SEGMENT_UPDATED,
+            AuditEntry.entity_id.in_(chunk),
+        ):
+            details = _parse(raw)
+            if "old_text" in details:  # a text edit; a speaker change records none
+                replaced.setdefault(entity_id, []).append((entry_id, details["old_text"]))
+
+    def _live_text_at(sid: int, when: int) -> str:
+        # An Unmerge or Unsplit after the merge that deleted this id ended that
+        # original's life; the row holding the id now is a later segment (#1547's
+        # class), so neither its text nor its edits are the original's.
+        end = _end_of(sid, when)
+        for entry_id, old in sorted(replaced.get(sid, ())):
+            if when < entry_id and (end is None or entry_id < end):
+                # A redacted entry (D9) keeps the key and no words: what the merge
+                # joined was someone's withdrawn words, and is not recorded.
+                return old if isinstance(old, str) else ""
+        return live[sid][0] if end is None else ""
+
     # Earliest made first, so a nested merge's originals are resolved before it. An
     # original is asked about as it was WHEN the merge was made: its id may have been
     # their deleted segment then and someone else's since, or the other way round. A
     # deleted original offers EVERY wording it held (which one was current at the merge
     # is not recorded), so the outer text is rebuilt once per combination, capped.
-    held: dict[int, list[tuple[int, int, tuple[str, ...]]]] = {}  # id → (start, end, wordings)
+    # Each option is `(text, spans)`: #1613 — where THEIR words sit in it, so a quote
+    # across a join between two other people's parts is not taken as theirs.
+    # id → (start, end, options, wholly theirs)
+    held: dict[int, list[tuple[int, int, tuple[tuple[str, Spans | None], ...], bool]]] = {}
 
-    def _texts_at(sid: int, when: int) -> tuple[str, ...]:
-        for start, end, wordings in held.get(sid, ()):
+    def _held_at(sid: int, when: int):
+        for start, end, options, whole in held.get(sid, ()):
             if start < when < end:
-                return wordings
-        return (live[sid][0],) if sid in live and live[sid][0] else ()
+                return options, whole
+        return None
+
+    def _texts_at(sid: int, when: int) -> tuple[tuple[str, Spans | None], ...]:
+        h = _held_at(sid, when)
+        if h is not None:
+            return h[0]
+        text = _live_text_at(sid, when) if sid in live else ""
+        if not text:
+            return ()
+        # A live original is theirs whole when it is one of their reached turns: their
+        # own, or a turn holding theirs combined (D7 blanks it whole) — else nobody's here.
+        return ((text, ((0, len(text)),) if sid in seeds else ()),)
+
+    def _wholly_theirs(sid: int, when: int) -> bool:
+        h = _held_at(sid, when)
+        return h[1] if h is not None else sid in seeds
 
     segments: list[DeletedSegment] = []
     for (r, start), (end, conv, ev) in sorted(found.items(), key=lambda kv: kv[0][1]):
         wordings: list[str] = []
+        spans: list[Spans | None] = []
         if ev.action == MERGED:
             options = {o: _texts_at(o, ev.entry_id) for o in ev.originals}
             if all(options.values()):
@@ -283,17 +479,22 @@ def deleted_lineage(db: Session, project_id: int, reached: ReachedTurns) -> Dele
                 by_turn = sorted(ev.originals, key=lambda o: (live.get(o, ("", 0))[1], o))
                 for order in (by_turn, list(ev.originals)):
                     for combo in islice(product(*(options[o] for o in order)), MAX_REBUILT):
-                        joined = MERGE_JOINER.join(combo)
+                        joined = MERGE_JOINER.join(t for t, _ in combo)
                         if joined not in wordings:
                             wordings.append(joined)
+                            spans.append(_joined_spans(combo))
+        # An edit's wording has no join to place their words by: wholly theirs only when
+        # every original was (a split of their turn, a merge of their own turns).
+        whole = all(_wholly_theirs(o, ev.entry_id) for o in ev.originals)
         for w in edits.get((r, start), []):
             if w not in wordings:
                 wordings.append(w)
-        held.setdefault(r, []).append((start, end, tuple(wordings)))
-        parts = tuple(t for o in ev.originals for t in _texts_at(o, ev.entry_id))
+                spans.append(((0, len(w)),) if whole else None)
+        held.setdefault(r, []).append((start, end, tuple(zip(wordings, spans)), whole))
+        parts = tuple(t for o in ev.originals for t, _ in _texts_at(o, ev.entry_id))
         segments.append(DeletedSegment(
             segment_id=r, conversation_id=conv, created_by=start, deleted_by=end,
-            wordings=tuple(wordings), parts=parts,
+            wordings=tuple(wordings), parts=parts, spans=tuple(spans),
         ))
     return DeletedLineage(tuple(segments), frozenset(entry_ids))
 

@@ -19,6 +19,7 @@ from app.models.dataset import ColumnType, Dataset, DatasetRow, DatasetValue
 from app.models.excerpt import Excerpt
 from app.models.participant import Participant
 from app.models.segment import Segment
+from app.services import tombstones
 from app.services.withdrawal_redaction import BLANKED_SEGMENT_TEXT
 from tests.archive_support import archive_extras, archive_payload, write_archive
 from tests.test_merge_brings_back import (  # noqa: F401 — the fixture
@@ -155,9 +156,11 @@ class TestEveryOtherDoor:
             again = Speaker(project_id=pid, name="Maria Lopez", color_index=5)
             other = Speaker(project_id=pid, name="Noor", color_index=6)
             db.add_all([again, other]); db.flush()
-            # #1391 (D74) — True: kept unlinked by the record, so the import can say so.
-            assert ensure_participant_for_speaker(db, pid, again, " Maria Lopez ") is True
-            assert ensure_participant_for_speaker(db, pid, other, "Noor") is False
+            # #1391 (D74) — kept unlinked by the record, so the import can say so; #1605
+            # (D237) — and HOW it matched: her ID, padded, is an exact match.
+            assert ensure_participant_for_speaker(
+                db, pid, again, " Maria Lopez ") == tombstones.SPEAKER_MATCH_EXACT
+            assert ensure_participant_for_speaker(db, pid, other, "Noor") is None
             db.flush()
             assert again.participant_id is None
             assert other.participant_id is not None          # control
@@ -602,8 +605,10 @@ class TestTypingAWithdrawnIdentifier:
 
 
 class TestTheReportCountsUnlinkedRecordsCarryingHerIdentifier:
-    """D14 — a count, by linking's own rule (an identifier-typed column, trim-then-
-    exact, case-sensitive); never names, outside `total_items`, nothing deleted."""
+    """D14 — a count, by the withdrawal record's ID rule (an identifier-typed column,
+    trimmed, case-sensitive, and since #1605 in either Unicode form — that arm is
+    `test_withdrawal_forms_1605.py::TestTheReportsCount`); never names, outside
+    `total_items`, nothing deleted."""
 
     def test_the_count(self, client):
         ids = build_world(client)

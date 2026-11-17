@@ -92,7 +92,7 @@ vi.mock('@/lib/api', () => ({
 vi.mock('@/layouts/ProjectLayout', () => ({ useProjectLayout: () => ({ projectId: 2 }) }))
 
 vi.mock('@/components/canvas/extensions', () => ({
-  ExcerptEmbed: {}, ChartEmbed: {}, MemoEmbed: {}, CalloutStat: {}, ImageEmbed: {},
+  ExcerptEmbed: {}, ChartEmbed: {}, MemoEmbed: {}, CalloutStat: {}, ImageEmbed: {}, JointDisplay: {},
 }))
 
 import { canvasApi } from '@/lib/api'

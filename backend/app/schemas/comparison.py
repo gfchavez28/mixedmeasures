@@ -102,9 +102,10 @@ class QQSummary(BaseModel):
     #: R's `qqline()` — through the first and third quartile pairs.
     line_slope: float | None = None
     line_intercept: float | None = None
-    #: Groups of one, whose residual is exactly 0 by construction rather than by
-    #: evidence. Reported so the caption can say so.
-    singleton_group_count: int = 0
+    #: #1549 (b): the groups of one the plot LEFT OUT, by name — the parametric tests'
+    #: rule (`split_testable`), so the plot diagnoses the model they fit. Was a count
+    #: of groups of one kept in, whose residual is exactly 0 by construction.
+    singleton_groups: list[str] = []
     plotting_position: str
     reference_line: str
     undefined_reason: str | None = None
@@ -198,3 +199,6 @@ class GroupComparisonResponse(BaseModel):
     #: OUT OF DATE (a member's cells moved since they were computed). Read, never
     #: recomputed, here; the client names them beside the recompute action.
     stale_domain_ids: list[int] = []
+    #: #1615 — how many of the variables asked for were left out because the viewer
+    #: is blind and each is a participant rating score (or computed from one).
+    withheld_rating_variables: int = 0

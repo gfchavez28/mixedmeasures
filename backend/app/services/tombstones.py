@@ -12,11 +12,26 @@ new uuid and the same identifier, so a participant is also skipped by
 name, and a dictionary recovers either from a SHA-256 in moments. It keeps the
 identifier out of plain sight in the database and in a shared `.mmproject`, and
 nothing more; the `withdrawn` audit entry keeps it in plain text by decision D9.
+
+🔴 **Two match rules, one per kind (#1605, D227–D229).**
+- **An ID** is the same ID in any canonically equivalent Unicode form, with capitals
+  and inner spacing kept. `P01` and `p01` can be two people (DEC-2, #414), so a
+  withdrawal is never stricter about an ID than linking is. Written composed (NFC),
+  read in its composed, decomposed and as-written forms (`identifier_hashes_for`),
+  so a row written before #1605 over a decomposed ID still answers.
+- **A name** is compared FOLDED: spacing collapsed, capitals ignored, and so is how an
+  accent is encoded (`fold_name`). It is never compared without its accents: `Maria`
+  and `María` stay two names. Each name is written twice (D237): its as-written hash
+  (v1) and its folded hash (v2), so the speaker door can tell an exact match from one
+  found only by folding, and say so.
+- Compatibility forms (NFKC: full-width letters, ligatures) look different on screen
+  and stay different.
 """
 
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
@@ -46,8 +61,10 @@ SEGMENT_BLANKED = "segment_blanked"
 PARTICIPANT_REINSTATED = "participant_reinstated"
 #: #1472 (D73, 1.5.9) — a NAME the withdrawn person was known by in the project (her
 #: display name, her speakers' names and labels, her turns' original labels — every
-#: spelling `apply_withdrawal`'s `her_names` collects except the ID, which is the
-#: `participant` kind's hash). Read ONLY by the conversation import's speaker-label door
+#: spelling `apply_withdrawal`'s `her_names` collects; since #1605 (D229) the ID's own
+#: spelling too, FOLDED, because a participant made from a transcript has ID == name and
+#: the name kind is the one that ignores capitals — `name_hashes_to_remember`). Read
+#: ONLY by the conversation import's speaker-label door
 #: (`withdrawn_speaker_label`): never by linking, a typed create or a merge, where a
 #: common first name would skip or refuse a DIFFERENT person's data. A KIND of its own
 #: with a hash prefix of its own, so no reader of an ID can take a name for one.
@@ -69,7 +86,14 @@ WITHDRAWN_IDENTIFIER_MESSAGE = (
 )
 
 
-def withdrawn_speaker_warning(count: int) -> str:
+#: #1605 (D237) — how a speaker label matched the withdrawal record. EXACT: her ID in any
+#: Unicode form, or one of her names as written (an accent encoded the other way is
+#: invisible, so it is exact too). FOLDED: only once capitals or spacing were ignored.
+SPEAKER_MATCH_EXACT = "exact"
+SPEAKER_MATCH_FOLDED = "folded"
+
+
+def withdrawn_speaker_warning(count: int, folded: int = 0) -> str:
     """#1391 / #1472 (D74, D75) — the conversation import's warning when the speaker
     door left speakers unlinked because the withdrawal record names their label.
 
@@ -77,12 +101,26 @@ def withdrawn_speaker_warning(count: int) -> str:
     transcript). It says what happened, the way to link someone else who shares a
     remembered name (there is no hand link for a speaker: the import's match is the
     only writer, so the remedy is a different name under Map Speakers), and that a
-    transcript holding the withdrawn person's words brought those words back."""
+    transcript holding the withdrawn person's words brought those words back.
+
+    #1605 (D237) — ``folded`` of the ``count`` matched ONLY once capitals or spacing
+    were ignored (`SPEAKER_MATCH_FOLDED`); the sentence says so, as a clause, because a
+    researcher reading "remembers that name" beside a label that is not quite her name
+    would otherwise think the record was wrong. Never "accents": the fold does not make
+    `Maria` and `María` one name."""
     one = count == 1
+    if not folded:
+        recalled = "that name or ID" if one else "those names or IDs"
+    elif one:
+        recalled = "that name or ID, written here with different capitals or spacing"
+    elif folded == count:
+        recalled = "those names or IDs, written here with different capitals or spacing"
+    else:
+        recalled = "those names or IDs (some written here with different capitals or spacing)"
     return (
         f"{count} speaker{'' if one else 's'} {'was' if one else 'were'} not linked to "
         f"{'a participant' if one else 'participants'}, because this project's record of "
-        f"a withdrawal remembers {'that name or ID' if one else 'those names or IDs'}. "
+        f"a withdrawal remembers {recalled}. "
         f"If {'the' if one else 'a'} speaker is someone else, delete this conversation and "
         "import it again with a different name for them under Map Speakers. If this "
         f"transcript holds {'the' if one else 'a'} withdrawn participant's words, importing "
@@ -96,24 +134,100 @@ _HASH_PREFIX = "mm-withdrawn-identifier:v1:"
 #: answer an identifier question, in memory or in the table (`is_withdrawn_identifier`
 #: compares hashes and nothing else).
 _NAME_HASH_PREFIX = "mm-withdrawn-name:v1:"
+#: #1605 (D228) — a name's FOLDED hash (`fold_name`). Its own prefix, so a folded name
+#: can never equal an as-written one, nor any ID: `is_withdrawn_identifier` compares
+#: hashes and nothing else, and D73's wall holds at the table. The revision that
+#: upgrades older withdrawals (`b8d4f2a6c0e9`) carries its own copy of this rule and
+#: `identifier_key`'s, held equal by `test_withdrawal_record_upgrade_1605.py`.
+_NAME_FOLD_PREFIX = "mm-withdrawn-name:v2:"
 
 
-def _hash(prefix: str, text: str | None) -> str | None:
-    key = normalize_key(text)
-    if not key:
-        return None
+def _sha(prefix: str, key: str) -> str:
     return hashlib.sha256((prefix + key).encode("utf-8")).hexdigest()
 
 
+def identifier_key(text: str | None) -> str:
+    """#1605 (D227) — the form an ID is WRITTEN in: trimmed (`normalize_key`, the
+    linking rule) and composed (NFC). Capitals and inner spacing are kept. `""` for
+    nothing. Two texts are the same ID exactly when their keys are equal."""
+    key = normalize_key(text)
+    return unicodedata.normalize("NFC", key) if key else ""
+
+
+def _forms(text: str | None) -> tuple[str, ...]:
+    """The trimmed text composed, decomposed and as written — every form a hash may
+    have been taken over (a row written before #1605 hashed the text as it came)."""
+    key = normalize_key(text)
+    if not key:
+        return ()
+    return tuple(dict.fromkeys((
+        unicodedata.normalize("NFC", key), unicodedata.normalize("NFD", key), key,
+    )))
+
+
+def fold_name(text: str | None) -> str:
+    """#1605 (D228) — a NAME's match key: inner whitespace collapsed, then Unicode's
+    canonical caseless match, NFD(casefold(NFD(x))). So `MARÍA LÓPEZ`, `maría  lópez`
+    and a decomposed `María López` are one name; `Maria` and `María` are not. Names
+    only — an ID keeps its capitals (`identifier_key`)."""
+    key = normalize_key(text)
+    if not key:
+        return ""
+    return unicodedata.normalize(
+        "NFD", unicodedata.normalize("NFD", " ".join(key.split())).casefold())
+
+
 def identifier_hash(identifier: str | None) -> str | None:
-    """The one hash, over the one normalisation linking matches on."""
-    return _hash(_HASH_PREFIX, identifier)
+    """The hash a withdrawal WRITES for an ID: over `identifier_key` (#1605, D227). For
+    every ID already composed — every ASCII code — it is the hash 1.5.8 and 1.6.0 wrote."""
+    key = identifier_key(identifier)
+    return _sha(_HASH_PREFIX, key) if key else None
+
+
+def identifier_hashes_for(identifier: str | None) -> frozenset[str]:
+    """#1605 (D227) — every ID hash that names this text: its composed, decomposed and
+    as-written forms. The ONE read of the ID kind (`Tombstones.withdrawn_identifier`,
+    `is_withdrawn_identifier`), so every door that asks the ID follows it."""
+    return frozenset(_sha(_HASH_PREFIX, f) for f in _forms(identifier))
 
 
 def name_hash(name: str | None) -> str | None:
-    """#1472 (D73) — a remembered NAME's hash: the identifier's normalisation (the
-    speaker door matches trim-then-exact, as linking does) under its own prefix."""
-    return _hash(_NAME_HASH_PREFIX, name)
+    """#1472 (D73) — a remembered NAME's as-written hash (v1): trimmed and, since #1605,
+    composed, under the name kind's own prefix. An exact match."""
+    key = identifier_key(name)
+    return _sha(_NAME_HASH_PREFIX, key) if key else None
+
+
+def folded_name_hash(name: str | None) -> str | None:
+    """#1605 (D228) — a remembered NAME's folded hash (v2): `fold_name` under its own
+    prefix. A match only once capitals or spacing are ignored."""
+    key = fold_name(name)
+    return _sha(_NAME_FOLD_PREFIX, key) if key else None
+
+
+def exact_name_hashes_for(name: str | None) -> frozenset[str]:
+    """The as-written (v1) name hashes of every form of this label, so a row written
+    before #1605 over a decomposed name still answers it exactly."""
+    return frozenset(_sha(_NAME_HASH_PREFIX, f) for f in _forms(name))
+
+
+def name_hashes_to_remember(names, identifier: str | None) -> set[str]:
+    """#1605 (D229, D237) — the name kind's hashes a withdrawal WRITES for the spellings
+    she was known by: each one's folded hash — her ID's spelling included, since a
+    participant made from a transcript has ID == name and only the name kind folds — and
+    each one's as-written hash except the ID's, which the ID kind already answers exactly
+    (D73's original reason, kept for the as-written half)."""
+    ident = identifier_key(identifier)
+    out: set[str] = set()
+    for n in names:
+        folded = folded_name_hash(n)
+        if folded:
+            out.add(folded)
+        if identifier_key(n) != ident:
+            exact = name_hash(n)
+            if exact:
+                out.add(exact)
+    return out
 
 
 @dataclass
@@ -128,27 +242,45 @@ class Tombstones:
         return bool(entity_uuid) and entity_uuid in self.uuids.get(entity_type, ())
 
     def withdrawn_identifier(self, identifier: str | None) -> bool:
-        h = identifier_hash(identifier)
-        return h is not None and h in self.identifier_hashes
+        """Her ID, in any canonically equivalent form, capitals kept (#1605, D227)."""
+        return not identifier_hashes_for(identifier).isdisjoint(self.identifier_hashes)
+
+    def _name_match(self, name: str | None) -> str | None:
+        """#1605 (D237) — `SPEAKER_MATCH_EXACT` when an as-written name hash answers
+        (any form of the label, so a row from before #1605 still does), else
+        `SPEAKER_MATCH_FOLDED` when only the folded one does, else None."""
+        if not exact_name_hashes_for(name).isdisjoint(self.name_hashes):
+            return SPEAKER_MATCH_EXACT
+        folded = folded_name_hash(name)
+        if folded is not None and folded in self.name_hashes:
+            return SPEAKER_MATCH_FOLDED
+        return None
 
     def withdrawn_name(self, name: str | None) -> bool:
-        """#1472 (D73) — was this one of the names a withdrawn person was known by?
-        Asked only through `withdrawn_speaker_label`."""
-        h = name_hash(name)
-        return h is not None and h in self.name_hashes
+        """#1472 (D73) — was this one of the names a withdrawn person was known by,
+        as written or folded (#1605, D228)? Asked only through the speaker door."""
+        return self._name_match(name) is not None
 
-    def withdrawn_speaker_label(self, label: str | None) -> bool:
+    def withdrawn_speaker_match(self, label: str | None) -> str | None:
         """#1472 / #1391 (D73, D74) — the speaker-label door's ONE question: does this
         label name a withdrawn person, by her ID (the one predicate, with no uuid —
         the door is about to create someone, so nobody can have been reinstated
-        under it) or by a name the project knew her by?
+        under it) or by a name the project knew her by? #1605 (D237): it answers HOW —
+        `SPEAKER_MATCH_EXACT`, `SPEAKER_MATCH_FOLDED` — or None, so the import's warning
+        can say when capitals or spacing were ignored.
 
         🔴 The ONLY reader of the name kind. Linking by column, the typed create and
         the merge ask `withdrawn_participant` / `withdrawn_identifier`, never this:
         a common first name there would skip or refuse a DIFFERENT person's data —
         silently, in a merge. At the speaker door the cost is said (the import's
         warning) and the remedy is a rename (D75)."""
-        return self.withdrawn_participant(None, label) or self.withdrawn_name(label)
+        if self.withdrawn_participant(None, label):
+            return SPEAKER_MATCH_EXACT
+        return self._name_match(label)
+
+    def withdrawn_speaker_label(self, label: str | None) -> bool:
+        """`withdrawn_speaker_match`, as a yes or no."""
+        return self.withdrawn_speaker_match(label) is not None
 
     def withdrawn_participant(self, entity_uuid: str | None, identifier: str | None) -> bool:
         """Is this participant (a file's row) a withdrawn person? By the uuid the
@@ -292,12 +424,14 @@ def withdrawn_but_held_message(held: list[dict]) -> str:
 
 
 def is_withdrawn_identifier(db: Session, project_uuid: str | None, identifier: str | None) -> bool:
-    h = identifier_hash(identifier)
-    if h is None or not project_uuid:
+    """The table's twin of `Tombstones.withdrawn_identifier` (#1605, D227): every form of
+    the ID, so a typed composed ID meets a row written before #1605 over a decomposed one."""
+    hs = identifier_hashes_for(identifier)
+    if not hs or not project_uuid:
         return False
     return db.query(RemovalTombstone.id).filter(
         RemovalTombstone.project_uuid == project_uuid,
-        RemovalTombstone.identifier_hash == h,
+        RemovalTombstone.identifier_hash.in_(sorted(hs)),
     ).first() is not None
 
 

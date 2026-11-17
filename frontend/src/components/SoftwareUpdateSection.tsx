@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { CircleArrowUp, ExternalLink, LoaderCircle, RefreshCw } from 'lucide-react'
+import { OutboundLink } from '@/components/OutboundLink'
 import { toast } from 'sonner'
 import { backupApi } from '@/lib/api'
 import { serverDetailMessage } from '@/lib/api/error-utils'
@@ -9,7 +10,8 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { useDesktopUpdates } from '@/hooks/useDesktopUpdates'
 
-const RELEASES_URL = `${CITATION_REPO_URL}/releases`
+// `as const` keeps the literal type, which `OutboundLink`'s https-only href requires (#1625).
+const RELEASES_URL = `${CITATION_REPO_URL}/releases` as const
 
 /**
  * Settings → "Software update" (#29 S3). Desktop-only: renders nothing without
@@ -77,15 +79,13 @@ export default function SoftwareUpdateSection() {
           This installation can't update itself
           {' '}(for example, an AppImage in a folder you can't write to).
           Download new versions from the{' '}
-          <a
+          <OutboundLink
             href={RELEASES_URL}
-            target="_blank"
-            rel="noopener noreferrer"
             className="text-mm-green-text underline underline-offset-2 hover:opacity-80"
           >
             releases page
             <ExternalLink className="inline w-3 h-3 ml-0.5 align-baseline" aria-hidden="true" />
-          </a>
+          </OutboundLink>
           .
         </p>
       ) : (
@@ -160,15 +160,13 @@ export default function SoftwareUpdateSection() {
               <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
               Check now
             </Button>
-            <a
+            <OutboundLink
               href={RELEASES_URL}
-              target="_blank"
-              rel="noopener noreferrer"
               className="inline-flex items-center gap-1 text-sm text-mm-text-muted hover:text-mm-text transition-colors"
             >
               Release notes
               <ExternalLink className="w-3 h-3" aria-hidden="true" />
-            </a>
+            </OutboundLink>
           </div>
           {downloaded && (
             <p className="text-xs text-mm-text-muted mt-2">

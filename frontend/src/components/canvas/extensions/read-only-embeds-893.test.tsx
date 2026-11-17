@@ -121,6 +121,15 @@ const VIEWS: {
   },
 ]
 
+/**
+ * A view whose read-only cases live in its own file, with the reason it is not a row above.
+ * The joint display carries no material tag (the tag cases cannot apply) and needs a server
+ * payload to draw its controls.
+ */
+const CASES_ELSEWHERE: Record<string, string> = {
+  'JointDisplayView.tsx': 'JointDisplayView.test.tsx › #893 — no tag; Edit, Remove, every input and the pin controls',
+}
+
 function mount(
   view: (typeof VIEWS)[number],
   opts: { editable: boolean; tag?: string | null },
@@ -198,9 +207,11 @@ describe('#893 — every embed view drops its mutation controls when the editor 
     })
       .map(srcRel)
       .map(p => p.split('/').pop() as string)
-      .filter(f => /(Embed|Stat)View\.tsx$/.test(f))
+      // Every node VIEW — widened from `(Embed|Stat)View` at joint display session B, whose
+      // `JointDisplayView` the old filter could not see (a population keyed on a naming habit).
+      .filter(f => /View\.tsx$/.test(f))
       .sort()
-    expect(found).toEqual(VIEWS.map(v => v.file).sort())
+    expect(found).toEqual([...VIEWS.map(v => v.file), ...Object.keys(CASES_ELSEWHERE)].sort())
   })
 
   it('the fallback is EDITABLE, so a surface that supplies no editor is unaffected', () => {

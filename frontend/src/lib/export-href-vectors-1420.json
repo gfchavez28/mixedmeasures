@@ -1,0 +1,31 @@
+{
+  "_about": "#1420 \u2014 one table, two readers: lib/export-href-1420.test.ts runs it through the client's exportableHref and backend/tests/test_canvas_export_word_1458.py through services/canvas_export.py::exportable_href, so the Word export keeps exactly the links the HTML and Markdown exports keep (#1339 D8's allow-list). Add a row here, never to one side.",
+  "kept": [
+    "https://example.org",
+    "http://example.org/x",
+    "mailto:pi@example.org",
+    "HTTPS://EXAMPLE.ORG",
+    " https://example.org/pasted ",
+    "\u00a0https://example.org/nbsp",
+    "\ufeffhttps://example.org/bom",
+    "\u3000https://example.org/ideographic-space"
+  ],
+  "refused": [
+    "javascript:alert(1)",
+    "JaVaScRiPt:alert(1)",
+    " javascript:alert(1)",
+    "\u0001javascript:alert(1)",
+    "java\tscript:alert(1)",
+    "java\nscript:alert(1)",
+    "vbscript:msgbox(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "file:///etc/passwd",
+    "www.example.org",
+    "#section-2",
+    "",
+    "   ",
+    "\u001chttps://example.org/file-separator",
+    "\u0085https://example.org/next-line",
+    "\u0001https://example.org/c0"
+  ]
+}

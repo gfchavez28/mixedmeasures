@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, isValidElement, cloneElement } from 'react'
 import { FOCUS_RING } from '@/lib/selection'
 import { Link, useNavigate, useLocation, matchPath } from 'react-router'
+import { OutboundLink } from '@/components/OutboundLink'
 import { useQuery } from '@tanstack/react-query'
 import {
   Sun,
@@ -1003,15 +1004,13 @@ function HelpMenu() {
           </ol>
           <p className="text-[11px] leading-relaxed text-[hsl(var(--mm-chrome-text-muted))] mb-2">
             Prefer to explore first? Download the Ferncrest example project from{' '}
-            <a
+            <OutboundLink
               href="https://mixedmeasures.com"
-              target="_blank"
-              rel="noopener noreferrer"
               className="text-[hsl(var(--mm-chrome-text))] underline underline-offset-2 hover:opacity-80"
             >
               mixedmeasures.com
               <ExternalLink className="inline w-2.5 h-2.5 ml-0.5 align-baseline" aria-hidden="true" />
-            </a>{' '}
+            </OutboundLink>{' '}
             and open it with Import Project on the Projects page.
           </p>
           <p className="text-[11px] leading-relaxed text-[hsl(var(--mm-chrome-text-muted))] mb-2">

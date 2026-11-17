@@ -6,6 +6,7 @@ import { LoadState } from '@/components/LoadStatus'
 import { useListLoad } from '@/hooks/useListLoad'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { ChevronDown, ChevronRight, Search, Link2, Layers, Table2 } from 'lucide-react'
+import { Link } from 'react-router'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
   ContextMenu,
@@ -25,6 +26,9 @@ import {
 } from '@/lib/api'
 import DomainPickerDetail from '@/components/analysis/DomainPickerDetail'
 import { variableViewPath } from '@/lib/dataset-routes'
+import { useAnalysisScope } from '@/hooks/useAnalysisScope'
+import { visibleAnalysisColumns } from '@/lib/analysis-scope'
+import { withheldRatingColumnsNotice } from '@/lib/blind-rating-columns'
 
 export type PickerMode = 'columns' | 'domains'
 
@@ -65,10 +69,14 @@ export function ColumnPicker({
   isCreatingScoreMetric,
 }: ColumnPickerProps) {
   const [search, setSearch] = useState('')
+  // #1615 — the list marks the rating scores hidden from the viewer while blind; the
+  // picker leaves them out and says how many under their dataset (the Data view's words).
+  const { coderScope, scopeKey, scopeReady } = useAnalysisScope(projectId)
 
   const columnsQuery = useQuery({
-    queryKey: ['analysis-columns', projectId],
-    queryFn: () => metricsApi.analysisColumns(projectId),
+    queryKey: ['analysis-columns', projectId, scopeKey],
+    queryFn: () => metricsApi.analysisColumns(projectId, coderScope),
+    enabled: scopeReady,
     staleTime: 60_000,
     retry: retryUnanswered,
     // #963 Tier 3 — MEASURED: the client default asked TWICE for one settled
@@ -77,7 +85,12 @@ export function ColumnPicker({
     // repeating an answered refusal buys nothing.
 
   })
-  const data = columnsQuery.data
+  const visible = useMemo(
+    () => (columnsQuery.data ? visibleAnalysisColumns(columnsQuery.data) : null),
+    [columnsQuery.data],
+  )
+  const data = visible?.data
+  const withheldByDataset = visible?.withheldByDataset
   /**
    * #963 Tier 3 — 🔴 MEASURED in Chrome on 2026-09-18, on a project with FOUR
    * datasets and 100 columns, with `/metrics/analysis-columns` failing:
@@ -240,6 +253,7 @@ export function ColumnPicker({
           <ColumnsView
             projectId={projectId}
             datasets={filteredDatasets}
+            withheldByDataset={withheldByDataset}
             selectedColumnIds={selectedColumnIds}
             equivInfo={equivInfo}
             expandedDatasetId={expandedDatasetId}
@@ -291,9 +305,12 @@ function ColumnsView({
   onToggleDataset,
   onSelectAllDataset,
   onViewAcrossDatasets,
+  withheldByDataset,
 }: {
   projectId: number
   datasets: AnalysisDatasetGroup[]
+  /** #1615 — how many rating scores each dataset's list leaves out while blind. */
+  withheldByDataset?: Map<number, number>
   selectedColumnIds: Set<number>
   equivInfo: EquivInfo
   expandedDatasetId: number | null
@@ -314,6 +331,7 @@ function ColumnsView({
         const selectedCount = dsColumnIds.filter(id => selectedColumnIds.has(id)).length
         const allSelected = selectedCount === dsColumnIds.length && dsColumnIds.length > 0
         const someSelected = selectedCount > 0 && !allSelected
+        const withheldNotice = withheldRatingColumnsNotice(withheldByDataset?.get(ds.id) ?? 0)
 
         return (
           <div
@@ -349,17 +367,25 @@ function ColumnsView({
                   )}
                 </span>
               </button>
-              <a
-                href={`/projects/${projectId}/datasets/${ds.id}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={`Open ${ds.name} in Dataset View`}
+              {/* #1625 (D238/D239): navigates in place (the packaged app opens no new
+                  window). It had a `title` only, naming the view's old name. */}
+              <Link
+                to={`/projects/${projectId}/datasets/${ds.id}`}
+                aria-label={`Open ${ds.name} in the Data view`}
+                title={`Open ${ds.name} in the Data view`}
                 className="p-0.5 rounded hover:bg-mm-surface-hover transition-colors shrink-0"
                 onClick={e => e.stopPropagation()}
               >
-                <Table2 className="w-3 h-3 text-mm-text-faint" />
-              </a>
+                <Table2 className="w-3 h-3 text-mm-text-faint" aria-hidden="true" />
+              </Link>
             </div>
+            {/* #1615 — under the dataset, not in the list: the Data view's sentence, read
+                whether or not the list is expanded (a collapsed group still lost them). */}
+            {withheldNotice && (
+              <p className="px-3 pb-1 text-xs text-mm-text-muted shrink-0" data-testid="withheld-rating-scores">
+                {withheldNotice}
+              </p>
+            )}
 
             {/* Column list — bounded and self-scrolling (#894).
                 This used to rely on a flexible ANCESTOR to constrain it. When
@@ -553,13 +579,10 @@ function ColumnRow({
             never got it. One home now, one line below, where the gate lives
             once (design note E — the popover thinning). */}
         <ContextMenuItem asChild>
-          <a
-            href={variableViewPath(projectId, q.dataset_id, q.id)}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
+          {/* #1625 (D238): navigates in place (the packaged app opens no new window). */}
+          <Link to={variableViewPath(projectId, q.dataset_id, q.id)}>
             Edit in the Variables view
-          </a>
+          </Link>
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>

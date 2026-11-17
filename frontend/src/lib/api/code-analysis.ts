@@ -1,5 +1,6 @@
 import type { LayerScope } from '@/lib/coding-layers'
 import api from './client'
+import type { AppliedCodeIdentity } from './segments'
 import { EXPORT_TIMEOUT_MS } from './download'
 import type { ReliabilityInterval } from '../reliability-interval'
 import type { MagnitudeScale } from '../magnitude'
@@ -79,6 +80,9 @@ export interface CodedSegmentWithContext {
    * and `is_quoted` already carries it. */
   quote_ranges: QuoteRange[]
   applied_code_ids: number[]
+  /** #1592 — who applied each code: one per application, from the rows the chips come
+   * from (so it follows the layer and, while blind, the viewer's own scope). REQUIRED. */
+  applied_code_details: AppliedCodeIdentity[]
   preceding_context: ContextSegment[]
   following_context: ContextSegment[]
   participant_id: number | null
@@ -147,6 +151,8 @@ export interface ConversationOption {
 export interface DemographicFilterOptionsResponse {
   filters: DemographicFilter[]
   conversations: ConversationOption[]
+  /** #1615: subtypes left out while blind (each holds a variable worked out from participant scores). */
+  withheld_rating_filters?: number
 }
 
 export interface CooccurrenceCodeInfo {
@@ -181,6 +187,12 @@ export interface CodedTextInfo {
   dataset_name: string
   column_name: string
   applied_code_ids: number[]
+  /** #1592 — who applied each code (see `CodedSegmentWithContext`). REQUIRED. */
+  applied_code_details: AppliedCodeIdentity[]
+  /** #1640 — the project counts this answer as no response (the server's `is_empty_text`,
+   *  over the project's own list). It stays in the list, marked, and out of the
+   *  Descriptives table's shares. REQUIRED: the client never re-derives it. */
+  counted_as_no_response: boolean
 }
 
 export interface DatasetTextGroup {
@@ -218,6 +230,11 @@ export interface CodeAnalysisFilterParams {
 
 // Source Frequencies
 export interface SourceFrequenciesRequest {
+  /** #1615 — sent ONLY while blind mode withholds (D102's shape): `coder_ids` is then the blind scope. */
+  ratings_follow_coder_ids?: boolean
+  /** #1615 (D297's Canvas path) — a Canvas embed's viewer, ONLY while withholding: its `coder_ids`
+   *  is the figure's saved scope, so the ratings question is asked of the viewer instead. */
+  ratings_viewer_id?: number
   code_ids?: number[] | null
   conversation_ids?: number[] | null
   text_column_ids?: number[] | null
@@ -321,6 +338,10 @@ export interface SourceFrequenciesResponse {
 
 // Demographic Comparison
 export interface DemographicComparisonRequest {
+  /** #1615 — sent ONLY while blind mode withholds (D102's shape). */
+  ratings_follow_coder_ids?: boolean
+  /** #1615 (D297's Canvas path) — a Canvas embed's viewer (see `SourceFrequenciesRequest`). */
+  ratings_viewer_id?: number
   code_ids?: number[] | null
   group_by_subtype: string
   /** #1297/#1298: per kind, absent = every source of that kind, a list = exactly
@@ -343,6 +364,9 @@ export interface GroupTotal {
   participants: number
   total_segments: number
   total_word_count: number
+  /** #1626 (D243): of `participants`, those with NO coding in scope — they count as
+   *  "did not use" every code; said through `lib/coding-completeness.ts`. */
+  without_coding: number
 }
 
 export interface GroupCodeStats {
@@ -365,6 +389,9 @@ export interface StatTestResult {
   significant: boolean
   effect_size: number | null
   effect_size_label: string | null
+  /** #1549 (a): why `effect_size` is null while the test ran (`undefined_stats` — today
+   *  `zero_cell`). Read it through `lib/stat-format.ts`; a real 0 is a value. */
+  effect_size_undefined_reason?: string | null
   min_attainable_p?: number | null
   /** `false` = cannot reach significance at these group sizes under the correction. */
   can_reach_significance?: boolean | null
@@ -411,6 +438,8 @@ export interface ComparisonScope {
   observations_left_out: number
   unassigned_passages: number
   participants_without_group: number
+  /** #1626 (D244): whose coding `GroupTotal.without_coding` is about — `lib/coding-completeness.ts`. */
+  no_coding_scope: string
 }
 
 export interface DemographicComparisonResponse {
@@ -443,6 +472,22 @@ export interface SaturationResponse {
    *  Absent on older payloads — the chart then says nothing rather than
    *  asserting an ordering it cannot verify. */
   ordering?: string
+}
+
+/**
+ * The saturation route's query (`GET …/code-analysis/saturation`). #1544: the three source
+ * lists keep "absent" (every source of the kind) apart from `''` (none of it) — built only
+ * by `lib/qual-comparison.ts::saturationParams`. The route has NO `text_column_ids`: the
+ * curve walks passages, never survey answers.
+ */
+export interface SaturationParams {
+  exclude_facilitator?: boolean
+  category_level?: boolean
+  conversation_ids?: string
+  document_ids?: string
+  observation_ids?: string
+  coder_ids?: string
+  layer_scope?: LayerScope
 }
 
 // Reconciliation grid (Track J · J2-5 M-1)
@@ -996,8 +1041,10 @@ export const codeAnalysisApi = {
       `/projects/${projectId}/code-analysis/codes/${codeId}/segments`, { params }
     ).then(r => r.data),
 
-  demographicFilters: (projectId: number) =>
-    api.get<DemographicFilterOptionsResponse>(`/projects/${projectId}/code-analysis/demographic-filters`).then(r => r.data),
+  /** #1615 (C2): `coderIds` — the viewer's id, ONLY while blind mode withholds. */
+  demographicFilters: (projectId: number, coderIds?: string) =>
+    api.get<DemographicFilterOptionsResponse>(`/projects/${projectId}/code-analysis/demographic-filters`,
+      coderIds ? { params: { coder_ids: coderIds } } : undefined).then(r => r.data),
 
   /** Track J · Group A (#3/#13): distinct coders who coded a source — or, with no
    *  source selector, anywhere in the project. Derived from codings (not the
@@ -1040,11 +1087,22 @@ export const codeAnalysisApi = {
     api.post<SourceFrequenciesResponse>(`/projects/${projectId}/code-analysis/source-frequencies`, data, config)
       .then(r => r.data),
 
+  /**
+   * #1548 — the EXPORT budget, not the client's 30 s default (#957's reason, applied):
+   * the code-by-group comparison measured 41.0 s on the encrypted D12 corpus at
+   * 59a4fe25 (27–28 s after #1548's cheaper gather), and the abort then retried
+   * (`retry: 1`), so the server ran the whole comparison twice while the panel showed
+   * nothing. The cost is the project's coding volume, which the client cannot know
+   * before asking, and the CSV of the same computation already has this budget
+   * (`exportApi.demographicComparisonCsv` → `downloadFromApi`). One call serves the
+   * page, the Canvas embed and the Canvas export. Pinned by `comparison-budget-1548.test.ts`.
+   */
   demographicComparison: (projectId: number, data: DemographicComparisonRequest) =>
-    api.post<DemographicComparisonResponse>(`/projects/${projectId}/code-analysis/demographic-comparison`, data)
-      .then(r => r.data),
+    api.post<DemographicComparisonResponse>(
+      `/projects/${projectId}/code-analysis/demographic-comparison`, data, { timeout: EXPORT_TIMEOUT_MS },
+    ).then(r => r.data),
 
-  saturation: (projectId: number, params?: { exclude_facilitator?: boolean; category_level?: boolean; conversation_ids?: string; document_ids?: string; observation_ids?: string; coder_ids?: string; layer_scope?: LayerScope }) =>
+  saturation: (projectId: number, params?: SaturationParams) =>
     api.get<SaturationResponse>(`/projects/${projectId}/code-analysis/saturation`, { params })
       .then(r => r.data),
 

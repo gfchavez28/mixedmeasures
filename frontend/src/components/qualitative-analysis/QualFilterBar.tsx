@@ -4,7 +4,7 @@ import { SELECTED_SEGMENT } from '@/lib/selection'
 import type { DemographicFilter } from '@/lib/api'
 import {
   NO_PARTICIPANT_MATCHES_VALUES, PARTICIPANT_FILTER_RULE, filterApplied, givenFilterNote,
-  type FilterValues, type ParticipantFilterState,
+  withheldRatingFiltersNotice, type FilterValues, type ParticipantFilterState,
 } from '@/lib/participant-filter'
 
 /**
@@ -25,6 +25,8 @@ interface QualFilterBarProps {
   onChooseValues: (values: FilterValues) => void
   /** *Clear all* / *Clear filter*. */
   onClear: () => void
+  /** #1615 D287 — the subtypes the server left out while blind (`withheld_rating_filters`). */
+  withheldCount?: number
 }
 
 const NO_VALUES: FilterValues = {}
@@ -110,7 +112,7 @@ function FilterDropdown({
   )
 }
 
-export default function QualFilterBar({ options, state, onChooseValues, onClear }: QualFilterBarProps) {
+export default function QualFilterBar({ options, state, onChooseValues, onClear, withheldCount = 0 }: QualFilterBarProps) {
   // The values shown are the page's: a list with no values behind it (D124) shows none.
   const values = state.kind === 'values' || state.kind === 'nobody' ? state.values : NO_VALUES
 
@@ -118,10 +120,17 @@ export default function QualFilterBar({ options, state, onChooseValues, onClear 
     onChooseValues({ ...values, [subtype]: vals })
   }, [onChooseValues, values])
 
-  if (options.length === 0) return null
+  const withheldNotice = withheldRatingFiltersNotice(withheldCount)
+  // A panel whose every variable is withheld still says so (D287) rather than rendering nothing.
+  if (options.length === 0 && !withheldNotice) return null
 
   return (
     <div>
+      {withheldNotice && (
+        <p className="mb-2 text-xs text-mm-text-muted leading-snug px-1" data-testid="participant-filter-withheld">
+          {withheldNotice}
+        </p>
+      )}
       <div className="space-y-2">
         {options.map(filter => (
           <FilterDropdown

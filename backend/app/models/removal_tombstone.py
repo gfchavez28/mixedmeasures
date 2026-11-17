@@ -1,8 +1,9 @@
 """#1190 — what a withdrawal removed, remembered so nothing brings it back.
 
 A row names ONE removed thing by its Track J ``uuid`` (the identity a merge
-matches on), or a withdrawn person by a hash of their identifier (the key
-participant linking matches on). It holds no words.
+matches on), or a withdrawn person by a hash of their identifier (participant
+linking's key, composed — #1605) or of a name they were known by (the
+`participant_name` kind, #1472). It holds no words.
 
 🔴 **Keyed on the PROJECT'S UUID, deliberately with no foreign key.** An
 overwrite import deletes the project tree and re-creates it under the same
@@ -28,7 +29,8 @@ class RemovalTombstone(Base):
     #: `services/tombstones.ENTITY_TYPES`)
     entity_type = Column(String(32), nullable=False)
     entity_uuid = Column(String(36), nullable=True)
-    #: participant tombstones only — `services/tombstones.identifier_hash`.
+    #: the `participant` and `participant_name` kinds only — `services/tombstones.py`
+    #: decides each kind's hash (two rules, one per kind, #1605).
     identifier_hash = Column(String(64), nullable=True)
     #: "withdrawal" (what a withdrawal removed) or "reinstated" (D12's confirmed
     #: re-use of a withdrawn identifier).

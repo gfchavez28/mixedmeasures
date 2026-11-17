@@ -223,8 +223,9 @@ describe('ExportDialog — while blind, the files hold your own coding (#1530)',
       request: { exclude_facilitator: true, coder_ids: [2] },
       categoryMode: false, scope: 'Scope: coders: Alice', projectName: 'Ferns',
     })
-    // D95: not coding views, or every coder by design (#454) — asked exactly as before.
-    expect(datasetsExcel).toHaveBeenCalledWith(1)
+    // #1608: the datasets workbook carries the participant table's rating columns.
+    expect(datasetsExcel).toHaveBeenCalledWith(1, '2')
+    // Every coder by design (#454) — asked exactly as before.
     expect(exportApi.codebook).toHaveBeenCalledWith(1)
   })
 

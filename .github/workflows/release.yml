@@ -645,6 +645,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SIGNED: ${{ secrets.CSC_LINK != '' }}
         run: |
+          # #1610: GitHub runs `shell: bash` as `bash --noprofile --norc -eo pipefail`, and `set -uo`
+          # does not clear the -e, so errexit is turned off explicitly (build-config.test.js holds it).
+          set +e
           set -uo pipefail   # NOT -e: run every check, aggregate, decide at the end
           APP="$(find release -maxdepth 4 -name '*.app' -print -quit)"
           ZIPS=( release/*-mac-*.zip )
@@ -767,6 +770,10 @@ jobs:
         env:
           SIGNED: ${{ secrets.CSC_LINK != '' }}
         run: |
+          # #1610: GitHub runs `shell: bash` as `bash --noprofile --norc -eo pipefail`, and `set -uo`
+          # does not clear the -e, so errexit is turned off explicitly (build-config.test.js runs this
+          # body that way, with stand-in tools, and holds every step that says "NOT -e" to this line).
+          set +e
           set -uo pipefail   # NOT -e: run every check, aggregate, decide at the end
           APP="$(find release -maxdepth 4 -name '*.app' -print -quit)"
           DMG="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
@@ -793,9 +800,15 @@ jobs:
             node scripts/stapler.js validate "$2"
             verdict "$1" "$?"
           }
+          devid() {  # devid <app>; prints the signature's Authority= lines (all of codesign's output
+                     # when it has none) and succeeds only on a Developer ID Application (#1610)
+            local d; d="$(codesign --display --verbose=4 "$1" 2>&1)"
+            grep 'Authority=' <<<"$d" || printf '%s\n' "$d"   # here-strings: no pipe for -q to SIGPIPE
+            grep -q 'Authority=Developer ID Application' <<<"$d"
+          }
 
           check "codesign --verify --deep --strict"        codesign --verify --deep --strict --verbose=2 "$APP"
-          check "signature is Developer ID Application"     bash -c "codesign --display --verbose=4 '$APP' 2>&1 | grep -q 'Authority=Developer ID Application'"
+          check "signature is Developer ID Application"     devid "$APP"
           check "spctl Gatekeeper assess (execute)"         spctl --assess --type execute --verbose "$APP"
           ticket "stapler validate (.app notarization)"     "$APP"
           [ -n "${DMG:-}" ] && ticket "stapler validate (.dmg)" "$DMG"

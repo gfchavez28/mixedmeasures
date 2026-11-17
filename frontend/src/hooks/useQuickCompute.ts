@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { metricsApi, QuickComputeRequest, MetricDefinitionResponse } from '../lib/api'
+import { coderIdsField } from '../lib/analysis-scope'
 
 const DEBOUNCE_MS = 300
 
@@ -26,6 +27,8 @@ export interface QuickComputeParams {
   groupingMode?: 'column' | 'dataset' | null
   excludeValues?: string[] | null
   decompose?: boolean
+  /** #1615 — `AnalysisScope.coderIds`: the viewer alone while blind, null for every coder. */
+  coderIds?: number[] | null
 }
 
 export function useQuickCompute(projectId: number): UseQuickComputeReturn {
@@ -54,7 +57,7 @@ export function useQuickCompute(projectId: number): UseQuickComputeReturn {
   }, [])
 
   const compute = useCallback((params: QuickComputeParams) => {
-    const { columnIds, domainIds, metricType, config, groupingColumnId, groupingColumnId2, groupingMode, excludeValues, decompose } = params
+    const { columnIds, domainIds, metricType, config, groupingColumnId, groupingColumnId2, groupingMode, excludeValues, decompose, coderIds } = params
 
     // Nothing selected — clear
     if (columnIds.length === 0 && domainIds.length === 0) {
@@ -96,6 +99,7 @@ export function useQuickCompute(projectId: number): UseQuickComputeReturn {
         grouping_mode: groupingMode ?? null,
         exclude_values: excludeValues ?? null,
         decompose: decompose || undefined,
+        ...coderIdsField(coderIds ?? null),
       }
 
       try {
