@@ -36,6 +36,8 @@ const REVIEWED = Object.freeze({
   // MacUpdater), so this entry stands only while 44.x descends from 42's fix.
   // Re-read 2026-10-24 and 2026-10-28 for 44.9.3 (#1366): both copies unchanged since 2026-09-29, and
   // 44.7.0's Squirrel.Mac roll (8d808803 -> fffea30e, #54204) is 3 commits ahead of the old pin and 0 behind.
+  // Re-read 2026-11-18 for 44.11.2 (1.7.0): both copies still dated 2026-09-29, and 44.11.2's DEPS pin
+  // (fffea30e) and patches/squirrel.mac tree are 44.9.3's.
   'GHSA-vv43-5jgx-7qv8': "the repository copy's open range '>= 40.0.0-alpha.1' is a slip: GitHub's curated copy reads " +
     "'< 41.10.5' for that line and the advisory names 42.0.0-beta.2 as fixed, which 44.x descends from",
 })

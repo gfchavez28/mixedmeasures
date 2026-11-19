@@ -187,6 +187,14 @@ class TestTheSuggestionsIncludeAnswers:
         r = _passages(ax, "High", PLAN, text_column_ids=[FREE])
         assert r["answers"][0]["is_quoted"] is True
 
+    def test_an_answer_names_its_whole_quote_by_id(self, ax):
+        """#1704 (b) (D384): the picker's "pinned here" — an answer's whole quote, by id."""
+        assert _passages(ax, "High", PLAN, text_column_ids=[FREE])["answer_quote_ids"] == {}
+        quote = Excerpt(project_id=PID, dataset_value_id=ax.t10)
+        ax.db.add(quote)
+        ax.db.flush()
+        assert _passages(ax, "High", PLAN, text_column_ids=[FREE])["answer_quote_ids"] == {ax.t10: quote.id}
+
     def test_the_endpoint_answers_with_the_answers(self, ax):
         body = JointDisplayPassagesRequest(group_by_column_id=GROUP, group="High", code_id=PLAN,
                                            text_column_ids=[FREE])

@@ -10,7 +10,7 @@
  *
  * ⚠️ The body mounts only while open, so a closed picker holds no query observer (§8).
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -24,9 +24,14 @@ import { MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
 import {
   pinPassagesRequest, pinPoolUnit, type DisplayCoderScope, type JointDisplay, type JointDisplayPin,
 } from '@/lib/joint-display'
-import { GROUPING_GONE_TEXT, PIN_PICKER_DESCRIPTION, pinPickerText } from '@/lib/joint-display-vocabulary'
+import {
+  GROUPING_GONE_TEXT, PIN_ALREADY_PINNED_TEXT, PIN_ALREADY_QUOTED_TEXT, PIN_PICKER_DESCRIPTION,
+  PIN_PINNED_HERE_TEXT, pinPickerText,
+} from '@/lib/joint-display-vocabulary'
 import { isGroupingGone } from '@/lib/joint-display-report'
 import { isImplicitPair } from '@/lib/joint-display-strands'
+import { wholeQuoteLabel } from '@/lib/quote-runs'
+import { landOnFirstField } from './focus-landing'
 
 interface PinPickerProps {
   open: boolean
@@ -37,9 +42,12 @@ interface PinPickerProps {
   group: string
   /** The row's codes the server resolved (name for each id) — with its strand (joint display slice 2, r2-5). */
   codes: { id: number; name: string; strandKey?: string }[]
-  scope: DisplayCoderScope
+  /** Null = no scope (blind, no viewer — D361): the request builder answers null, no read. */
+  scope: DisplayCoderScope | null
   /** Adds the pin to the LIVE display (`commitDisplay`); says whether it was already pinned. */
   onPin: (pin: JointDisplayPin) => 'added' | 'duplicate' | 'failed'
+  /** #1704 (b) (D384) — the quotes already pinned in this group when the picker opened. */
+  pinnedExcerptIds: readonly number[]
 }
 
 export default function PinPicker(props: PinPickerProps) {
@@ -64,14 +72,25 @@ export default function PinPicker(props: PinPickerProps) {
  * coded open-text ANSWER — always the whole answer, since a quote of an answer is the whole
  * answer (`excerpt_text_from`; the withdrawal scrub matches it by equality, #1473).
  */
-type Passage =
+type Passage = (
   | { kind: 'segment'; key: string; segment: CodedSegmentWithContext; text: string; who: string | null; source: string; quoted: boolean }
   | { kind: 'answer'; key: string; answer: JointDisplayAnswerPassage; text: string; who: string | null; source: string; quoted: boolean }
+) & {
+  /** #1704 (b) (D384): its WHOLE quote's id, the one a pin of it is — null when it has none. */
+  quoteId: number | null
+}
 
 function PickerBody({
-  projectId, display, group, codes, scope, onPin,
+  projectId, display, group, codes, scope, onPin, pinnedExcerptIds,
 }: PinPickerProps) {
   const queryClient = useQueryClient()
+  const uid = useId()
+  // #1704 (b) (D384): "pinned here" is THIS group's pins — those the picker opened with, plus
+  // what it pins (or is told is a duplicate) while open, since its `display` is the opening copy.
+  const [pinnedHere, setPinnedHere] = useState<ReadonlySet<number>>(() => new Set(pinnedExcerptIds))
+  // A passage pinned while open is marked by its key at once: a NEW quote's id reaches the list
+  // only when it refetches (`created` invalidates it), and the mark must not wait for that.
+  const [pinnedKeys, setPinnedKeys] = useState<ReadonlySet<string>>(() => new Set())
   // Joint display slice 2 (r2-5): the choice is a (strand, code) — one code may sit on two
   // strands over different sources, and a quote is chosen from ITS strand's sources.
   const [choice, setChoice] = useState(0)
@@ -95,12 +114,25 @@ function PickerBody({
     enabled: request != null,
   })
   const status = request == null ? 'ready' : listStatus(query)
+  // #1705 (a) (D386): the suggestions arrive after Radix's open autofocus, which found only
+  // Close. Once they answer, the first control takes focus (the code choice, else the first Pin)
+  // — once, and never stealing.
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const landed = useRef(false)
+  useEffect(() => {
+    if (status !== 'ready' || landed.current) return
+    landed.current = true
+    requestAnimationFrame(() => landOnFirstField(bodyRef.current?.querySelector<HTMLElement>('select, button')))
+  }, [status])
 
   const passages: Passage[] = useMemo(() => {
     const out: Passage[] = []
+    const segQuotes = query.data?.segment_quote_ids ?? {}
+    const ansQuotes = query.data?.answer_quote_ids ?? {}
     const seg = (s: CodedSegmentWithContext, source: string): Passage => ({
       kind: 'segment', key: `s${s.id}`, segment: s, text: s.text,
       who: s.participant_name ?? s.speaker_name, source, quoted: s.is_quoted,
+      quoteId: segQuotes[String(s.id)] ?? null,
     })
     for (const conv of query.data?.conversations ?? []) {
       for (const s of conv.segments) out.push(seg(s, conv.conversation_name))
@@ -110,10 +142,12 @@ function PickerBody({
     }
     for (const a of query.data?.answers ?? []) {
       out.push({ kind: 'answer', key: `a${a.dataset_value_id}`, answer: a, text: a.text,
-        who: a.participant_name, source: a.source_name, quoted: a.is_quoted })
+        who: a.participant_name, source: a.source_name, quoted: a.is_quoted,
+        quoteId: ansQuotes[String(a.dataset_value_id)] ?? null })
     }
     return out
   }, [query.data])
+  const isPinnedHere = (p: Passage) => pinnedKeys.has(p.key) || (p.quoteId != null && pinnedHere.has(p.quoteId))
 
   const pin = async (p: Passage) => {
     setPinning(p.key)
@@ -128,6 +162,10 @@ function PickerBody({
       })
       if (outcome === 'duplicate') toast.info('That quote is already pinned in this group.')
       if (outcome === 'added') toast.success('Quote pinned.')
+      if (outcome === 'added' || outcome === 'duplicate') {
+        setPinnedHere(s => new Set([...s, quote.id]))
+        setPinnedKeys(s => new Set([...s, p.key]))
+      }
       if (quote.created) {
         // A new quote: the Quote Board's and the passage lists' "quoted" marks move.
         queryClient.invalidateQueries({ queryKey: ['excerpts-quoted', projectId] })
@@ -141,7 +179,7 @@ function PickerBody({
   }
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col gap-3">
+    <div ref={bodyRef} className="flex-1 min-h-0 flex flex-col gap-3">
       {codes.length > 1 && (
         <label className="flex items-center gap-2 text-sm">
           <span className="text-mm-text-secondary">Code</span>
@@ -173,25 +211,35 @@ function PickerBody({
             {passages.length === 0 && (
               <li className="text-sm text-mm-text-muted">{words.empty}</li>
             )}
-            {passages.map(p => (
-              <li key={p.key} className="flex items-start gap-3 rounded-md border border-mm-border-subtle px-3 py-2">
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm text-mm-text">“{p.text}”</p>
-                  <p className="mt-0.5 text-xs text-mm-text-muted">
-                    {[p.who, p.source].filter(Boolean).join(' · ')}
-                    {p.quoted ? ' · already a quote' : ''}
-                  </p>
-                </div>
-                <Button
-                  type="button" size="sm" variant="outline" className={MODE_DISABLED_CLASS}
-                  aria-label={`Pin “${p.text.slice(0, 60)}”`}
-                  aria-disabled={pinning != null}
-                  onClick={() => { if (pinning == null) void pin(p) }}
-                >
-                  {pinning === p.key ? 'Pinning…' : 'Pin'}
-                </Button>
-              </li>
-            ))}
+            {passages.map(p => {
+              // #1704 (b) (D384): "pinned here" (this group's pin — Pin is unavailable, and says
+              // why) apart from "already a quote" (a quote anywhere — pinning it is fine).
+              const here = isPinnedHere(p)
+              const hereId = `${uid}-${p.key}-here`
+              return (
+                <li key={p.key} className="flex items-start gap-3 rounded-md border border-mm-border-subtle px-3 py-2">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-mm-text">“{p.text}”</p>
+                    <p className="mt-0.5 text-xs text-mm-text-muted">
+                      {[p.who, p.source].filter(Boolean).join(' · ')}
+                      {here ? ` · ${PIN_PINNED_HERE_TEXT}` : p.quoted ? ` · ${PIN_ALREADY_QUOTED_TEXT}` : ''}
+                    </p>
+                    {here && <span id={hereId} className="sr-only">{PIN_ALREADY_PINNED_TEXT}</span>}
+                  </div>
+                  <Button
+                    type="button" size="sm" variant="outline" className={MODE_DISABLED_CLASS}
+                    // #1714 (c), D398: the quote's name by code points, cut at a word and marked "…"
+                    // — `.slice(0, 60)` cut mid-word with no ellipsis and could split an emoji.
+                    aria-label={`Pin “${wholeQuoteLabel(p.text)}”`}
+                    aria-disabled={pinning != null || here}
+                    aria-describedby={here ? hereId : undefined}
+                    onClick={() => { if (pinning == null && !here) void pin(p) }}
+                  >
+                    {pinning === p.key ? 'Pinning…' : 'Pin'}
+                  </Button>
+                </li>
+              )
+            })}
           </ul>
         </>
       )}

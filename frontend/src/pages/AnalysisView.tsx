@@ -413,10 +413,12 @@ export default function AnalysisView() {
   const testsLoad = useListLoad(testsQuery)
 
   // Metric list — needed for test creation dialog (grouped metrics) and backward compat
+  // #1675 D358: the list's counts over a rating score are the server's to withhold while
+  // blind, so it is asked under the page's scope, keyed by it (#454).
   const { data: metricList } = useQuery({
-    queryKey: ['metrics', pid],
-    queryFn: () => metricsApi.list(pid),
-    enabled: !!pid,
+    queryKey: ['metrics', pid, scopeKey],
+    queryFn: () => metricsApi.list(pid, coderScope),
+    enabled: !!pid && scopeReady,
     staleTime: 300_000,
   })
 

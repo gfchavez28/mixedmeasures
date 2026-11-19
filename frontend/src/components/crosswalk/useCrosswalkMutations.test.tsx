@@ -110,6 +110,11 @@ vi.mock('@/lib/api/metrics', () => ({
   metricsApi: { list: vi.fn(), update: vi.fn() },
 }))
 
+// #1675 D358: the metrics list is keyed by the analysis scope; this suite runs not blind.
+vi.mock('@/hooks/useAnalysisScope', () => ({
+  useAnalysisScope: () => ({ coderIds: null, coderScope: undefined, scopeKey: 'every-coder', scopeReady: true }),
+}))
+
 import { toast } from 'sonner'
 import { equivalenceApi } from '@/lib/api/equivalence'
 import { domainsApi } from '@/lib/api/analysis-domains'
@@ -1452,7 +1457,8 @@ describe('createDomainMutation + createScoreMetricMutation chain', () => {
     // `expect.any(String)` so deterministic time isn't needed.
     const { result, qc, callbacks } = setupHook()
     // Seed empty metrics cache so the onSuccess patch path runs.
-    qc.setQueryData(['metrics', 1], { metrics: [], total: 0 } satisfies MetricListResponse)
+    // #1675 D358: the list's key carries the scope (`CrosswalkView`'s read), so the patch does.
+    qc.setQueryData(['metrics', 1, 'every-coder'], { metrics: [], total: 0 } satisfies MetricListResponse)
 
     const domain = buildDomain(77, 'Resilience')
     vi.mocked(domainsApi.create).mockResolvedValueOnce(domain)
@@ -1468,7 +1474,7 @@ describe('createDomainMutation + createScoreMetricMutation chain', () => {
       expect(result.current.createScoreMetricMutation.isSuccess).toBe(true),
     )
 
-    const metrics = qc.getQueryData<MetricListResponse>(['metrics', 1])
+    const metrics = qc.getQueryData<MetricListResponse>(['metrics', 1, 'every-coder'])
     expect(metrics?.total).toBe(1)
     expect(metrics?.metrics[0]).toMatchObject<Partial<MetricDefinitionSummaryResponse>>({
       id: 12345,

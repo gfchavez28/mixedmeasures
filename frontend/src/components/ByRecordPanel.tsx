@@ -12,6 +12,8 @@ import { useCodeShortcutLabels } from '@/hooks/useCodeShortcutLabels'
 import type { FloatingCoords } from '@/lib/floating-utils'
 import CodeChip from '@/components/qualitative-analysis/CodeChip'
 import { useCoders } from '@/hooks/useCoders'
+import { useBlindScope } from '@/hooks/useBlindScope'
+import { withheldRatingColumnsNotice } from '@/lib/blind-rating-columns'
 import { mergeArchivedIntoCoderMap, chipHiddenWithArchived, type CoderLens } from '@/lib/coder-color'
 import { visibleCodeChipRows } from '@/lib/coding-progress'
 import { LoadState } from '@/components/LoadStatus'
@@ -81,12 +83,16 @@ export default function ByRecordPanel({
   // Auto-select first if none selected
   const currentRecordId = selectedRecordId ?? records[0]?.dataset_row_id ?? null
 
-  // Get context data for current record
+  // Get context data for current record. #1675 D359: a participant-table record's rating
+  // columns are withheld while blind, as the Data view withholds them — the scope rides the
+  // request and the key, and no read is made before blind mode settles (`useBlindScope`).
+  const { coderScope, scopeReady } = useBlindScope(projectId)
   const { data: context } = useQuery<RecordContext>({
-    queryKey: ['record-context', projectId, currentRecordId],
-    queryFn: () => textCodingApi.recordContext(projectId, currentRecordId!),
-    enabled: currentRecordId !== null,
+    queryKey: ['record-context', projectId, currentRecordId, coderScope ?? 'every-coder'],
+    queryFn: () => textCodingApi.recordContext(projectId, currentRecordId!, coderScope),
+    enabled: currentRecordId !== null && scopeReady,
   })
+  const withheldNotice = withheldRatingColumnsNotice(context?.withheld_rating_columns ?? 0)
 
   // Comments for current record
   const recordComments = useMemo(() => {
@@ -320,6 +326,9 @@ export default function ByRecordPanel({
                     </div>
                   ))}
                 </div>
+              )}
+              {withheldNotice && (
+                <p className="text-xs text-muted-foreground" data-testid="record-context-withheld">{withheldNotice}</p>
               )}
 
               {/* Position map */}

@@ -35,7 +35,8 @@ export type DisplayDialogRequest =
       group: string
       /** Joint display slice 2 (r2-5): each code with the strand it is offered from. */
       codes: { id: number; name: string; strandKey?: string }[]
-      scope: DisplayCoderScope
+      /** Null = no scope (blind, no viewer — D361): no request is built. */
+      scope: DisplayCoderScope | null
       pinnedExcerptIds: number[]
     }
   /** Joint display slice 2, round 2 (r5-2): a row's case view and its "cases that don't fit". */
@@ -44,10 +45,8 @@ export type DisplayDialogRequest =
       displayKey: string
       display: JointDisplay
       rowKey: string
-      /** The grouping variable's name, as the compute answered it. */
-      groupBy: string
-      /** The compute's own scope (D175), and D96's no-viewer case. */
-      scope: DisplayCoderScope
+      /** The compute's own scope (D175; null = none, D361), and D96's no-viewer case. */
+      scope: DisplayCoderScope | null
       noViewer: boolean
     }
 

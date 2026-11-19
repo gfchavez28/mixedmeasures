@@ -12,10 +12,12 @@ import { textCodingApi, type Code, type TextCodingResponse, type RecordContext, 
 import type { MagnitudeScale } from '@/lib/magnitude'
 import CodeChip from '@/components/qualitative-analysis/CodeChip'
 import { useCoders } from '@/hooks/useCoders'
+import { useBlindScope } from '@/hooks/useBlindScope'
 import { mergeArchivedIntoCoderMap, chipHiddenWithArchived, type CoderLens } from '@/lib/coder-color'
 import { visibleCodeChipRows } from '@/lib/coding-progress'
 import TextCodingContextMenu from '@/components/TextCodingContextMenu'
 import { LoadState } from '@/components/LoadStatus'
+import { withheldRatingColumnsNoticeAcross } from '@/lib/blind-rating-columns'
 import type { ListLoad } from '@/lib/list-status'
 import type { FloatingCoords } from '@/lib/floating-utils'
 import {
@@ -284,13 +286,32 @@ function ByTextTable({
     loadingRef.current = new Set<number>()
   }, [focalKey, projectId])
 
+  // #1675 D359: a participant-table record's rating columns are withheld while blind, so the
+  // context is read under the viewer's scope, and no read is made before blind mode settles.
+  // A scope change (blind ↔ reveal) starts the cache OVER inside the load effect — clearing it
+  // in a separate effect would leave nothing to re-run the load, since the rows did not change.
+  const { coderScope, scopeReady } = useBlindScope(projectId)
+  const loadedScopeRef = useRef(coderScope)
+  // #1701 (D381): what the loaded contexts left out, said once above the table — counted when
+  // they agree, without a number when texts from more than one dataset withhold differently.
+  const withheldNotice = useMemo(
+    () => withheldRatingColumnsNoticeAcross(Object.values(contextCache).map(c => c.withheld_rating_columns ?? 0)),
+    [contextCache],
+  )
+
   const needsContext = contextVisible.demographics || contextVisible.otherComments || contextVisible.nonComments
 
   // Load context for records when context toggles are on
   useEffect(() => {
-    if (!needsContext) return
+    if (!needsContext || !scopeReady) return
+    const scopeChanged = loadedScopeRef.current !== coderScope
+    if (scopeChanged) {
+      loadedScopeRef.current = coderScope
+      loadingRef.current = new Set<number>()
+      setContextCache({})
+    }
     const uniqueRowIds = [...new Set(comments.map(c => c.dataset_row_id))]
-    const toLoad = uniqueRowIds.filter(rid => !contextCache[rid] && !loadingRef.current.has(rid))
+    const toLoad = uniqueRowIds.filter(rid => (scopeChanged || !contextCache[rid]) && !loadingRef.current.has(rid))
     if (toLoad.length === 0) return
 
     // Mark all as loading to prevent duplicate requests
@@ -305,7 +326,7 @@ function ByTextTable({
         try {
           const results = await Promise.all(
             batch.map(rid =>
-              textCodingApi.recordContext(projectId, rid).then(ctx => [rid, ctx] as const)
+              textCodingApi.recordContext(projectId, rid, coderScope).then(ctx => [rid, ctx] as const)
             )
           )
           if (cancelled) break
@@ -324,7 +345,7 @@ function ByTextTable({
 
     return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [needsContext, comments, projectId])
+  }, [needsContext, comments, projectId, coderScope, scopeReady])
 
   const { handleItemClick: handleRowClick, handleArrowNav } = useSegmentSelection({
     items: comments,
@@ -429,6 +450,16 @@ function ByTextTable({
 
   return (
     <TooltipProvider delayDuration={300}>
+    {/* #1701 (D381): the context columns leave a blind viewer's rating columns out (D359), so
+        the table says so, as By Record and the Data view do. The wrapper is ALWAYS rendered —
+        swapping it in when the notice arrives would remount the scroller (#826: focus to
+        <body>) — and the scroller keeps its own definite-height box below the notice. */}
+    <div className="h-full flex flex-col">
+    {withheldNotice && (
+      <p className="shrink-0 px-4 py-1.5 text-xs text-muted-foreground border-b border-mm-border-subtle"
+        data-testid="by-text-withheld">{withheldNotice}</p>
+    )}
+    <div className="flex-1 min-h-0">
     <TableVirtuoso
       ref={virtuosoRef}
       data={comments}
@@ -634,6 +665,8 @@ function ByTextTable({
       components={byTextComponents}
       context={listContext}
     />
+    </div>
+    </div>
     </TooltipProvider>
   )
 }

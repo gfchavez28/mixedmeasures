@@ -70,11 +70,22 @@ export interface JointDisplayMetaInference {
   type: string | null
 }
 
+/**
+ * #1672 D353 — the coder view a stamp's numbers were read under: every coder (`'all'`), or one
+ * coder's own while withholding (their `users.id`) — exactly `displayCoderScope`'s two cases. A
+ * stamp from before D353, or whose coder did not travel in an import, has none (null): unknown.
+ */
+export type BaselineScope = 'all' | number
+
 /** D168.5 — what the row DREW when its meta-inference was saved: the cells as printed. */
 export interface JointDisplayRowBaseline {
   hash: string
   cells: Record<string, string>
   stamped_at: string
+  /** #1672 D353 — under whose coder view the cells were read; null = unknown. */
+  scope: BaselineScope | null
+  /** #1674 D357 — a withdrawal cleared the figures (`hash` and `cells` empty; the date kept). */
+  cleared: 'withdrawal' | null
 }
 
 export type RecordedStrandStatus = 'covers' | 'silent' | null
@@ -224,14 +235,24 @@ function readMeta(v: unknown): JointDisplayMetaInference | null {
   }
 }
 
+function readBaselineScope(v: unknown): BaselineScope | null {
+  if (v === 'all') return 'all'
+  return typeof v === 'number' && Number.isInteger(v) ? v : null
+}
+
 function readBaseline(v: unknown): JointDisplayRowBaseline | null {
   const b = asObject(v)
+  const scope = readBaselineScope(b.scope)
+  // #1674 D357: the server's withdrawal scrub keeps only the date (and the scope) of a stamp.
+  if (b.cleared === 'withdrawal') {
+    return { hash: '', cells: {}, stamped_at: asText(b.stamped_at), scope, cleared: 'withdrawal' }
+  }
   if (typeof b.hash !== 'string') return null
   const cells: Record<string, string> = {}
   for (const [k, val] of Object.entries(asObject(b.cells))) {
     if (typeof val === 'string') cells[k] = val
   }
-  return { hash: b.hash, cells, stamped_at: asText(b.stamped_at) }
+  return { hash: b.hash, cells, stamped_at: asText(b.stamped_at), scope, cleared: null }
 }
 
 // ── Forward compatibility (r1-9) ──────────────────────────────────────────────────────
@@ -512,6 +533,86 @@ export function changeStrandDataset(display: JointDisplay, strandKey: string, da
   }
 }
 
+/** #1671 D350 — what a display holds that was chosen under its CURRENT groups. */
+export interface RegroupHolds {
+  pins: number
+  /** Rules with a condition naming a group. */
+  groupRules: number
+  /** Cases the researcher added or removed by hand. */
+  pickedCases: number
+  /** Drift stamps — their cells are keyed by the current groups. */
+  stamps: number
+  /**
+   * #1688 (D370) — the groups the pins and the rules' group conditions sit under, first seen
+   * first. The display records a group's NAME, never the variable it was chosen under, so the
+   * warning names these rather than guessing a variable.
+   */
+  groups: string[]
+}
+
+export function regroupHolds(display: Pick<JointDisplay, 'rows'>): RegroupHolds {
+  const out: RegroupHolds = { pins: 0, groupRules: 0, pickedCases: 0, stamps: 0, groups: [] }
+  const seen = new Set<string>()
+  const note = (g: string) => { if (!seen.has(g)) { seen.add(g); out.groups.push(g) } }
+  for (const r of display.rows) {
+    out.pins += r.pins.length
+    r.pins.forEach(p => note(p.group))
+    const groupConditions = (r.misfit?.rule?.conditions ?? []).filter(c => c.kind === 'group')
+    if (groupConditions.length > 0) out.groupRules += 1
+    groupConditions.forEach(c => { if (c.kind === 'group') note(c.group) })
+    out.pickedCases += (r.misfit?.added.length ?? 0) + (r.misfit?.removed.length ?? 0)
+    if (r.baseline != null) out.stamps += 1
+  }
+  return out
+}
+
+/** #1671 D350 — does changing the grouping variable need asking first? */
+export function regroupNeedsAsking(display: Pick<JointDisplay, 'rows' | 'group_by_column_id'>): boolean {
+  if (display.group_by_column_id == null) return false
+  const h = regroupHolds(display)
+  return h.pins + h.groupRules + h.pickedCases + h.stamps > 0
+}
+
+/**
+ * #1671 D352 — the row's pins the display cannot PLACE: pinned under a group it does not have now
+ * (a regroup, a relabel, a group that lost its last member). KEPT, never dropped — grouping back
+ * places them again — so they are counted and named, by the one function each reader asks.
+ */
+export function pinsOutsideGroups(row: JointDisplayRow, groupKeys: readonly string[]): { count: number; groups: string[] } {
+  const present = new Set(groupKeys)
+  const outside = row.pins.filter(p => !present.has(p.group))
+  return { count: outside.length, groups: [...new Set(outside.map(p => p.group))] }
+}
+
+/**
+ * #1673 D355 — does a construct HOLD anything the researcher would lose? Bound codes or variables
+ * (or saved results), pins, a fit or a meta-inference, an implication, a rule or picked cases, a
+ * drift stamp. A new, empty, nameless row holds nothing and may still be dropped on save.
+ */
+export function rowHoldsWork(row: JointDisplayRow): boolean {
+  const bound = Object.values(row.bindings).some(b => b.code_ids.length > 0 || b.column_ids.length > 0)
+  const misfit = row.misfit != null
+    && ((row.misfit.rule?.conditions.length ?? 0) > 0 || row.misfit.added.length > 0 || row.misfit.removed.length > 0)
+  return bound
+    || row.result_material_ids.length > 0
+    || row.pins.length > 0
+    || row.fits.some(f => f.fit != null)
+    || !!row.meta_inference?.text?.trim()
+    || !!row.implication.trim()
+    || misfit
+    || row.baseline != null
+}
+
+/**
+ * #1673 D355 — the 1-based position of the first construct that has NO NAME and holds work, or
+ * null. The builder's *Save changes* drops nameless rows, so it is unavailable while one holds
+ * anything — *Remove construct* is the way to delete one; clearing its name is not.
+ */
+export function unnamedConstructHoldingWork(display: Pick<JointDisplay, 'rows'>): number | null {
+  const i = display.rows.findIndex(r => !r.construct.trim() && rowHoldsWork(r))
+  return i < 0 ? null : i + 1
+}
+
 export function newRowKey(): string {
   const c = globalThis.crypto
   return typeof c?.randomUUID === 'function'
@@ -571,7 +672,7 @@ export function unresolvedReferenceCount(display: JointDisplay): number {
 /**
  * The coder scope a display reads under — blind mode as the comparison does it (D175).
  * 🔴 From `useBlindMode().withholding`, never `blind` (#964: it fails closed while the roster
- * is unanswered), and the viewer alone while withholding; an unknown viewer withholds all.
+ * is unanswered), and the viewer alone while withholding.
  */
 export interface DisplayCoderScope {
   coderIds: number[] | null
@@ -580,9 +681,22 @@ export interface DisplayCoderScope {
   chipsFollow: boolean
 }
 
-export function displayCoderScope(withholding: boolean, self: number | null): DisplayCoderScope {
-  if (withholding) return { coderIds: self != null ? [self] : [], layerScope: 'human', chipsFollow: true }
+/**
+ * 🔴 #1675 D361: while withholding with NO viewer id there is no scope — null, and every request
+ * builder below answers null for it, so no read is made (D96), as `analysisScope` does. It was
+ * `coder_ids: []`, which the server reads as EVERY coder; the callers' gates were all that kept it
+ * from being sent.
+ */
+export function displayCoderScope(withholding: boolean, self: number | null): DisplayCoderScope | null {
+  if (withholding) return self != null ? { coderIds: [self], layerScope: 'human', chipsFollow: true } : null
   return { coderIds: null, layerScope: 'human', chipsFollow: false }
+}
+
+/** #1672 D353 — the stamp's name for a display scope: `'all'`, the one coder, or null (no scope). */
+export function baselineScopeOf(scope: DisplayCoderScope | null): BaselineScope | null {
+  if (scope == null) return null
+  if (scope.coderIds == null) return 'all'
+  return scope.coderIds.length === 1 ? scope.coderIds[0] : null
 }
 
 const ids = (list: (number | null)[]) => list.filter((x): x is number => x != null)
@@ -592,9 +706,9 @@ export function requestSources(list: (number | null)[] | null): number[] | null 
   return list == null ? null : ids(list)
 }
 
-/** The compute call for this display — null while it has no grouping variable. */
-export function computeRequest(display: JointDisplay, scope: DisplayCoderScope): JointDisplayComputeRequest | null {
-  if (display.group_by_column_id == null) return null
+/** The compute call for this display — null while it has no grouping variable, or no scope (D361). */
+export function computeRequest(display: JointDisplay, scope: DisplayCoderScope | null): JointDisplayComputeRequest | null {
+  if (display.group_by_column_id == null || scope == null) return null
   return {
     group_by_column_id: display.group_by_column_id,
     coder_ids: scope.coderIds,
@@ -651,9 +765,9 @@ export function pinPoolUnit(display: JointDisplay, strandKey: string | undefined
  * `codes` strand (a pin picked before slice 2 has none).
  */
 export function pinPassagesRequest(
-  display: JointDisplay, strandKey: string | undefined, group: string, codeId: number, scope: DisplayCoderScope,
+  display: JointDisplay, strandKey: string | undefined, group: string, codeId: number, scope: DisplayCoderScope | null,
 ): JointDisplayPassagesRequest | null {
-  if (display.group_by_column_id == null) return null
+  if (display.group_by_column_id == null || scope == null) return null
   const strand = pinStrand(display, strandKey)
   const answers = strand?.kind === 'text_codes'
   return {
@@ -888,7 +1002,46 @@ export function cellLabel(row: JointDisplayRowResult, key: string, strandLabel?:
 
 export interface RowDriftChange { key: string; label: string; was: string | null; now: string | null }
 
-/** The cells that moved since the baseline — empty when nothing did (silence is the signal). */
+/**
+ * What a row's drift stamp lets the viewer be told (#1672 D354, #1674 D357) — the ONE reading
+ * the construct detail, the Compact view and the Report view share:
+ * - `none` — no stamp, or nothing moved (silence is the signal);
+ * - `moved` — the cells that moved, compared within ONE coder view;
+ * - `other_scope` — the stamp was read under another coder view, or an unrecorded one: no
+ *   figures and no "moved" mark. 🔴 It fails closed both ways round: a blind viewer is never
+ *   shown a colleague-scoped stamp (a colleague's counts and rating means), and a viewer who
+ *   sees every coder is never told numbers moved because a blind coder saved;
+ * - `cleared` — a withdrawal cleared the figures (D357); the date is kept.
+ * `viewer` is `baselineScopeOf(scope)`; null (no scope, D361) compares nothing.
+ */
+export type RowDriftState =
+  | { kind: 'none' }
+  | { kind: 'moved'; changes: RowDriftChange[]; stampedAt: string }
+  | { kind: 'other_scope'; stampedAt: string }
+  | { kind: 'cleared'; stampedAt: string }
+
+export function rowDriftState(
+  baseline: JointDisplayRowBaseline | null, row: JointDisplayRowResult, viewer: BaselineScope | null,
+  strandLabel?: (strandKey: string) => string,
+): RowDriftState {
+  if (!baseline) return { kind: 'none' }
+  if (baseline.cleared === 'withdrawal') return { kind: 'cleared', stampedAt: baseline.stamped_at }
+  if (viewer == null || baseline.scope == null || baseline.scope !== viewer) {
+    return { kind: 'other_scope', stampedAt: baseline.stamped_at }
+  }
+  const changes = rowDrift(baseline, row, strandLabel)
+  return changes.length > 0 ? { kind: 'moved', changes, stampedAt: baseline.stamped_at } : { kind: 'none' }
+}
+
+/** Is the row's "moved" mark drawn (the Compact and Report views)? Only for `moved`. */
+export function rowMoved(baseline: JointDisplayRowBaseline | null, row: JointDisplayRowResult, viewer: BaselineScope | null): boolean {
+  return rowDriftState(baseline, row, viewer).kind === 'moved'
+}
+
+/**
+ * The cells that moved since the baseline — empty when nothing did. A raw comparison, scope-blind:
+ * screens read `rowDriftState`, never this (#1672).
+ */
 export function rowDrift(
   baseline: JointDisplayRowBaseline | null, row: JointDisplayRowResult, strandLabel?: (strandKey: string) => string,
 ): RowDriftChange[] {

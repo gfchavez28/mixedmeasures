@@ -17,6 +17,7 @@ from .joint_display_node import (
     display_of,
     display_referenced_excerpt_ids,
     display_search_text,
+    rekey_displays_in_json,
 )
 
 logger = logging.getLogger(__name__)
@@ -309,7 +310,9 @@ def duplicate_canvas(db: Session, project_id: int, canvas: Canvas) -> Canvas:
             table_column_order=t.table_column_order,
             viz_x=t.viz_x,
             viz_y=t.viz_y,
-            content=t.content,
+            # #1670 D349: a copied display gets its own key, or the two canvases' displays
+            # share their kept state when both are opened in one page session.
+            content=rekey_displays_in_json(t.content),
             searchable_text=t.searchable_text,
             referenced_source_ids=t.referenced_source_ids,
         )

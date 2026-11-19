@@ -61,6 +61,9 @@ export default function DisplayDialogHost({ projectId, children }: { projectId: 
           group={request.group}
           codes={request.codes}
           scope={request.scope}
+          // #1704 (b) (D384): the quotes already pinned in THIS group, as the picker opens.
+          pinnedExcerptIds={(request.display.rows.find(r => r.key === request.rowKey)?.pins ?? [])
+            .filter(p => p.group === request.group && p.excerptId != null).map(p => p.excerptId!)}
           onPin={pin}
         />
       )}
@@ -73,7 +76,6 @@ export default function DisplayDialogHost({ projectId, children }: { projectId: 
           rowKey={request.rowKey}
           scope={request.scope}
           noViewer={request.noViewer}
-          groupBy={request.groupBy}
           // r5: each edit of the row's misfit is ONE write to the live node (D213).
           onCommit={update => {
             const live = commitDisplay(request.displayKey, d => ({

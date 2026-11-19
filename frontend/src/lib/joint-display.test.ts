@@ -97,7 +97,9 @@ describe('what the display asks the server', () => {
 
   it('blind mode: the viewer alone while withholding — and nobody when the viewer is unknown (fail closed)', () => {
     expect(displayCoderScope(true, 7)).toEqual({ coderIds: [7], layerScope: 'human', chipsFollow: true })
-    expect(displayCoderScope(true, null)).toEqual({ coderIds: [], layerScope: 'human', chipsFollow: true })
+    // #1675 D361: no request at all, as `analysisScope` — `[]` is a spelling the server
+    // reads as everyone.
+    expect(displayCoderScope(true, null)).toBeNull()
     expect(displayCoderScope(false, 7)).toEqual({ coderIds: null, layerScope: 'human', chipsFollow: false })
   })
 })
@@ -138,7 +140,7 @@ describe('what a cell prints', () => {
 describe('drift (D168.5): what moved since the meta-inference was written', () => {
   const stamp = (r: JointDisplayRowResult) => {
     const cells = rowCells(r)
-    return { hash: fingerprintJointDisplayRow(cells).hash, cells, stamped_at: '2026-11-06' }
+    return { hash: fingerprintJointDisplayRow(cells).hash, cells, stamped_at: '2026-11-06', scope: 'all' as const, cleared: null }
   }
 
   it('says nothing without a baseline, and nothing when no printed cell moved', () => {

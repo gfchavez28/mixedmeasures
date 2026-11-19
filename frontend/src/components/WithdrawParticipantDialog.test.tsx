@@ -29,6 +29,7 @@ const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   unlinked_records_with_identifier: 0,
   canvas_quotes_unplaced: { quotes: 0, sections: [], snapshots: [] },
   canvas_misfit_cases: 0,  // joint display slice 2 (r3-6)
+  canvas_drift_stamps: 0,  // #1674 (D357)
   other_projects_with_identifier: { projects: [], total: 0 },
   pre_update_copies: { count: 0, folder: '/home/r/backups' },
   conversations: [{
@@ -140,7 +141,7 @@ describe('what the screen says will happen', () => {
   it('says a document about them stays, under "This will stay"', () => {
     setup(report({
       documents: [{ document_id: 3, name: 'Workplan P07', segments: 4,
-                    code_applications: 1, excerpts: 0, notes: 0 }],
+                    code_applications: 1, excerpts: 0, notes: 0, canvas_quotes: 0 }],
     }))
     const stay = screen.getByText('This will stay').parentElement!
     expect(stay).toHaveTextContent('The document “Workplan P07” stays, no longer linked to them')
@@ -199,7 +200,7 @@ describe('#1131 — the dialog’s description carries the decision', () => {
   it('describes what is removed, what stays, and that it cannot finish the job', () => {
     setup(report({
       documents: [{ document_id: 3, name: 'Workplan P07', segments: 4,
-                    code_applications: 1, excerpts: 0, notes: 0 }],
+                    code_applications: 1, excerpts: 0, notes: 0, canvas_quotes: 0 }],
     }))
     const dialog = screen.getByRole('alertdialog')
     expect(dialog).toHaveAccessibleDescription(/no per-person undo/)
@@ -218,12 +219,28 @@ describe('#1131 — the dialog’s description carries the decision', () => {
   it('#1320: the description names every copy that still holds the data, and recordings', () => {
     setup()
     const dialog = screen.getByRole('alertdialog')
-    expect(dialog).toHaveAccessibleDescription(/A full backup is taken first\. That backup, your earlier backups/)
-    expect(dialog).toHaveAccessibleDescription(/the safety copies kept before a merge or overwrite/)
-    expect(dialog).toHaveAccessibleDescription(/any file already exported or shared still hold everything this removes/)
-    expect(dialog).toHaveAccessibleDescription(/Automatic and On quit backups are replaced over time/)
-    expect(dialog).toHaveAccessibleDescription(/Settings › Backup & Data/)
-    expect(dialog).toHaveAccessibleDescription(/Recordings are not edited — their voice stays in the audio or video/)
+    expect(dialog).toHaveAccessibleDescription(/A full backup is taken first\. There is no per-person undo/)
+    expect(dialog).toHaveAccessibleDescription(
+      /backups, safety copies, the database copies taken before each update, projects duplicated from this one \(withdraw them there too\) and files already exported or shared/)
+    expect(dialog).toHaveAccessibleDescription(/Recordings are not edited\./)
+  })
+
+  /**
+   * The notice rule (2026-11-18, rewrite A): where the copies are and what the record recognises
+   * sit in a closed Details, and the record itself is a line under "This will stay" — always,
+   * because the record always stays. jsdom renders a closed <details>' contents, so what Chrome
+   * leaves out of the description is checked in the browser; here, PLACEMENT.
+   */
+  it('the notice rule: the longer account is in a closed Details, the record under "This will stay"', () => {
+    setup(report({ conversations: [], datasets: [], documents: [] }))
+    const details = document.querySelector('details')!
+    expect(details).not.toHaveAttribute('open')
+    expect(details.querySelector('summary')).toHaveTextContent('Where the copies are, and what the record recognises')
+    expect(details).toHaveTextContent(/Automatic and On quit backups are replaced over time/)
+    expect(details).toHaveTextContent(/Settings › Backup & Data/)
+    expect(details).toHaveTextContent(/its capitals count \(P01 and p01 can be two people\)/)
+    expect(screen.getByText('This will stay').parentElement)
+      .toHaveTextContent(/A record of the withdrawal, so a merge, import or link cannot bring them back\..*not anonymisation/)
   })
 
   it('#1320: a merged or split turn is named as removed whole, in the description', () => {

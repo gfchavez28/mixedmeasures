@@ -60,7 +60,10 @@ Each of ``rows`` (a list of objects):
   - ``baseline`` — the drift stamp (D168.5). Its ``cells`` are keyed ``<kind>:<id>:<rest>``
     or ``<kind>:<id>@<strand key>:<rest>`` with ``<kind>`` one of `BASELINE_KEY_TABLES` —
     the KEY carries an id, so the remap rewrites it too (slice 2, r1-7: an import otherwise
-    made every stamped cell "move").
+    made every stamped cell "move"). ``scope`` (#1672 D353) is ``"all"`` or a ``users.id`` —
+    the coder view the cells were read under — remapped through the coders remap and dropped
+    when that coder did not travel. ``cleared: "withdrawal"`` (#1674 D357) marks a stamp whose
+    ``hash`` and ``cells`` a withdrawal removed; ``stamped_at`` stays.
   - ``misfit`` — joint display slice 2, D173 (r3-1 … r3-6, r3-12): the row's "cases that
     don't fit", ``{"rule": {"conditions": [...]} | null, "added": [case], "removed":
     [case]}``, a case ``{"participant_id": int | null, "reason": str}`` — a stated rule
@@ -87,10 +90,12 @@ nothing remaps names the SOURCE install's row after an import.
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Callable
 
 JOINT_DISPLAY_NODE = "joint-display"
 DISPLAY_ATTR = "display"
+DISPLAY_KEY_ATTR = "displayKey"
 
 #: The pin attributes that are an `excerpt-embed`'s, in the embed's own names.
 PIN_EXCERPT_ATTRS = ("excerptId", "displayText", "sourceContext", "conversationId",
@@ -265,6 +270,51 @@ def row_misfit_cases(row: dict, *, strict: bool) -> list[dict]:
             for case in _objects(misfit.get(key), strict=strict, what="cases that don't fit")]
 
 
+def rekey_displays(doc, mint: Callable[[], str] | None = None) -> int:
+    """#1670 D349 — give every joint display in a Tiptap document a fresh ``displayKey``,
+    in place; returns how many it re-keyed.
+
+    The key identifies a display on the page (its export table, its dialogs, the kept
+    open rows, view choice and drafts — never stored data), so two nodes that share one
+    act as one. A COPY must therefore not carry its original's key: the client re-keys a
+    paste or drop (`extensions/joint-display.ts`, D348), and the server re-keys where IT
+    copies — `canvas.duplicate_canvas` and the `.mmproject` import's canvas remap. A
+    snapshot restore and a deleted section's restore bring back the SAME display, so they
+    keep its key and do not call this.
+    """
+    make = mint or (lambda: str(uuid.uuid4()))
+    count = 0
+
+    def _walk(node) -> None:
+        nonlocal count
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == JOINT_DISPLAY_NODE:
+            attrs = node.get("attrs")
+            if isinstance(attrs, dict):
+                attrs[DISPLAY_KEY_ATTR] = make()
+                count += 1
+        children = node.get("content")
+        if isinstance(children, list):
+            for child in children:
+                _walk(child)
+
+    _walk(doc)
+    return count
+
+
+def rekey_displays_in_json(content_json: str | None) -> str | None:
+    """`rekey_displays` over stored theme content (a JSON string) — the text unchanged,
+    byte for byte, when it holds no display or cannot be parsed."""
+    if not content_json:
+        return content_json
+    try:
+        doc = json.loads(content_json)
+    except (TypeError, ValueError):
+        return content_json
+    return json.dumps(doc) if rekey_displays(doc) else content_json
+
+
 def display_search_text(display: dict) -> list[str]:
     """What the researcher wrote and pinned — the search index's share of the node."""
     parts: list[str] = []
@@ -349,6 +399,8 @@ def remap_display(display: dict, lookup: Callable[[str, int], int | None]) -> No
         baseline = row.get("baseline")
         if isinstance(baseline, dict) and isinstance(baseline.get("cells"), dict):
             baseline["cells"] = _remap_baseline_cells(baseline["cells"], lookup)
+        if isinstance(baseline, dict):
+            _remap_baseline_scope(baseline, lookup)
         meta = row.get("meta_inference")
         if isinstance(meta, dict):
             _remap_keys(meta, META_INFERENCE_ID_KEYS, lookup)
@@ -379,6 +431,28 @@ def _remap_baseline_cells(cells: dict, lookup: Callable[[str, int], int | None])
         if new is not None:
             out[f"{parts[0]}:{new}{at}{strand}:{parts[2]}"] = value
     return out
+
+
+#: #1672 D353 — the drift stamp's ``scope``: ``"all"`` (every coder) or the ``users.id`` of the
+#: one coder whose own view it was read under while blind. An install-global id, so it goes
+#: through the import's coder remap, as ``meta_inference.author_id`` does.
+BASELINE_SCOPE_ALL = "all"
+BASELINE_SCOPE_TABLE = "coders"
+
+
+def _remap_baseline_scope(baseline: dict, lookup: Callable[[str, int], int | None]) -> None:
+    """A coder scope is remapped; one that did not travel is DROPPED, so it reads as unknown and
+    nothing is compared under it (D353) — never kept, which would name another coder here."""
+    if "scope" not in baseline:
+        return
+    scope = baseline["scope"]
+    if scope == BASELINE_SCOPE_ALL:
+        return
+    new = _one(BASELINE_SCOPE_TABLE, scope, lookup)
+    if new is None:
+        baseline.pop("scope")
+    else:
+        baseline["scope"] = new
 
 
 def keep_unresolved_case(case: dict) -> bool:

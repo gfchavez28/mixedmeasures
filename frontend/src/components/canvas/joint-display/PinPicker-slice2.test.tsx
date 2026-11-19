@@ -26,7 +26,7 @@ import { buildJointDisplayReport } from '@/lib/joint-display-report'
 import { pinAttribution } from './display-helpers'
 import {
   displayCoderScope, pinPassagesRequest, readDisplay, unresolvedReferenceCount,
-  type JointDisplay,
+  type JointDisplay, type JointDisplayPin,
 } from '@/lib/joint-display'
 import PinPicker from './PinPicker'
 
@@ -96,17 +96,81 @@ const QUOTE = {
   created: true,
 }
 
-function mount(display: JointDisplay, onPin = vi.fn(() => 'added' as const),
-  codes: { id: number; name: string; strandKey?: string }[] = [{ id: 31, name: 'Planning time' }]) {
+function mount(display: JointDisplay, onPin: (p: JointDisplayPin) => 'added' | 'duplicate' | 'failed' = vi.fn(() => 'added' as const),
+  codes: { id: number; name: string; strandKey?: string }[] = [{ id: 31, name: 'Planning time' }],
+  pinnedExcerptIds: number[] = []) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={qc}>
       <PinPicker open onOpenChange={() => {}} projectId={1} display={display} construct="Planning"
-        group="High" codes={codes} scope={EVERY} onPin={onPin} />
+        group="High" codes={codes} scope={EVERY} onPin={onPin} pinnedExcerptIds={pinnedExcerptIds} />
     </QueryClientProvider>,
   )
   return onPin
 }
+
+/** One page of answers — `quoteIds` maps a dataset value id to its whole quote's id (D384). */
+function answerPage(rows: { dv: number; text: string; quoted?: boolean }[], quoteIds: Record<string, number> = {}) {
+  return {
+    code_id: 31, code_name: 'Planning time', code_color: null, category_name: null,
+    total_segments: rows.length, conversation_total: 0, document_total: 0, observation_total: 0,
+    has_more: false, conversations: [], documents: [], observations: [], answer_total: rows.length,
+    answers: rows.map(r => ({ dataset_value_id: r.dv, text: r.text, column_id: 21, source_name: 'Survey › Comments',
+      participant_id: r.dv, participant_name: `T${r.dv}`, is_quoted: r.quoted ?? false })),
+    segment_quote_ids: {}, answer_quote_ids: quoteIds,
+  }
+}
+
+/**
+ * #1704 (b) (D384) — "pinned here" apart from "already a quote". Two answers share the words
+ * "Yes." (so a text match would mark both): only the one whose WHOLE quote is this group's pin
+ * reads "pinned here", and its Pin is unavailable and says why; the other, quoted elsewhere,
+ * reads "already a quote" and pins.
+ */
+describe('#1705 (a) (D386) — the picker opens on its first control, not on Close', () => {
+  it('one code: once the suggestions answer, focus is on the first Pin', async () => {
+    vi.mocked(jointDisplayApi.passages).mockResolvedValue(answerPage([{ dv: 503, text: 'No.' }, { dv: 504, text: 'Maybe.' }]))
+    mount(readDisplay(EXPLICIT), vi.fn(() => 'added' as const), [{ id: 31, name: 'Planning time · Survey comments', strandKey: 'cm' }])
+    const first = await screen.findByRole('button', { name: 'Pin “No.”' })
+    await waitFor(() => expect(first).toHaveFocus())
+  })
+})
+
+describe('#1704 (b) (D384) — pinned here, apart from already a quote', () => {
+  it('marks only the pinned answer, by its quote id — never by its words', async () => {
+    vi.mocked(jointDisplayApi.passages).mockResolvedValue(answerPage(
+      [{ dv: 501, text: 'Yes.', quoted: true }, { dv: 502, text: 'Yes.', quoted: true }, { dv: 503, text: 'No.' }],
+      { 501: 91, 502: 92 }))
+    const onPin = vi.fn((_p: JointDisplayPin) => 'added' as const)
+    mount(readDisplay(EXPLICIT), onPin, [{ id: 31, name: 'Planning time · Survey comments', strandKey: 'cm' }], [91])
+    expect(await screen.findByText('T501 · Survey › Comments · pinned here')).toBeInTheDocument()
+    expect(screen.getByText('T502 · Survey › Comments · already a quote')).toBeInTheDocument()
+    expect(screen.getByText('T503 · Survey › Comments')).toBeInTheDocument()
+
+    const [first, second] = screen.getAllByRole('button', { name: 'Pin “Yes.”' })
+    expect(first).toHaveAttribute('aria-disabled', 'true')
+    expect(first).toHaveAccessibleDescription('Already pinned in this group.')
+    fireEvent.click(first)
+    expect(vi.mocked(excerptsApi.wholePassage)).not.toHaveBeenCalled()   // the click guard
+    expect(second).not.toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('a pin made while open is marked at once', async () => {
+    vi.mocked(jointDisplayApi.passages).mockResolvedValue(answerPage([{ dv: 503, text: 'No.' }]))
+    // A NEW quote (`created: true`): the list's map has no id for it until a refetch, and the
+    // refetch here answers the same page — the picker's own record marks it at once.
+    vi.mocked(excerptsApi.wholePassage).mockResolvedValue({ ...QUOTE, id: 93, dataset_value_id: 503, created: true })
+    mount(readDisplay(EXPLICIT), vi.fn(() => 'added' as const), [{ id: 31, name: 'Planning time · Survey comments', strandKey: 'cm' }])
+    fireEvent.click(await screen.findByRole('button', { name: 'Pin “No.”' }))
+    // The
+    // DESCRIPTION is the assertion: while the press is in flight the button is unavailable too
+    // (`pinning`), so `aria-disabled` alone passed with the mark broken (the mutant run).
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Pin “No.”' }))
+      .toHaveAccessibleDescription('Already pinned in this group.'))
+    expect(screen.getByRole('button', { name: 'Pin “No.”' })).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByText('T503 · Survey › Comments · pinned here')).toBeInTheDocument()
+  })
+})
 
 describe('the pin picker (r4-2)', () => {
   it('lists a coded answer, and pins its WHOLE quote as an excerpt-embed with no conversation', async () => {
@@ -117,6 +181,7 @@ describe('the pin picker (r4-2)', () => {
       answer_total: 1,
       answers: [{ dataset_value_id: 501, text: 'Friday afternoons are protected', column_id: 21,
         source_name: 'Survey › Comments', participant_id: 10, participant_name: 'T10', is_quoted: false }],
+      segment_quote_ids: {}, answer_quote_ids: {},
     })
     vi.mocked(excerptsApi.wholePassage).mockResolvedValue(QUOTE)
     const display = readDisplay(EXPLICIT)

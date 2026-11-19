@@ -38,11 +38,11 @@ features, and 1.3.1, 1.5.2 and 1.5.4–1.5.7 changed existing behaviour.
   remembers: the ID with its accents encoded either way, and the ID as a name in other
   capitals or spacing. The other names an earlier withdrawal kept are still recognised only as
   they were written, since the audit trail does not hold them. (#1605)
-- **The first start rebuilds nine tables so that a deleted item's number is never given to a
-  new one.** On a test project with 1.2 million interview turns it added about 4 seconds to
-  that start, or about 11 seconds for an encrypted database. Numbers the app recorded before
-  the update are protected too; a few kinds it never recorded can be given out once more.
-  (#1639)
+- **The first start rebuilds ten tables so that a deleted item's number is never given to a
+  new one.** On a test project with 1.2 million interview turns the first nine added about 4
+  seconds to that start, or about 11 seconds for an encrypted database; the tenth holds the
+  variable groups. Numbers the app recorded before the update are protected too; a few kinds it
+  never recorded can be given out once more. (#1639, #1678)
 
 ### Changed
 
@@ -57,6 +57,42 @@ features, and 1.3.1, 1.5.2 and 1.5.4–1.5.7 changed existing behaviour.
   shows a deleted one as no longer in the project. Deleting a variable or a dataset now says so
   before you confirm, and a display whose grouping variable was deleted says that, instead of
   failing in general terms. (#1639)
+- **A chart saved over a variable group can no longer show another group under its name.** A
+  deleted variable group's number could be given to the next group made, so the chart drew the
+  new group's numbers. Variable groups now never reuse a number either. (#1678)
+- **A pasted or copied joint display no longer shares the original's identity.** A display
+  copied by paste, drag, *Duplicate canvas* or a project import kept the original's internal
+  key, so an export could print the original's table twice and an edit in one copy's dialogs
+  could land in the other. Each copy now gets its own. (#1670)
+- **Changing a joint display's grouping variable no longer drops pinned quotes or case rules
+  without a word.** The builder asks first when the display holds pins, a rule naming a group,
+  picked cases or saved numbers, and keeps everything if you keep the grouping. A rule naming a
+  group the display no longer has says so, and pins under such groups are counted and named on
+  the display and in every export. (#1671)
+- **While blind mode is on, a joint display no longer shows numbers saved under a colleague's
+  view.** The note that a meta-inference's numbers have moved now compares numbers read under
+  the same coder view only, and otherwise says they were read under another view. (#1672)
+- **Clearing a construct's name no longer deletes its work when you save.** *Save changes* is
+  unavailable while a construct without a name holds anything, and says which one to name.
+  (#1673)
+- **A withdrawal now also removes a pinned quote's purpose line and the numbers saved with a
+  joint display's meta-inferences, and checks the canvas before it takes its backup.** The
+  confirm and the done note count the saved numbers it clears. Opening a participant no longer
+  stalls the app while their withdrawal report reads a large canvas, and a canvas copy that
+  cannot be read now stops the withdrawal before any backup is made. (#1674, #1676)
+- **Blind mode now also hides colleagues' ratings in the Data view's variable-group scores and
+  in Text Coding's record context.** Each says how many it left out, and *Refresh scores* says
+  only that it ran. (#1675)
+- **The R script now counts an ordinal or yes/no variable's undeclared codes as the app does.**
+  A stored code the variable's labels never named became missing in R while the app counted it,
+  so the script's frequencies, means and per-group rows disagreed with the app. An answer with
+  no number at all still cannot travel in the script's data file, so the script names those
+  answers, and a test grouped by such a variable no longer claims to match the app's groups.
+  (#1677)
+- **A canvas with several joint displays computes them one at a time.** On a very large test
+  project, four displays opened together each took about twelve minutes; measured before the
+  build, one at a time finished all four within about seventy seconds. The displays also no
+  longer recompute when you return to the window. (#1679)
 - **A joint display bound to a code merged away in the codebook showed it at 0 in every
   group.** As on every other analysis screen, a merged or deactivated code is now left out of
   the display's numbers, and the row says why — naming the code its coding went to — in the
@@ -281,6 +317,14 @@ features, and 1.3.1, 1.5.2 and 1.5.4–1.5.7 changed existing behaviour.
   display says why the value is gone, and the builder shows the variable it still holds. A
   grouping variable deleted while the pin picker or the case view is open is now named the way
   the display names it. (#1653)
+
+### Security
+
+- **Moved the desktop app to Electron 44.11.2** (from 44.9.3). It fixes a Chromium bug in
+  reading XML (CVE-2026-125350) that attackers were already exploiting, stops trusting
+  certificates issued by eMudhra's revoked intermediates, which someone intercepting your
+  network could otherwise use against the update check, and carries the 44 line's fixes since
+  44.9.3.
 
 ## [1.6.0] - 2026-11-08
 

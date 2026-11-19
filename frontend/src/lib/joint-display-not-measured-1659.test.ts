@@ -145,7 +145,9 @@ describe('#1659 — the report table says why in each cell (the Report view and 
 
   it('the note’s sentence is the reworded one', () => {
     const { r } = report({ 's-int': strandOf('codes', 'not_measured', V.STRAND_NOT_MEASURED_BOUND_GONE) })
-    expect(r.note).toContain(STRAND_NOT_MEASURED_TEXT)
-    expect(r.note).not.toContain('nothing from this strand is bound to the construct')
+    // The notice rule (2026-11-18, rewrite D): with the fit definitions, in the Definitions.
+    const defs = r.definitions.join(' ')
+    expect(defs).toContain(STRAND_NOT_MEASURED_TEXT)
+    expect(defs).not.toContain('nothing from this strand is bound to the construct')
   })
 })

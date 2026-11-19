@@ -54,6 +54,8 @@ import { getContrastColor } from '@/lib/utils'
 import {
   withdrawalLocations, describeDeleteConsequence, withdrawalHeadline, withdrawalDoneNote,
   WITHDRAWAL_SCOPE_NOTE,
+  WITHDRAWAL_SCOPE_DETAILS,
+  WITHDRAWAL_SCOPE_DETAILS_LABEL,
   WITHDRAWAL_SECTION_FAILED_TITLE,
   bulkDeleteDescription,
   bulkDeleteRefusals,
@@ -61,6 +63,7 @@ import {
   unplacedCanvasQuotesNote,
 } from '@/lib/withdrawal-copy'
 import WithdrawParticipantDialog from '@/components/WithdrawParticipantDialog'
+import { NoticeDetails } from '@/components/NoticeDetails'
 import { ColorSwatchPicker } from '@/components/ColorSwatchPicker'
 import { useBlindScope } from '@/hooks/useBlindScope'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -1783,6 +1786,12 @@ function WithdrawalSectionBody({ report }: { report: WithdrawalReport }) {
       <p className="mt-2 text-[11px] text-mm-text-faint leading-snug">
         {WITHDRAWAL_SCOPE_NOTE}
       </p>
+      {/* The notice rule's R3 (2026-11-18, rewrite B): the rest, closed on every open. */}
+      <NoticeDetails label={WITHDRAWAL_SCOPE_DETAILS_LABEL} className="mt-1 text-[11px]">
+        <ul className="list-disc pl-4 space-y-0.5 leading-snug">
+          {WITHDRAWAL_SCOPE_DETAILS.map(l => <li key={l}>{l}</li>)}
+        </ul>
+      </NoticeDetails>
     </>
   )
 }

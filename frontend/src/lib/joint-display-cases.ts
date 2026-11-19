@@ -17,7 +17,8 @@ import { displayStrands, strandTag } from './joint-display-strands'
 import {
   CASE_LISTED_TEXT, CASE_NO_ANSWER_TEXT, CASE_NO_MATERIAL_TEXT, CASE_NOT_CODED_TEXT, CASE_NOT_USED_TEXT,
   CASE_USED_TEXT, CASE_VALUE_ABSENT_TEXT, MISFIT_COUNT_UNREAD_TEXT, MISFIT_RULE_UNAVAILABLE_TEXT,
-  misfitCountText, misfitRuleWithheldText, casePassagesText,
+  misfitCountText, misfitRuleWithheldText, misfitRuleGroupMissingText, casePassagesText,
+  SERVER_VOCABULARY,
 } from './joint-display-vocabulary'
 import { NO_VALUE } from './stat-format'
 
@@ -47,7 +48,7 @@ const ids = (cases: MisfitCase[]) => cases.map(c => c.participant_id).filter((x)
  * everywhere (the dialog's draft is never read before it is saved).
  */
 export function caseRequest(
-  display: JointDisplay, rowKey: string, scope: DisplayCoderScope,
+  display: JointDisplay, rowKey: string, scope: DisplayCoderScope | null,
   opts: { only: CaseListView; offset: number; limit: number },
 ): JointDisplayCasesRequest | null {
   const base = computeRequest(display, scope)
@@ -77,7 +78,7 @@ export function caseRequest(
 }
 
 /** r5-7 — the count alone (no person's facts): the open construct, the Report view, the export. */
-export function caseCountRequest(display: JointDisplay, rowKey: string, scope: DisplayCoderScope): JointDisplayCasesRequest | null {
+export function caseCountRequest(display: JointDisplay, rowKey: string, scope: DisplayCoderScope | null): JointDisplayCasesRequest | null {
   const row = display.rows.find(r => r.key === rowKey)
   if (!row || !hasMisfit(row)) return null
   return caseRequest(display, rowKey, scope, { only: 'all', offset: 0, limit: 0 })
@@ -171,6 +172,9 @@ export function caseListedText(c: JointDisplayCasesResponse['cases'][number], ru
 export function misfitStatusText(resp: JointDisplayCasesResponse, hasRule: boolean): string | null {
   if (!hasRule) return null
   if (resp.rule_withheld_columns.length > 0) return misfitRuleWithheldText(resp.rule_withheld_columns)
+  if (resp.rule_unavailable_reason === SERVER_VOCABULARY.MISFIT_RULE_GROUP_MISSING) {
+    return misfitRuleGroupMissingText(resp.rule_missing_groups ?? [])   // #1671 D351, by name
+  }
   if (resp.rule_unavailable_reason) {
     return MISFIT_RULE_UNAVAILABLE_TEXT[resp.rule_unavailable_reason] ?? MISFIT_RULE_UNAVAILABLE_TEXT.condition_invalid
   }
@@ -191,7 +195,7 @@ export function codeStrandsOf(display: JointDisplay) {
  * (not run, and said), and the row still binds it, so "a code this row no longer binds" was false.
  */
 export function ruleNamesFrom(
-  display: JointDisplay, groupBy: string,
+  display: JointDisplay,
   heads: {
     codes: { code_id: number; name: string }[]
     variables: { column_id: number; name: string }[]
@@ -201,11 +205,12 @@ export function ruleNamesFrom(
   const code = new Map([...(heads.inactive ?? []), ...heads.codes].map(c => [c.code_id, c.name]))
   const column = new Map(heads.variables.map(v => [v.column_id, v.name]))
   const strands = new Map(displayStrands(display).map(s => [s.key, strandTag(display, s)]))
+  const kinds = new Map(displayStrands(display).map(s => [s.key, s.kind as string]))
   return {
-    groupBy,
     code: id => code.get(id) ?? null,
     column: id => column.get(id) ?? null,
     strand: key => strands.get(key) ?? null,
+    strandKind: key => kinds.get(key) ?? null,
     codeStrandCount: codeStrandsOf(display).length,
   }
 }
@@ -214,22 +219,31 @@ export function ruleNamesFrom(
 
 /** One row's misfit facts as the report reads them — or 'unread' (the read failed or was not
  *  made, D96): the note then says so, and names no case it could not identify. */
-export type MisfitReportFacts = { countText: string | null; named: Map<number, string> } | 'unread'
+export type MisfitReportFacts = {
+  countText: string | null
+  named: Map<number, string>
+  /** #1703 (d) (D374) — named cases in none of the display's groups now (`group` null). */
+  outside: Set<number>
+} | 'unread'
 
 export function misfitReportFacts(resp: JointDisplayCasesResponse, hasRule: boolean): MisfitReportFacts {
   return {
     countText: misfitStatusText(resp, hasRule),
     named: new Map(resp.named_cases.map(c => [c.participant_id, c.label])),
+    outside: new Set(resp.named_cases.filter(c => c.group == null).map(c => c.participant_id)),
   }
 }
 
 /** For the note: the count text and the identifier lookup, from the facts (or their absence). */
 export function misfitNoteInputs(facts: MisfitReportFacts | undefined): {
-  countText: string; identifier: (pid: number) => string | null
+  countText: string; identifier: (pid: number) => string | null; outsideGroups: (pid: number) => boolean
 } {
   if (facts == null || facts === 'unread') {
     // Unknown is not "gone": '' numbers the case (exportCaseLabel) rather than calling it absent.
-    return { countText: MISFIT_COUNT_UNREAD_TEXT, identifier: () => '' }
+    return { countText: MISFIT_COUNT_UNREAD_TEXT, identifier: () => '', outsideGroups: () => false }
   }
-  return { countText: facts.countText ?? '', identifier: pid => facts.named.get(pid) ?? null }
+  return {
+    countText: facts.countText ?? '', identifier: pid => facts.named.get(pid) ?? null,
+    outsideGroups: pid => facts.outside.has(pid),
+  }
 }

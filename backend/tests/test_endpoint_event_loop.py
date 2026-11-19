@@ -47,7 +47,9 @@ from app.routers.excerpts import list_quoted_excerpts
 from app.routers.export import export_code_cooccurrence_csv
 from app.routers.codes import list_categories, list_codes
 from app.routers.conversations import list_conversations
-from app.routers.participants import delete_participant, list_participants, withdraw_participant
+from app.routers.participants import (
+    delete_participant, get_withdrawal_report, list_participants, withdraw_participant,
+)
 from app.routers.dataset import (
     append_import, create_participants_dataset, get_linkable_rows, import_dataset,
     link_by_column, preview_link_by_column, refresh_participants_dataset,
@@ -188,6 +190,13 @@ MUST_BE_SYNC = [
     # `…-slice-2-kit`'s sibling scratch `time_delete.py`): as async, the whole call was the freeze.
     (delete_participant, "encrypted D12, heavy canvas: 1.6s named in no list, 4.1-4.5s named in "
                          "every display — /health worst 1.4s / 4.3s, all on the loop, as async"),
+    # #1676 D362 — asked on EVERY participant panel open (and both confirms). Measured by the
+    # 2026-11-17c codebase audit on the slice 2 build's heavy canvas, plaintext (3 canvases x 30
+    # sections, a display naming 30 people, 30 snapshots; `…-audit-probes/lead/py/`): 4.49 s
+    # median (3.98-5.78) as async with its two canvas reads, all on the loop; 0.30 s on a light
+    # canvas. Reads the copies once since D362.
+    (get_withdrawal_report, "heavy canvas, plaintext: 4.49s (3.98-5.78) on the loop as async, "
+                            "two canvas parses; 0.30s light — asked on every panel open"),
     # #1463 D62 — TopRail reads the summary on EVERY project page. Measured by the
     # 2026-11-02e review on the D12 corpus (1.2M turns, nine coders), encrypted, over
     # HTTP: async, the whole call is the freeze; as def, [/health in brackets]. Its

@@ -113,7 +113,9 @@ from ..services.canvas import (
     extract_referenced_source_ids,
     walk_tiptap_nodes,
 )
-from ..services.joint_display_node import JOINT_DISPLAY_NODE, display_of, remap_display
+from ..services.joint_display_node import (
+    JOINT_DISPLAY_NODE, display_of, rekey_displays, remap_display,
+)
 from ..services.missing_declaration import realign_undeclared_numbers
 
 logger = logging.getLogger(__name__)
@@ -2073,6 +2075,9 @@ def _remap_canvas_content(content_json: str | None, remap: dict) -> tuple[str | 
             remap_display(display, lambda table, old: remap.get(table, {}).get(old))
 
     walk_tiptap_nodes(content, {JOINT_DISPLAY_NODE}, _rewrite_display)
+    # #1670 D349: an imported canvas is a copy — its displays get their own keys, so a
+    # page session that also opened the original shares none of their kept state.
+    rekey_displays(content)
 
     refs = extract_referenced_source_ids(content)
     return json.dumps(content), (json.dumps(refs) if refs else None)

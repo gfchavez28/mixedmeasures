@@ -139,3 +139,61 @@ describe('#1645 — the Compact view draws a rated code once, tagged "Rated"', (
     expect(headers).not.toContain(`${RATED_LINE_TAG}Workload`)
   })
 })
+
+/**
+ * #1713 (a)/(b), D392 + D394 — what each line and cell is NAMED. jsdom does not lay out, but
+ * Testing Library's name computation reads `aria-label`, `aria-hidden` and `sr-only` text as a
+ * browser would for these shapes; the drive reads the same names in Chrome's tree.
+ */
+describe('#1713 — the Compact table’s row headers and notes', () => {
+  it('D392: every strand line’s row header is "<tag>: <name>", the tag in its source casing', async () => {
+    mount()
+    const table = await screen.findByRole('table')
+    for (const name of ['Interviews: Morale', 'Interviews: Workload', 'Survey comments: Morale', `${RATED_LINE_TAG}: Morale`, 'Site visits: Morale']) {
+      expect(within(table).getByRole('rowheader', { name })).toHaveAttribute('aria-label', name)
+    }
+    // The drawn tag is unchanged (CSS uppercases it); only the name gains the separator.
+    expect(within(table).getAllByRole('rowheader').map(h => h.textContent)).toContain('InterviewsMorale')
+  })
+
+  it('D392: a line that formed the groups says so in its name, after the name (its badge is drawn)', async () => {
+    const p = payload()
+    const workload = p.rows[0].by_strand['s-int'].codes[1] as ReturnType<typeof code>
+    workload.formed_groups = 'grouping_variable' as never
+    api.compute.mockResolvedValue(p)
+    mount()
+    const table = await screen.findByRole('table')
+    const header = within(table).getByRole('rowheader', { name: 'Interviews: Workload, formed the groups' })
+    expect(header).toHaveTextContent('formed the groups')   // the visible badge
+    // CONTROL: its sibling, which formed nothing, has no such tail.
+    expect(within(table).getByRole('rowheader', { name: 'Interviews: Morale' })).toBeInTheDocument()
+  })
+
+  it('D394: a cell with a note names it ONCE — the note alone when there is no value; no description', async () => {
+    const p = payload()
+    // Both strands binding Morale carry the person-level rating (#1645): change it in each.
+    for (const key of ['s-int', 's-txt'] as const) {
+      const morale = p.rows[0].by_strand[key].codes[0] as ReturnType<typeof code>
+      // Low: no score at all (the sweep's cell); High: a value WITH a note (the other arm).
+      morale.cells[1].rating = { mean: null, n: 0, undefined_reason: 'no_scores' } as never
+      morale.cells[0].rating = { mean: -0.25, n: 4, undefined_reason: 'no_scores' } as never
+    }
+    api.compute.mockResolvedValue(p)
+    mount()
+    const table = await screen.findByRole('table')
+    const rated = within(table).getByRole('rowheader', { name: `${RATED_LINE_TAG}: Morale` }).closest('tr')!
+    const [high, low] = within(rated).getAllByRole('cell')
+    expect(low).toHaveAccessibleName('Nobody in this group has a score on this code.')
+    expect(high).toHaveAccessibleName('-0.25 (4 scores) — Nobody in this group has a score on this code.')
+    for (const cell of [high, low]) {
+      expect(cell).not.toHaveAttribute('title')          // was on the cell: name AND description
+      expect(cell).toHaveAccessibleDescription('')
+      const shown = cell.querySelector('[aria-hidden]')!
+      expect(shown).toHaveAttribute('title', 'Nobody in this group has a score on this code.')   // the mouse keeps it
+    }
+    // CONTROL: a cell with no note is plain text, nothing hidden.
+    const interviews = within(table).getByRole('rowheader', { name: 'Interviews: Workload' }).closest('tr')!
+    const plain = within(interviews).getAllByRole('cell')[0]
+    expect(plain.querySelector('[aria-hidden], .sr-only')).toBeNull()
+  })
+})

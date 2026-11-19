@@ -1233,23 +1233,53 @@ class TestTheCombinedSpeaker:
 
 
 class TestItFailsClosed:
-    def test_an_unreadable_canvas_section_rolls_the_withdrawal_back(self, db_session):
-        from fastapi import HTTPException
+    def _broken(self, db):
         from app.models.canvas import Canvas
-        from app.models.user import User
-        db = db_session
         _project(db)
         db.add(Segment(id=1, conversation_id=1, speaker_id=1, sequence_order=0, text="Wren."))
         canvas = Canvas(project_id=1, name="C"); db.add(canvas); db.flush()
         db.add(CanvasTheme(canvas_id=canvas.id, name="Broken", content="{not json"))
         db.commit()
+
+    def test_an_unreadable_canvas_section_is_refused_BEFORE_the_backup(self, db_session):
+        """#1676 D363 — the `pre_withdrawal` backup is never rotated, so a refusal after it left
+        a full copy of the project behind each time. Now: a 409 in the act's words, no backup."""
+        from fastapi import HTTPException
+        from app.models.user import User
+        db = db_session
+        self._broken(db)
+        backups = []
         with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(participants_router, "create_backup",
+                       lambda *a, **k: backups.append(1) or SimpleNamespace(filename="x.mmbackup"))
+            with pytest.raises(HTTPException) as exc:
+                participants_router.withdraw_participant(
+                    1, 1, user=db.get(User, 1), db=db)
+        assert exc.value.status_code == 409
+        assert "nothing was changed" in exc.value.detail
+        assert "Broken" in exc.value.detail
+        assert "a withdrawal cannot confirm" in exc.value.detail, "the act's own words"
+        assert backups == [], "no backup taken for a withdrawal that cannot run"
+        db.expire_all()
+        assert db.get(Participant, 1) is not None
+        assert db.get(Segment, 1).text == "Wren."
+
+    def test_a_copy_damaged_in_the_backups_window_rolls_back_as_a_409_naming_the_backup(
+            self, db_session):
+        """The check passed (the copy was damaged after it): the act refuses the same way, after
+        the backup, so the refusal names the backup it took — a 409 like its siblings, not a 500."""
+        from fastapi import HTTPException
+        from app.models.user import User
+        db = db_session
+        self._broken(db)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(participants_router, "check_canvas_copies", lambda *a, **k: None)
             mp.setattr(participants_router, "create_backup",
                        lambda *a, **k: SimpleNamespace(filename="pre_withdrawal_x.mmbackup"))
             with pytest.raises(HTTPException) as exc:
                 participants_router.withdraw_participant(
                     1, 1, user=db.get(User, 1), db=db)
-        assert exc.value.status_code == 500
+        assert exc.value.status_code == 409
         assert "nothing was changed" in exc.value.detail
         assert "Broken" in exc.value.detail
         assert "pre_withdrawal_x.mmbackup" in exc.value.detail

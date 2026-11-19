@@ -37,15 +37,26 @@ const path = require('node:path')
 // Taken 2026-10-28 over 44.10.0 (10-27, inside the window), whose release notes were read
 // that day: its named fixes (Node 24.22.1's CVEs) reach no Node API this shell calls
 // (RELEASING §1b's 1.5.8 block).
+// 1.7.0 takes 44.11.2 (2026-11-18, the 11-17 /security-audit's B1), again a security floor:
+//   - CVE-2026-125350, a use-after-free in Chromium's libxslt pattern-match cache (crbug
+//     582442907), exploited in the wild (Chrome's 11-09 post) and CISA-KEV from 2026-11-10.
+//     Its fix, Chromium 61cab3f77203, is backported in #55709 and released in 44.11.1;
+//     44.9.3 does not carry it, and no Electron advisory names it.
+//   - 44.11.2's distrust of eMudhra's revoked RSA intermediates (#55743, jr5w's family), on
+//     the update check's TLS. For that fix it was taken by name with the 7-day window
+//     overridden (`--min-release-age=0`), six days after its release.
+// Not taken, read 11-17/11-18: 44.11.3 (an Extensions UAF among ~35 backports, with an edit
+// outside patches/) and 44.11.4 (11-18: Node 24.22.3's security release, whose HTTP/2 and TLS
+// fixes reach no Node API this shell calls — a loopback `http.get` and `net.createServer`).
 //
 // A MAJOR move fails here until FLOOR moves with it, deliberately. A patched version is
 // per LINE (qmv3 is fixed in 42.10.0, 43.5.0 and 44.0.0-beta.6; jr5w in 42.11.16, 43.8.1,
-// 44.9.1 and 45.0.0-beta.6), so a bare "44.9.3 or higher" would wave through the next
+// 44.9.1 and 45.0.0-beta.6), so a bare "44.11.2 or higher" would wave through the next
 // line's early releases, which can lack a fix that was backported here.
 // Whoever changes the major reads that line's advisories and sets FLOOR to the version
 // they took. ⚠️ The move after 44 also needs #1121 first: Electron 46 removes the
 // synchronous safeStorage calls key-manager.js uses.
-const FLOOR = '44.9.3'
+const FLOOR = '44.11.2'
 
 const ELECTRON_DIR = __dirname
 const pkg = JSON.parse(fs.readFileSync(path.join(ELECTRON_DIR, 'package.json'), 'utf8'))

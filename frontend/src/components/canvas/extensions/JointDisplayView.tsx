@@ -23,10 +23,10 @@
  *   browser by `displayKey` (and in `display-store` so a re-created view keeps it); switching
  *   writes nothing to the node, so it makes no undo entry and no snapshot change.
  */
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef } from 'react'
 import { NodeViewWrapper } from '@tiptap/react'
 import type { NodeViewProps } from '@tiptap/core'
-import { useQuery } from '@tanstack/react-query'
+import { useIsFetching, useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Pencil, Trash2 } from 'lucide-react'
 import { useProjectLayout } from '@/layouts/ProjectLayout'
 import { useAuth } from '@/lib/auth-context'
@@ -40,16 +40,17 @@ import type {
   JointDisplayStrandResult, JointDisplayVariableStrand,
 } from '@/lib/api'
 import { NO_VALUE } from '@/lib/stat-format'
+import { plural } from '@/lib/format'
 import { SELECTED_TEXT, SELECTED_TINT } from '@/lib/selection'
 import {
   codeCellNote, computeRequest, displayCoderScope, formatObservationCode, formatStrandCodeCell, formatRatingCell, formatVariableCell,
   primaryFit,
-  ratingCellNote, readDisplay, rowDrift, unresolvedReferenceCount, variableCellNote,
-  type JointDisplay as JointDisplayModel, type JointDisplayRow,
+  ratingCellNote, readDisplay, rowMoved, baselineScopeOf, unresolvedReferenceCount, variableCellNote, pinsOutsideGroups,
+  type BaselineScope, type JointDisplay as JointDisplayModel, type JointDisplayRow,
 } from '@/lib/joint-display'
 import {
   CODED_COUNT_BASIS_TEXT, NOT_SUMMARISABLE_TEXT, OBSERVATION_BASIS_TEXT, OBSERVATION_LINE_TEXT, SURVEY_CELL_BASIS_TEXT, TEXT_CODES_BASIS_TEXT, RATING_BASIS_TEXT, RATING_WITHHELD_TEXT, RATED_LINE_TAG, SERVER_VOCABULARY as V, fitTerm, fitVocabulary,
-  attributionUnusableNote, inactiveCodeText, notMeasuredText, otherDatasetVariablesText,
+  attributionUnusableNote, computeQueueText, inactiveCodeText, notMeasuredText, otherDatasetVariablesText, pinsOutsideGroupsText,
 } from '@/lib/joint-display-vocabulary'
 import {
   codeStrandNoCoding, groupCodingCounts, isImplicitPair, rowRatedCodes, rowStrands, type ResolvedStrand,
@@ -74,6 +75,13 @@ type DisplayView = 'compact' | 'report'
 /** D176.3 — remembered in the browser, keyed by the display; per viewer, never in the document. */
 const viewStorageKey = (displayKey: string) => `mm-joint-display-view:${displayKey}`
 
+/**
+ * #1690 (D376) — the open construct's box inside its `colSpan` cell: width 0 so its content adds
+ * nothing to the auto-layout table's column widths, min-width 100% so it still fills the cell.
+ * Exported for its technique test; jsdom computes no layout, so the drive is the measurement.
+ */
+export const DETAIL_CELL_BOX = 'w-0 min-w-full'
+
 function storedView(displayKey: string): DisplayView {
   try {
     return displayKey && localStorage.getItem(viewStorageKey(displayKey)) === 'report' ? 'report' : 'compact'
@@ -90,7 +98,7 @@ function storeView(displayKey: string, view: DisplayView) {
   } catch { /* a blocked store keeps the choice for the page's life only */ }
 }
 
-export default function JointDisplayView({ node, updateAttributes, deleteNode, selected, editor }: NodeViewProps) {
+export default function JointDisplayView({ node, updateAttributes, deleteNode, selected, editor, extension }: NodeViewProps) {
   const { projectId } = useProjectLayout()
   const pid = Number(projectId)
   const isEditable = editor?.isEditable ?? true
@@ -103,6 +111,8 @@ export default function JointDisplayView({ node, updateAttributes, deleteNode, s
   const rawDisplay = node.attrs.display
   const display = useMemo(() => readDisplay(rawDisplay), [rawDisplay])
   const scope = useMemo(() => displayCoderScope(withholding, self), [withholding, self])
+  // #1672 D354: drift is compared only within the coder view this display reads under.
+  const viewerScope = useMemo(() => baselineScopeOf(scope), [scope])
   const request = useMemo(() => computeRequest(display, scope), [display, scope])
   // `useBlindScope`'s rule: wait for the blind state to settle, and while withholding with no
   // viewer id never read at all — a read with no one to scope to must not run (D96).
@@ -114,7 +124,17 @@ export default function JointDisplayView({ node, updateAttributes, deleteNode, s
     queryFn: () => jointDisplayApi.compute(pid, request!),
     enabled: request != null && scopeReady,
     staleTime: 60_000,
+    // #1679 D369: every display on an open canvas recomputed when the window regained focus
+    // after a minute — four or more heavy gathers at once (ReconciliationGrid's, IrrMatrix's rule).
+    refetchOnWindowFocus: false,
   })
+  // #1705 (b) (D387): displays compute one at a time (D368's lock), so every waiting display said
+  // "Computing…" like the one running. While others are in flight in this window, the line says
+  // this one may be waiting — "may", because the client cannot tell which one the server runs,
+  // and another window's computes are not counted. One display alone keeps the plain words.
+  const computesInFlight = useIsFetching({ queryKey: ['joint-display', pid] })
+  const othersComputing = query.isFetching ? Math.max(0, computesInFlight - 1) : 0
+  const queueNote = othersComputing > 0 ? computeQueueText(othersComputing) : null
 
   const pinIds = useMemo(
     () => [...new Set(display.rows.flatMap(r => r.pins.map(p => p.excerptId)).filter((x): x is number => x != null))].sort((a, b) => a - b),
@@ -123,12 +143,14 @@ export default function JointDisplayView({ node, updateAttributes, deleteNode, s
   const factsQuery = useQuery({
     // #1615: the display's blind scope in the key and the request (a rating-derived attribution
     // column's value is left out while blind), and no read before blind mode settles.
-    queryKey: ['joint-display-pin-facts', pid, pinIds, display.attribution.column_id, scope.coderIds?.join(',') ?? 'every-coder'],
+    queryKey: ['joint-display-pin-facts', pid, pinIds, display.attribution.column_id, scope?.coderIds?.join(',') ?? 'every-coder'],
     queryFn: () => jointDisplayApi.pinFacts(pid, {
-      excerpt_ids: pinIds, column_id: display.attribution.column_id, coder_ids: scope.coderIds,
+      excerpt_ids: pinIds, column_id: display.attribution.column_id, coder_ids: scope!.coderIds,
     }),
-    enabled: pinIds.length > 0 && scopeReady,
+    // D361: no scope (blind, no viewer) — no read.
+    enabled: pinIds.length > 0 && scopeReady && scope != null,
     staleTime: 60_000,
+    refetchOnWindowFocus: false,  // #1679 D369
   })
   const facts = useMemo(() => new Map((factsQuery.data?.pins ?? []).map(f => [f.excerpt_id, f])), [factsQuery.data])
   // #1615 D286: the attribution column's value was left out while blind — the server says so,
@@ -145,9 +167,17 @@ export default function JointDisplayView({ node, updateAttributes, deleteNode, s
   // (`../joint-display/display-store.ts`), so what must survive that is kept outside it: the
   // open rows and the view here, the drafts in `ConstructDetail`, the dialogs in `DisplayDialogHost`.
   const displayKey: string = node.attrs.displayKey ?? ''
-  const [open, setOpen] = useKeptState<Set<string>>(`jd-open:${displayKey}`, () => new Set())
-  const [view, setViewKept] = useKeptState<DisplayView>(`jd-view:${displayKey}`, () => storedView(displayKey))
-  const setView = useCallback((next: DisplayView) => { setViewKept(next); storeView(displayKey, next) }, [setViewKept, displayKey])
+  // #1699 (D379): Canvas Compare mounts a snapshot's copy and the live copy of one display under
+  // one key; its editors scope the kept state by SIDE (`JointDisplay.configure({ stateScope })`),
+  // and a scoped view never writes the stored view preference (a comparison is not a choice).
+  const stateScope: string = (extension?.options as { stateScope?: string } | undefined)?.stateScope ?? ''
+  const stateKey = stateScope ? `${stateScope}:${displayKey}` : displayKey
+  const [open, setOpen] = useKeptState<Set<string>>(`jd-open:${stateKey}`, () => new Set())
+  const [view, setViewKept] = useKeptState<DisplayView>(`jd-view:${stateKey}`, () => storedView(displayKey))
+  const setView = useCallback((next: DisplayView) => {
+    setViewKept(next)
+    if (!stateScope) storeView(displayKey, next)
+  }, [setViewKept, displayKey, stateScope])
   const openDialog = useDisplayDialogs()
 
   const lens = useMemo(() => ({ blind: withholding, self, machineCoderIds }), [withholding, self, machineCoderIds])
@@ -231,7 +261,7 @@ export default function JointDisplayView({ node, updateAttributes, deleteNode, s
             </p>
           </div>
           <div className="flex items-center gap-1" onMouseDown={e => e.stopPropagation()}>
-            <ViewSwitch displayKey={displayKey} value={view} onChange={setView} />
+            <ViewSwitch value={view} onChange={setView} />
             {view === 'compact' && display.rows.length > 0 && (
               <button type="button" className="text-xs text-mm-blue-text hover:underline px-1"
                 onClick={() => setOpen(allOpen ? new Set() : new Set(display.rows.map(r => r.key)))}>
@@ -292,8 +322,10 @@ export default function JointDisplayView({ node, updateAttributes, deleteNode, s
             misfitReads={misfitReads}
             results={results}
             ctx={{ coderName, withholding, self, asOf: formatWrittenDate(todayIso()) }}
+            viewerScope={viewerScope}
             isEditable={isEditable}
             onOpenConstruct={openInCompact}
+            queueNote={queueNote}
           />
         ) : (
           <>
@@ -303,10 +335,12 @@ export default function JointDisplayView({ node, updateAttributes, deleteNode, s
               settled={scopeReady}
               status={query.status}
               isFetching={query.isFetching}
+              queueNote={queueNote}
               error={query.error}
               data={data}
               resultByKey={resultByKey}
               results={results}
+              viewerScope={viewerScope}
               open={open}
               onToggle={toggle}
               fitLabel={(row, result) => (isImplicitPair(display)
@@ -329,11 +363,10 @@ export default function JointDisplayView({ node, updateAttributes, deleteNode, s
                   results={results}
                   draftKey={`jd-draft:${displayKey}:${row.key}`}
                   onChange={patch => changeRow(row.key, patch)}
-                  cases={{ projectId: pid, scope, settled, noViewer, groupBy: data?.group_by.name ?? 'The group' }}
+                  cases={{ projectId: pid, scope, settled, noViewer }}
                   // r5-2: the case view is a dialog hosted by the page (D213), like the pin picker.
                   onCasesRequest={canOpenDialogs && request ? () => openDialog({
-                    kind: 'cases', displayKey, display, rowKey: row.key,
-                    groupBy: data?.group_by.name ?? 'The group', scope, noViewer,
+                    kind: 'cases', displayKey, display, rowKey: row.key, scope, noViewer,
                   }) : null}
                   onPinRequest={canOpenDialogs ? (group => openDialog({
                     kind: 'pin', displayKey, display, rowKey: row.key, construct: row.construct, group,
@@ -378,8 +411,11 @@ export default function JointDisplayView({ node, updateAttributes, deleteNode, s
  * switches how ONE display is drawn, there is no tab panel. Native radios, so the arrow keys,
  * the group's single Tab stop and the checked state are the browser's.
  */
-function ViewSwitch({ displayKey, value, onChange }: { displayKey: string; value: DisplayView; onChange: (v: DisplayView) => void }) {
-  const name = `jd-view-${displayKey || 'display'}`
+function ViewSwitch({ value, onChange }: { value: DisplayView; onChange: (v: DisplayView) => void }) {
+  // #1699 (D379): the radio group's name is this MOUNTED figure's own. Named by `displayKey`, two
+  // copies of one display (Canvas Compare's sides) were one native radio group: checking Compact
+  // on one unchecked the other's, and the arrow keys moved focus into the other figure.
+  const name = `jd-view-${useId()}`
   return (
     <fieldset className="inline-flex rounded-md border border-mm-border-medium bg-mm-bg p-0.5 text-xs">
       <legend className="sr-only">View</legend>
@@ -400,7 +436,8 @@ function ViewSwitch({ displayKey, value, onChange }: { displayKey: string; value
 
 /** The Report view's states: the compute's, then the pins' facts and the saved results'. */
 function ReportBody({
-  display, request, settled, status, error, data, factsState, facts, attributionWithheld, attributionUnusable, misfitReads, results, ctx, isEditable, onOpenConstruct,
+  display, request, settled, status, error, data, factsState, facts, attributionWithheld, attributionUnusable, misfitReads, results, ctx,
+  viewerScope, isEditable, onOpenConstruct, queueNote,
 }: {
   display: JointDisplayModel
   request: boolean
@@ -408,6 +445,8 @@ function ReportBody({
   status: 'pending' | 'error' | 'success'
   error: unknown
   data: JointDisplayComputeResponse | undefined
+  /** #1705 (b) (D387) — "may wait for N others" while other displays compute; null alone. */
+  queueNote: string | null
   factsState: FactsState
   facts: Map<number, JointDisplayPinFact>
   attributionWithheld: string | null
@@ -415,6 +454,8 @@ function ReportBody({
   misfitReads: Map<string, MisfitRead>
   results: DisplayResultsState
   ctx: Parameters<typeof buildJointDisplayReport>[1]
+  /** #1672 D354 — the coder view the numbers were read under (`baselineScopeOf`). */
+  viewerScope: BaselineScope | null
   isEditable: boolean
   onOpenConstruct: (rowKey: string) => void
 }) {
@@ -422,7 +463,8 @@ function ReportBody({
   const tablesLoading = [...results.tables.values()].some(s => s === 'loading')
   const misfitsLoading = [...misfitReads.values()].some(r => r.status === 'loading' || r.status === 'idle')
   if (waiting || factsState === 'loading' || results.status === 'loading' || tablesLoading || misfitsLoading) {
-    return <LoadingNotice label="Preparing the report…" size="panel" />
+    const base = 'Preparing the report…'
+    return <LoadingNotice label={waiting && queueNote ? `${base} ${queueNote}` : base} size="panel" />
   }
   const unavailable = !request ? NO_GROUPING_TEXT
     : data === undefined ? computeFailureText(error) : null
@@ -442,23 +484,27 @@ function ReportBody({
   }, ctx)
   const resultByKey = new Map((data?.rows ?? []).map(r => [r.key, r]))
   const drifted = display.rows
-    .filter(r => { const res = resultByKey.get(r.key); return res != null && rowDrift(r.baseline, res).length > 0 })
+    .filter(r => { const res = resultByKey.get(r.key); return res != null && rowMoved(r.baseline, res, viewerScope) })
     .map(r => r.construct.trim() || 'Untitled construct')
   return <ReportView report={report} drifted={drifted} isEditable={isEditable} onOpenConstruct={onOpenConstruct} />
 }
 
 function DisplayBody({
-  display, request, settled, status, isFetching, error, data, resultByKey, results, open, onToggle, fitLabel, renderDetail,
+  display, request, settled, status, isFetching, queueNote, error, data, resultByKey, results, viewerScope, open, onToggle, fitLabel, renderDetail,
 }: {
   display: JointDisplayModel
   request: boolean
   settled: boolean
   status: 'pending' | 'error' | 'success'
   isFetching: boolean
+  /** #1705 (b) (D387) — "may wait for N others" while other displays compute; null alone. */
+  queueNote: string | null
   error: unknown
   data: JointDisplayComputeResponse | undefined
   resultByKey: Map<string, JointDisplayRowResult>
   results: DisplayResultsState
+  /** #1672 D354 — the coder view the numbers were read under (`baselineScopeOf`). */
+  viewerScope: BaselineScope | null
   open: Set<string>
   onToggle: (key: string) => void
   /** The Fit column: slice 1's label, or each pair's fit WITH its pair (`fitText`, the report's words). */
@@ -470,7 +516,8 @@ function DisplayBody({
   }
   // The disabled case first (`list-load-state.md` §1): waiting for blind mode to settle is a wait.
   if (!settled || (data === undefined && status !== 'error')) {
-    return <LoadingNotice label="Computing the joint display…" size="panel" />
+    const base = 'Computing the joint display…'
+    return <LoadingNotice label={settled && queueNote ? `${base} ${queueNote}` : base} size="panel" />
   }
   if (data === undefined) {
     return (
@@ -496,7 +543,10 @@ function DisplayBody({
             <th scope="col" className="px-2.5 py-2 font-semibold">Construct · measure</th>
             {groups.map(g => (
               <th key={g.key} scope="col" className="px-2.5 py-2 font-semibold">
-                {g.key} <span className="font-normal text-mm-text-muted">· {g.participants}{groupCodingCounts(display, data, g.key)
+                {/* #1713 (c), D395: the count's noun, for the name only — the look stays compact. Its
+                    space is OUTSIDE the sr-only span (a name computation may trim a child's own). */}
+                {g.key} <span className="font-normal text-mm-text-muted">· {g.participants}{' '}<span className="sr-only">
+                  {plural(g.participants, 'participant', 'participants')}</span>{groupCodingCounts(display, data, g.key)
                   // R3 (r2's found-beside 2): each code strand's own "with no coding", named when there are two or more.
                   .map(c => (withNoCodingLabel(c.withoutCoding) ? ` · ${c.tag ? `${c.tag}: ` : ''}${withNoCodingLabel(c.withoutCoding)}` : '')).join('')}</span>
               </th>
@@ -508,7 +558,9 @@ function DisplayBody({
           const result = resultByKey.get(row.key) ?? null
           const isOpen = open.has(row.key)
           const detailId = `jd-${row.key}-detail`
-          const moved = result != null && rowDrift(row.baseline, result).length > 0
+          const moved = result != null && rowMoved(row.baseline, result, viewerScope)
+          // #1671 D352: pins under a group this display does not have now — kept, and said.
+          const outside = pinsOutsideGroups(row, groups.map(g => g.key))
           return (
             <tbody key={row.key} className="border-t border-mm-border-subtle first:border-t-0">
               <tr className={isOpen ? 'bg-mm-surface-hover' : undefined}>
@@ -529,10 +581,23 @@ function DisplayBody({
               {result ? <MeasureRows display={display} row={row} result={result} strandFacts={data.strands} groups={groups.map(g => g.key)} results={results} /> : (
                 <tr><td colSpan={span} className="px-2.5 pl-8 pb-2 text-mm-text-muted">Not computed yet.</td></tr>
               )}
+              {outside.count > 0 && (
+                <tr><td colSpan={span} className="px-2.5 pl-8 pb-2 text-xs text-mm-orange-text" data-testid="jd-pins-outside-groups">
+                  {pinsOutsideGroupsText(outside.count, outside.groups)}
+                </td></tr>
+              )}
               {isOpen && (
                 <tr>
                   <td colSpan={span} className="px-3.5 pl-8 pb-3 bg-mm-surface-hover">
-                    {renderDetail(row, result, detailId)}
+                    {/* #1690 (D376): the open construct never widens the table. In an auto-layout
+                        cell an overflow box still gives the cell its content's minimum width, so a
+                        bound result's 11-column table pushed the Fit column off-screen. A width-0,
+                        full-min-width box contributes nothing to the column sizes and still fills
+                        the cell, so the result table scrolls in its own ScrollableTable. Measured
+                        in Chrome (jsdom computes no layout). */}
+                    <div className={DETAIL_CELL_BOX} data-construct-detail-box>
+                      {renderDetail(row, result, detailId)}
+                    </div>
                   </td>
                 </tr>
               )}
@@ -544,18 +609,35 @@ function DisplayBody({
   )
 }
 
+/**
+ * #1713 (b), D394 — a cell's note is exposed ONCE, in its name. The hover tooltip sits on an
+ * `aria-hidden` span around the visible text (#1287's measured shape: a title on an aria-hidden
+ * child gives no description), and the `sr-only` text says the note alone when the cell has no
+ * value, so the dash is not read twice (#753's pair: an sr-only fact beside an aria-hidden visual).
+ */
 function Cell({ text, note }: { text: string; note: string | null }) {
+  if (!note) return <td className="px-2.5 py-0.5 align-top text-mm-text">{text}</td>
   return (
-    <td className="px-2.5 py-0.5 align-top text-mm-text" title={note ?? undefined}>
-      {text}
-      {note && <span className="sr-only"> — {note}</span>}
+    <td className="px-2.5 py-0.5 align-top text-mm-text">
+      <span aria-hidden className="block" title={note}>{text}</span>
+      <span className="sr-only">{text === NO_VALUE ? note : `${text} — ${note}`}</span>
     </td>
   )
 }
 
+/**
+ * #1713 (a), D392 — a strand line's row header, named explicitly (#915's precedent): the tag and
+ * the name are two text nodes, so a computed name ran them together (*"SURVEYTraining hours"*).
+ * The tag in its source casing; the CSS uppercases only what is drawn.
+ */
+function strandLabelName(kind: string, name: string, formed: boolean): string {
+  return `${kind}: ${name}${formed ? ', formed the groups' : ''}`
+}
+
 function StrandLabel({ kind, name, formed }: { kind: string; name: string; formed: string | null }) {
   return (
-    <th scope="row" className="px-2.5 pl-8 py-0.5 text-left font-normal text-mm-text-secondary">
+    <th scope="row" aria-label={strandLabelName(kind, name, formed != null)}
+      className="px-2.5 pl-8 py-0.5 text-left font-normal text-mm-text-secondary">
       <span className="mr-1 text-[10.5px] font-semibold uppercase tracking-wide text-mm-text-muted">{kind}</span>
       {name}
       {formed && (
@@ -584,9 +666,13 @@ function MeasureRows({ display, row, result, strandFacts, groups, results }: {
     if (rs.notMeasured) {
       // #1659: the server's reason — "no code bound" was printed for every case, above the line
       // naming the bound code that was deleted or merged away.
-      rows.push(<tr key={`${k}-none`}><td colSpan={span + 1} className="px-2.5 pl-8 py-0.5 text-mm-text-muted">
-        <span className="mr-1 text-[10.5px] font-semibold uppercase tracking-wide">{rs.tag}</span>{notMeasuredText(rs.notMeasuredReason, rs.strand.kind)}
-      </td></tr>)
+      // #1713, D393: the line is a ROW HEADER (it was a cell no header named), named by its tag and
+      // the sentence, as a strand line is (D392).
+      const why = notMeasuredText(rs.notMeasuredReason, rs.strand.kind)
+      rows.push(<tr key={`${k}-none`}><th scope="row" colSpan={span + 1} aria-label={strandLabelName(rs.tag, why, false)}
+        className="px-2.5 pl-8 py-0.5 text-left font-normal text-mm-text-muted">
+        <span className="mr-1 text-[10.5px] font-semibold uppercase tracking-wide">{rs.tag}</span>{why}
+      </th></tr>)
       return
     }
     const sr = rs.result

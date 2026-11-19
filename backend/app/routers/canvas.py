@@ -954,6 +954,9 @@ def _decode_chart_tables(raw: dict[str, Any]) -> dict[int, ChartTable]:
 _MAX_DISPLAY_KEY_CHARS = 64
 _MAX_DISPLAY_CELL_CHARS = 10_000
 _MAX_DISPLAY_NOTE_CHARS = 20_000
+#: The Definitions' paragraphs (the notice rule, rewrite D): one per basis group, vocabulary,
+#: citation and construct with cases that don't fit — a display holds at most 100 constructs.
+_MAX_DISPLAY_DEFINITIONS = 200
 
 
 def _str_grid(headers: Any, rows: Any) -> tuple[list[str], list[list[str]]] | None:
@@ -1016,6 +1019,19 @@ def _decode_display_tables(raw: dict[str, Any], cells_used: int) -> dict[str, Di
             ))
         if grid is None:
             continue
+        # The notice rule (2026-11-18, rewrite D): the Definitions moved out of the note. Absent
+        # (an older client) reads as none; malformed drops the entry, as every field here does.
+        d_title, definitions = value.get("definitions_title", ""), value.get("definitions", [])
+        if not isinstance(d_title, str) or not isinstance(definitions, list) or not all(
+            isinstance(p, str) for p in definitions
+        ):
+            continue
+        if (
+            len(d_title) > _MAX_TABLE_CELL_CHARS or len(definitions) > _MAX_DISPLAY_DEFINITIONS
+            or any(len(p) > _MAX_DISPLAY_NOTE_CHARS for p in definitions)
+        ):
+            out[key] = DisplayTable(title=title, too_large=True)
+            continue
         cells = width * (len(rows) + 1) + sum(len(a.headers) * (len(a.rows) + 1) for a in appendix)
         strings = [*headers, *(c for r in rows for c in r)]
         appendix_strings = [s for a in appendix for s in (a.title, *a.headers, *(c for r in a.rows for c in r))]
@@ -1035,6 +1051,8 @@ def _decode_display_tables(raw: dict[str, Any], cells_used: int) -> dict[str, Di
             span_rows=span_rows,
             note=note,
             appendix=appendix,
+            definitions_title=d_title,
+            definitions=list(definitions),
         )
     return out
 

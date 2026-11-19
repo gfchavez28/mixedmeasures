@@ -233,8 +233,12 @@ export interface RowMatrixResponse {
 
 // API functions - Metrics
 export const metricsApi = {
-  list: (projectId: number) =>
-    api.get<MetricListResponse>(`/projects/${projectId}/metrics`).then(res => res.data),
+  // #1675 D358: `coderIds` while withholding — a metric over a rating score is marked and its
+  // counts left out (`withheld_rating_variables`), as #1615 decided.
+  list: (projectId: number, coderIds?: string) =>
+    api.get<MetricListResponse>(
+      `/projects/${projectId}/metrics`, coderIds ? { params: { coder_ids: coderIds } } : undefined,
+    ).then(res => res.data),
   computeAll: (projectId: number, staleOnly = false) =>
     api.post<ComputeAllResponse>(`/projects/${projectId}/metrics/compute-all`, { stale_only: staleOnly }).then(res => res.data),
   create: (projectId: number, data: {

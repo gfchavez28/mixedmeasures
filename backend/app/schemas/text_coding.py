@@ -187,6 +187,8 @@ class RecordContextResponse(BaseModel):
     texts: list[TextValueResponse]
     other_columns: list[NonTextValueResponse]
     column_positions: list[ColumnPositionResponse]
+    # #1675 D359 — the participant table's rating columns left out while blind.
+    withheld_rating_columns: int = 0
 
 
 class TextColumnResponse(BaseModel):

@@ -83,6 +83,7 @@ const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   unlinked_records_with_identifier: 0,
   canvas_quotes_unplaced: { quotes: 0, sections: [], snapshots: [] },
   canvas_misfit_cases: 0,  // joint display slice 2 (r3-6)
+  canvas_drift_stamps: 0,  // #1674 (D357)
   other_projects_with_identifier: { projects: [], total: 0 },
   pre_update_copies: { count: 0, folder: '/home/r/backups' }, ...over,
 })

@@ -38,10 +38,10 @@ const MISFIT = {
 }
 
 const NAMES: RuleNames = {
-  groupBy: 'Gain group',
   column: id => ({ 8: 'Training hours', 9: 'Setting' } as Record<number, string>)[id] ?? null,
   code: id => (id === 3 ? 'Positive student response' : null),
   strand: key => (key === 'codes' ? 'Interviews' : null),
+  strandKind: key => (key === 'codes' ? 'codes' : key === 'comments' ? 'text_codes' : null),
   codeStrandCount: 1,
 }
 
@@ -89,7 +89,7 @@ describe('the reader (C6)', () => {
 describe('the rule as a sentence (r3-10)', () => {
   it('joins its clauses with "and", in the researcher\'s order', () => {
     expect(ruleSentence(readMisfit(MISFIT)!.rule!.conditions, NAMES)).toBe(
-      'Gain group is “High gain” and Training hours is less than 24 and used “Positive '
+      'in the group “High gain” and Training hours is less than 24 and has a passage coded “Positive '
       + 'student response” and Setting is “Rural” and Training hours has no answer')
   })
 
@@ -99,8 +99,20 @@ describe('the rule as a sentence (r3-10)', () => {
       { kind: 'variable', column_id: 99, op: 'gt', value: 1 },
     ] } })!.rule!.conditions
     expect(ruleSentence(conds, { ...NAMES, codeStrandCount: 2 })).toBe(
-      'did not use “Positive student response” (Interviews) and a variable this row no '
+      'has no passage coded “Positive student response” (Interviews) and a variable this row no '
       + 'longer binds is more than 1')
+  })
+
+  it('#1703 (b) / #1704 (c) (D372, D385): a group clause by its group; a code clause says what the case HAS, by strand kind', () => {
+    const conds = readMisfit({ rule: { conditions: [
+      { kind: 'group', group: 'Community Health' },
+      { kind: 'code', strand_key: 'comments', code_id: 3, present: true },
+      { kind: 'code', strand_key: 'comments', code_id: 3, present: false },
+      { kind: 'code', strand_key: 'codes', code_id: 3, present: true },
+    ] } })!.rule!.conditions
+    expect(ruleSentence(conds, NAMES)).toBe(
+      'in the group “Community Health” and has an answer coded “Positive student response” and '
+      + 'has no answer coded “Positive student response” and has a passage coded “Positive student response”')
   })
 
   it('has words for every operator the server states', () => {
@@ -126,7 +138,7 @@ describe('what the count and the export say (r3-2, r3-7, r3-11)', () => {
     expect(misfitNoteLine({
       construct: 'Planning', misfit: readMisfit(MISFIT)!, attribution: 'participant',
       sentence: 'Gain group is “High gain” and Training hours is less than 24',
-      countText: misfitCountText(3, 22, 0), identifier: p => ids[p] ?? null,
+      countText: misfitCountText(3, 22, 0), identifier: p => ids[p] ?? null, outsideGroups: () => false,
     })).toBe('Cases that don’t fit — Planning. Rule: Gain group is “High gain” and Training '
       + 'hours is less than 24. 3 of 22 cases meet the rule. Added by the researcher: T11: Moved '
       + 'schools mid-year. Removed by the researcher: T12: Hours were entered in days.')
@@ -137,7 +149,7 @@ describe('what the count and the export say (r3-2, r3-7, r3-11)', () => {
       { participant_id: 11, reason: 'Moved schools mid-year' }, { participant_id: 12, reason: ' ' },
       { participant_id: 13, reason: 'Gone' }] })!
     const ids: Record<number, string> = { 11: 'T11', 12: 'T12' }
-    const base = { construct: 'Planning', misfit: picked, identifier: (p: number) => ids[p] ?? null }
+    const base = { construct: 'Planning', misfit: picked, identifier: (p: number) => ids[p] ?? null, outsideGroups: () => false }
     expect(misfitNoteLine({ ...base, attribution: 'participant' })).toBe(
       'Cases that don’t fit — Planning. Added by the researcher: T11: Moved schools mid-year; '
       + 'T12: No reason recorded; a participant no longer in the project: Gone.')
@@ -150,7 +162,7 @@ describe('what the count and the export say (r3-2, r3-7, r3-11)', () => {
     const written = readMisfit({ rule: null, added: [
       { participant_id: 11, reason: 'No supervisor support in any source.' },
       { participant_id: 12, reason: 'Moved mid-year?' }] })!
-    const base = { construct: 'Planning', misfit: written, identifier: (p: number) => `T${p}` }
+    const base = { construct: 'Planning', misfit: written, identifier: (p: number) => `T${p}`, outsideGroups: () => false }
     expect(misfitNoteLine({ ...base, attribution: 'participant' })).toBe(
       'Cases that don’t fit — Planning. Added by the researcher: T11: No supervisor support in any source; '
       + 'T12: Moved mid-year?')
@@ -161,6 +173,19 @@ describe('what the count and the export say (r3-2, r3-7, r3-11)', () => {
 
   it('prints nothing for a row with no list', () => {
     expect(misfitNoteLine({ construct: 'x', misfit: { rule: null, added: [], removed: [] },
-      attribution: 'participant', identifier: () => null })).toBeNull()
+      attribution: 'participant', identifier: () => null, outsideGroups: () => false })).toBeNull()
+  })
+
+  it('#1703 (d) (D374): a case outside the display\'s groups carries Compact\'s qualifier, in either mode', () => {
+    const picked = readMisfit({ rule: null, added: [
+      { participant_id: 11, reason: 'Moved schools' }, { participant_id: 12, reason: 'Left early' }] })!
+    const base = { construct: 'Planning', misfit: picked, identifier: (p: number) => `T${p}`,
+      outsideGroups: (p: number) => p === 11 }
+    expect(misfitNoteLine({ ...base, attribution: 'participant' })).toBe(
+      'Cases that don’t fit — Planning. Added by the researcher: '
+      + 'T11 (no longer in the display’s groups): Moved schools; T12: Left early.')
+    expect(misfitNoteLine({ ...base, attribution: 'none' })).toBe(
+      'Cases that don’t fit — Planning. Added by the researcher: '
+      + 'Case 1 (no longer in the display’s groups): Moved schools; Case 2: Left early.')
   })
 })

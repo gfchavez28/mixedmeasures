@@ -25,6 +25,7 @@ import {
   type ProjectColumnInfo,
   type DomainMemberInput, retryUnanswered} from '@/lib/api'
 import { useListLoad } from '@/hooks/useListLoad'
+import { useAnalysisScope } from '@/hooks/useAnalysisScope'
 import { useMainContentLanding } from '@/hooks/useMainContentLanding'
 import { LoadFailedNotice } from '@/components/LoadStatus'
 import { CrosswalkHeader } from '@/components/crosswalk/CrosswalkHeader'
@@ -128,10 +129,12 @@ export default function CrosswalkView() {
   })
 
   // Phase 3b: metrics query, feeds buildGrid's scale_score_metric state.
+  // #1675 D358: asked under the viewer's analysis scope, keyed by it, as every metric read is.
+  const { coderScope, scopeKey, scopeReady } = useAnalysisScope(pid)
   const { data: metricsData } = useQuery({
-    queryKey: ['metrics', pid],
-    queryFn: () => metricsApi.list(pid),
-    enabled: !!pid,
+    queryKey: ['metrics', pid, scopeKey],
+    queryFn: () => metricsApi.list(pid, coderScope),
+    enabled: !!pid && scopeReady,
   })
 
   const allColumns = useMemo(

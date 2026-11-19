@@ -57,12 +57,13 @@ function reportFor(p: Participant): WithdrawalReport {
     participant_id: p.id, identifier: p.identifier, display_name: p.display_name, role: null,
     has_demographics: false, speaker_names: [], conversations: [], datasets: [],
     documents: p.linked_documents.map(d => ({
-      document_id: d.id, name: d.name, segments: 2, code_applications: 0, excerpts: 0, notes: 0,
+      document_id: d.id, name: d.name, segments: 2, code_applications: 0, excerpts: 0, notes: 0, canvas_quotes: 0,
     })),
     total_items: 1 + p.linked_documents.length * 2,
     unlinked_records_with_identifier: 0,
     canvas_quotes_unplaced: { quotes: 0, sections: [], snapshots: [] },
     canvas_misfit_cases: 0,  // joint display slice 2 (r3-6)
+    canvas_drift_stamps: 0,  // #1674 (D357)
     ...NOWHERE_ELSE,
   }
 }

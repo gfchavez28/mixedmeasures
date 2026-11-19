@@ -26,7 +26,7 @@ export function useMisfitReads(
   projectId: number,
   display: JointDisplay,
   rowKeys: readonly string[],
-  scope: DisplayCoderScope,
+  scope: DisplayCoderScope | null,
   /** `useBlindMode().settled` and whether the surface needs the count now. */
   enabled: boolean,
   /** Withholding with no viewer id (D96) — never read. */
@@ -41,6 +41,8 @@ export function useMisfitReads(
       queryFn: () => jointDisplayApi.cases(projectId, request!),
       enabled: enabled && !noViewer && request != null,
       staleTime: 60_000,
+      // #1679 D369: a refocus after a minute re-ran every display's heavy reads at once.
+      refetchOnWindowFocus: false,
     })),
   })
   const out = new Map<string, MisfitRead>()

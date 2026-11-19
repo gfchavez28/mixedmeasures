@@ -24,7 +24,8 @@ reuse it would copy an unrelated quote into the embed (#1192).
 | an ORPHAN embed (its quote deleted before the withdrawal) in a conversation where they spoke, whose text is inside one of their turns | the same rewrite (decision D8) |
 | an ORPHAN embed of an ANSWER — no conversation and no clip — whose text EQUALS a wording one of their answers held (#1473) | the same rewrite |
 | an ORPHAN embed of a merge result an Unmerge DELETED (#1473 b) — inside its text rebuilt from the originals as they read at the merge (#1552 a), wholly inside no single original, and reaching THEIR part (#1613) | the same rewrite |
-| a quote PINNED in a joint display (D163) — every row above applies to it, in themes and snapshots alike | the same rewrite, inside the display (`_embed_attrs`) |
+| a quote PINNED in a joint display (D163) — every row above applies to it, in themes and snapshots alike | the same rewrite, inside the display (`_embed_attrs`) — and the pin's `purpose`, the researcher's line about why that quote is there, goes with it (#1674 D356: D314's rule for a misfit case's reason) |
+| a joint display row's drift stamp (D168.5) — the cells as they printed when its meta-inference was saved | every stamp in the project is CLEARED: `hash` and `cells` removed, the date kept, `cleared: "withdrawal"` (#1674 D357; `clear_drift_stamps`) |
 
 An embed is an orphan when its `excerptId` names no live quote, or names a live
 quote that no longer says what the embed shows (the id was reused). One bound to a
@@ -72,6 +73,7 @@ never counted.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, asdict, field
 from typing import TYPE_CHECKING
@@ -322,12 +324,14 @@ class MisfitScrubOutcome:
     snapshots_rewritten: int = 0
 
 
-def count_misfit_cases(db: Session, project_id: int, participant_id: int, *, act: str) -> int:
+def count_misfit_cases(db: Session, project_id: int, participant_id: int, *, act: str,
+                       copies: _Copies | None = None) -> int:
     """The withdrawal report's count, BEFORE the act — the same walk the act removes with.
 
     ``act`` words a copy it cannot read — the report's own, `ACT_REPORT` (#1667, D341).
+    ``copies``: the report's one read (#1676 D362); read here when not given.
     """
-    copies = _read_copies(db, project_id, act=act)
+    copies = copies if copies is not None else _read_copies(db, project_id, act=act)
     return sum(
         1
         for where, doc in copies.docs()
@@ -339,7 +343,7 @@ def count_misfit_cases(db: Session, project_id: int, participant_id: int, *, act
 
 
 def scrub_misfit_cases(db: Session, project_id: int, participant_id: int, *,
-                       act: str) -> MisfitScrubOutcome:
+                       act: str, copies: _Copies | None = None) -> MisfitScrubOutcome:
     """Remove every added or removed case naming ``participant_id`` — and its reason — from every
     joint display, in live sections (through `update_theme_content`, which rebuilds the
     search index the reason was in) and snapshot copies alike.
@@ -348,9 +352,11 @@ def scrub_misfit_cases(db: Session, project_id: int, participant_id: int, *,
     nothing. Call BEFORE the participant row goes (it is what the case names). Flushes,
     does not commit; raises `CanvasScrubError` on a copy or a display it cannot walk, in the
     words of ``act`` (`ACT_WITHDRAWAL` / `ACT_DELETE`, no default — #1651, D338).
+    ``copies``: the withdrawal's one read, shared with its other scrubs (#1676 D363) — which
+    write back the SAME parsed documents in sequence; read here when not given.
     """
     out = MisfitScrubOutcome()
-    copies = _read_copies(db, project_id, act=act)
+    copies = copies if copies is not None else _read_copies(db, project_id, act=act)
 
     def _scrub(doc, where: str) -> int:
         removed = 0
@@ -406,6 +412,143 @@ class _Copies:
             (_snapshot_place(canvas_name, snap.name), doc)
             for snap, canvas_name, _, copies in self.snapshots for _, doc in copies
         ]
+
+
+def read_canvas_copies(db: Session, project_id: int, *, act: str) -> _Copies:
+    """#1676 D362–D363 — every canvas copy in the project, parsed ONCE for a caller that hands
+    them to several of this module's readers (the report's three counts; the withdrawal's two
+    scrubs and its drift clearing). Each reader also reads them itself when given none.
+
+    ⚠️ Never carried across a backup or any other long wait: another request may save a
+    section in between (#1033's second actor), and a scrub writing back the older document
+    would lose it. Read, then use at once.
+    """
+    return _read_copies(db, project_id, act=act)
+
+
+def check_canvas_copies(db: Session, project_id: int, *, act: str) -> None:
+    """#1676 D363 — what the withdrawal will walk, walked without writing: every copy parsed,
+    and every display's pins, case lists and drift stamps. Raises `CanvasScrubError` in
+    ``act``'s words on anything the act would refuse (`_Judge` raises nothing, so the act's
+    canvas refusals are exactly these) — so the act can refuse BEFORE its backup."""
+    for where, doc in _read_copies(db, project_id, act=act).docs():
+        _embed_attrs(doc, where=where, act=act)
+        _misfit_case_lists(doc, where=where, act=act)
+        _drift_stamps(doc, where=where, act=act)
+
+
+#: #1674 D357 — the mark a withdrawal leaves on a drift stamp whose figures it removed.
+DRIFT_CLEARED_BY_WITHDRAWAL = "withdrawal"
+#: The stamp's members that hold FIGURES — the cells as they printed, and their fingerprint
+#: (a hash of a group-of-one's few cells can be matched against every value they could take).
+_DRIFT_FIGURE_KEYS = ("hash", "cells")
+
+
+def _drift_stamps(doc, *, where: str, act: str) -> list[dict]:
+    """Every joint display row's drift stamp that still holds figures, in one document — the
+    live ``baseline`` dicts, so a rewrite sticks. Fail-closed as `_embed_attrs`."""
+    found: list[dict] = []
+
+    def _collect(node: dict) -> None:
+        attrs = node.get("attrs")
+        if not isinstance(attrs, dict):
+            return
+        try:
+            display = display_of(attrs, strict=True)
+            if display is None:
+                return
+            for row in display_rows(display, strict=True):
+                stamp = row.get("baseline")
+                if (isinstance(stamp, dict)
+                        and stamp.get("cleared") != DRIFT_CLEARED_BY_WITHDRAWAL
+                        and any(k in stamp for k in _DRIFT_FIGURE_KEYS)):
+                    found.append(stamp)
+        except UnreadableDisplay as exc:
+            raise CanvasScrubError(
+                f"A joint display in {where} could not be read, {_unreadable(act, 'quotes')}"
+            ) from exc
+
+    walk_tiptap_nodes(doc, {JOINT_DISPLAY_NODE}, _collect)
+    return found
+
+
+def canvas_quote_counts(db: Session, project_id: int, *, act: str,
+                        copies: _Copies | None = None) -> Counter[int]:
+    """#1702 (D382) — how many canvas quotes show each excerpt: every `excerpt-embed` and every
+    joint display pin, in sections and snapshot copies, by its `excerptId` — through the scrub's
+    ONE walk (`_embed_attrs`), so a copy it cannot read raises in ``act``'s words like the
+    report's other counts. A blanked embed (`excerptId` null) shows no excerpt and is not counted.
+
+    The withdrawal report sums it over a linked document's quotes: the document stays,
+    unlinked, for the researcher to read (row 46), and its passages quoted on the canvas stay
+    with it — so the confirm's document line says how many, for that reading to find them.
+    """
+    copies = copies if copies is not None else _read_copies(db, project_id, act=act)
+    counts: Counter[int] = Counter()
+    for where, doc in copies.docs():
+        for attrs in _embed_attrs(doc, where=where, act=act):
+            eid = _as_int(attrs.get("excerptId"))
+            if eid is not None:
+                counts[eid] += 1
+    return counts
+
+
+def count_drift_stamps(db: Session, project_id: int, *, act: str,
+                       copies: _Copies | None = None) -> int:
+    """#1674 D357 — the report's count of the drift stamps a withdrawal will clear: EVERY stamp
+    with figures in the project's joint displays, sections and snapshots alike. Every one,
+    deliberately — telling which drew on the person would need each display's compute inside
+    the withdrawal's transaction, and a stamp is re-made with one press (fail closed)."""
+    copies = copies if copies is not None else _read_copies(db, project_id, act=act)
+    return sum(len(_drift_stamps(doc, where=where, act=act)) for where, doc in copies.docs())
+
+
+@dataclass
+class DriftClearOutcome:
+    """#1674 D357 — stamps cleared (live sections and snapshot copies together)."""
+
+    stamps_cleared: int = 0
+    themes_rewritten: int = 0
+    snapshots_rewritten: int = 0
+
+
+def clear_drift_stamps(db: Session, project_id: int, *, act: str,
+                       copies: _Copies | None = None) -> DriftClearOutcome:
+    """#1674 D357 — clear every drift stamp's figures: ``hash`` and ``cells`` go, the date and
+    the coder scope stay, and ``cleared: "withdrawal"`` says why. A stamp printed the cells as
+    they were — for a group of one, their answer, code or rating, and for any group the
+    difference shows it — so after a withdrawal its *was* is a copy of their data. Flushes,
+    does not commit; ``copies`` as `scrub_misfit_cases`."""
+    out = DriftClearOutcome()
+    copies = copies if copies is not None else _read_copies(db, project_id, act=act)
+
+    def _clear(doc, where: str) -> int:
+        stamps = _drift_stamps(doc, where=where, act=act)
+        for stamp in stamps:
+            for key in _DRIFT_FIGURE_KEYS:
+                stamp.pop(key, None)
+            stamp["cleared"] = DRIFT_CLEARED_BY_WITHDRAWAL
+        return len(stamps)
+
+    for theme, canvas_name, doc in copies.themes:
+        hits = _clear(doc, _section_place(canvas_name, theme.name))
+        if hits:
+            update_theme_content(db, theme, doc)
+            out.stamps_cleared += hits
+            out.themes_rewritten += 1
+    for snap, canvas_name, data, items in copies.snapshots:
+        changed = False
+        for item, doc in items:
+            hits = _clear(doc, _snapshot_place(canvas_name, snap.name))
+            if hits:
+                item["content"] = json.dumps(doc) if doc else None
+                out.stamps_cleared += hits
+                changed = True
+        if changed:
+            snap.snapshot_data = json.dumps(data)
+            out.snapshots_rewritten += 1
+    db.flush()
+    return out
 
 
 def _read_copies(db: Session, project_id: int, *, act: str) -> _Copies:
@@ -601,6 +744,7 @@ def unplaced_canvas_quotes(
     answer_words: Callable[[], Iterable[str]],
     placeholder_text: str,
     act: str,
+    copies: _Copies | None = None,
 ) -> UnplacedCanvasQuotes:
     """#1546 (D158) — the canvas quotes a withdrawal would LEAVE, read without writing.
 
@@ -610,8 +754,9 @@ def unplaced_canvas_quotes(
     unplaced embed: a turn's quote is unplaced only when its conversation is gone, and
     every turn they hold, live or deleted by an Unmerge, is in a live conversation.
     ``act`` words a copy it cannot read — the report's own, `ACT_REPORT` (#1667, D341).
+    ``copies``: the report's one read (#1676 D362); read here when not given.
     """
-    copies = _read_copies(db, project_id, act=act)
+    copies = copies if copies is not None else _read_copies(db, project_id, act=act)
     judge = _Judge(
         db, project_id, copies, removed=set(), words={},
         answers=lambda: set(answer_words()), deleted={}, placeholder=placeholder_text, act=act,
@@ -645,6 +790,7 @@ def scrub_excerpt_embeds(
     answer_words=None,
     deleted_wordings: dict[int, list[tuple[str, tuple[str, ...], Spans | None]]]
     | None = None,
+    copies: _Copies | None = None,
 ) -> EmbedScrubOutcome:
     """Rewrite every canvas copy of the quotes in `excerpt_ids` (see the module).
 
@@ -658,7 +804,8 @@ def scrub_excerpt_embeds(
     passed through held, each with its originals' texts and where their words sit in it
     (#1473 b, #1613; `withdrawal_history.DeletedSegment`). Call it after the quotes are deleted; it
     flushes and does not commit. An embed it cannot place is left and counted in
-    `quotes_unplaced` (D158), by the predicate the report asked before the act.
+    `quotes_unplaced` (D158), by the predicate the report asked before the act. ``copies``:
+    the withdrawal's one read, shared with its other scrubs (#1676 D363).
     """
     removed = {i for i in (_as_int(x) for x in excerpt_ids) if i is not None}
     words = {
@@ -668,7 +815,7 @@ def scrub_excerpt_embeds(
     out = EmbedScrubOutcome()
 
     # ── Read every copy first: the orphan rule needs the live quotes they name ──
-    copies = _read_copies(db, project_id, act=ACT_WITHDRAWAL)
+    copies = copies if copies is not None else _read_copies(db, project_id, act=ACT_WITHDRAWAL)
     judge = _Judge(
         db, project_id, copies, removed=removed, words=words,
         answers=lambda: set(answer_words or ()), deleted=deleted_wordings or {},
@@ -681,6 +828,11 @@ def scrub_excerpt_embeds(
             if judge.theirs(attrs):
                 attrs["displayText"] = replacement_text
                 attrs["excerptId"] = None
+                # #1674 D356: a PIN's purpose is the researcher's line about why THIS quote of
+                # theirs is there ("the only Franklin teacher who opposed it") — it goes with the
+                # quote, as a misfit case's reason goes with the person (D314). An embed has none.
+                if "purpose" in attrs:
+                    attrs["purpose"] = None
                 hits += 1
             elif judge.unplaced(attrs):
                 # D158 — left as it is, and counted: nothing says whose words it holds.

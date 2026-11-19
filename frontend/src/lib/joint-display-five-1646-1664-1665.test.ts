@@ -117,11 +117,11 @@ describe('#1664 (D333) — a saved rule naming an inactive code names it and say
       misfit: { rule: { conditions: RULE }, added: [], removed: [] } }] })
 
   it('ruleNamesFrom names it from the inactive list — never "a code this row no longer binds"', () => {
-    const names = ruleNamesFrom(slice1, 'Gain group', { codes: [], variables: [], inactive: [{ code_id: 32, name: 'Workload' }] })
-    expect(ruleSentence(RULE, names)).toBe('did not use “Workload”')
+    const names = ruleNamesFrom(slice1, { codes: [], variables: [], inactive: [{ code_id: 32, name: 'Workload' }] })
+    expect(ruleSentence(RULE, names)).toBe('has no passage coded “Workload”')   // #1704 (c): its subject
     // The control: without the inactive list the old, false words come back.
-    expect(ruleSentence(RULE, ruleNamesFrom(slice1, 'Gain group', { codes: [], variables: [] })))
-      .toBe('did not use “a code this row no longer binds”')
+    expect(ruleSentence(RULE, ruleNamesFrom(slice1, { codes: [], variables: [] })))
+      .toBe('has no passage coded “a code this row no longer binds”')
   })
 
   it('the count line is the new reason’s words, wherever it is read (the case view, the open construct, the report)', () => {
@@ -146,8 +146,10 @@ describe('#1664 (D333) — a saved rule naming an inactive code names it and say
       display: slice1, data, unavailable: null, facts: new Map(), attributionWithheld: null, attributionUnusable: null,
       results: new Map(), resultsUnread: false, misfits: new Map([['r1', misfitReportFacts(resp, true)]]),
     }, { coderName: () => null, withholding: false, self: 1, asOf: '16 Nov 2026' })
-    expect(r.note).toContain('did not use “Workload”')
-    expect(r.note).toContain('The rule names a code the codebook made inactive')
-    expect(r.note).not.toContain('no longer binds')
+    // The notice rule (2026-11-18, rewrite D): the cases that don't fit print in the Definitions.
+    const defs = r.definitions.join(' ')
+    expect(defs).toContain('has no passage coded “Workload”')
+    expect(defs).toContain('The rule names a code the codebook made inactive')
+    expect(defs).not.toContain('no longer binds')
   })
 })

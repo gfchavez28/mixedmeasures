@@ -224,6 +224,27 @@ def test_every_door_that_reads_an_analysis_result_asks_the_blind_rule(graph):
     )
 
 
+#: #1675 D359 — the doors that SHOW the participant table's cells, which the reader scan
+#: above cannot find (they read `DatasetValue` directly). Each must reach a gate. A NEW door
+#: that shows a record's cells joins this list by hand: the residual this test states.
+TABLE_SHOWING_DOORS = (
+    "routers/dataset.py::get_dataset_data",          # the Data view (#1608)
+    "routers/participants.py::get_participant",      # the profile (#1608)
+    "routers/text_coding.py::record_context",        # Text Coding's context (#1675 D359)
+)
+
+
+def test_every_door_that_shows_the_table_asks_the_blind_rule(graph):
+    missing = [d for d in TABLE_SHOWING_DOORS if d not in graph.units]
+    assert not missing, f"no such route (renamed?): {missing}"
+    unasked = [d for d in TABLE_SHOWING_DOORS if not graph.reaches(d, lambda k: k in graph.asks)]
+    assert not unasked, (
+        "These doors show a record of the participant table and never ask which of its "
+        "rating columns a blind viewer may see (`withheld_rating_column_ids`): "
+        f"{unasked}"
+    )
+
+
 def test_the_allowlist_has_no_stale_entries(graph):
     unasked = graph.unasked_doors()
     stale = sorted(k for k in ALLOWLIST if k not in unasked)

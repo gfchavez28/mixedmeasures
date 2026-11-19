@@ -26,7 +26,7 @@ const OPEN = displayCoderScope(false, 1)
 function resp(over: Partial<JointDisplayCasesResponse> = {}): JointDisplayCasesResponse {
   return {
     groups: ['High', 'Low'], total: 22, listed: 22, matched: 3, unknown: 2, rule_unavailable_reason: null,
-    rule_withheld_columns: [], list_size: 3, added_outside: 0,
+    rule_withheld_columns: [], rule_missing_groups: [], list_size: 3, added_outside: 0,
     codes: [{ code_id: 3, name: 'Positive response' }],
     variables: [{ column_id: 8, name: 'Training hours', dataset_id: 1, withheld: false, operators: ['lt', 'missing'] }],
     cases: [], named_cases: [], unavailable_reason: null, ...over,
@@ -132,7 +132,8 @@ const CTX = { coderName: () => null, withholding: false, self: 1, asOf: '15 Nov 
 const note = (display: ReturnType<typeof readDisplay>, misfits: Map<string, unknown>) => buildJointDisplayReport({
   display, data: DATA, unavailable: null, facts: new Map(), attributionWithheld: null, attributionUnusable: null, results: new Map(), resultsUnread: false,
   misfits: misfits as never,
-}, CTX).note
+// The notice rule (2026-11-18, rewrite D): the cases that don't fit print in the Definitions.
+}, CTX).definitions.join(' ')
 
 describe('the report’s note (r3-11) — the four readers’ one function', () => {
   const MISFIT = { rule: RULE, added: [{ participant_id: 11, reason: 'Moved schools' }], removed: [] }
@@ -142,9 +143,16 @@ describe('the report’s note (r3-11) — the four readers’ one function', () 
 
   it('prints the rule, its count and each added case with its reason — by identifier in participant mode', () => {
     const n = note(withMisfit(MISFIT), new Map([['r1', misfitReportFacts(answer, true)]]))
-    expect(n).toContain('Cases that don’t fit — Planning. Rule: Gain group is “High” and Training hours is less than 24. 3 of 22 cases meet the rule; 2 cannot be checked')
+    expect(n).toContain('Cases that don’t fit — Planning. Rule: in the group “High” and Training hours is less than 24. 3 of 22 cases meet the rule; 2 cannot be checked')
     expect(n).toContain('Added by the researcher: T11: Moved schools.')
     expect(n).not.toContain('T05')
+  })
+
+  it('#1703 (d) (D374): a named case in none of the groups now carries Compact’s qualifier — from the read', () => {
+    const outside = resp({ named_cases: [{ participant_id: 11, label: 'T11', group: null }] })
+    const n = note(withMisfit(MISFIT), new Map([['r1', misfitReportFacts(outside, true)]]))
+    expect(n).toContain('Added by the researcher: T11 (no longer in the display’s groups): Moved schools.')
+    // CONTROL: in a group, no qualifier (the test above)
   })
 
   it('numbers the cases when the display does not attribute by identifier (r3-7)', () => {
@@ -155,7 +163,7 @@ describe('the report’s note (r3-11) — the four readers’ one function', () 
 
   it('an unread count says so and names no one it could not identify', () => {
     const n = note(withMisfit(MISFIT), new Map([['r1', 'unread']]))
-    expect(n).toContain(`Rule: Gain group is “High” and Training hours is less than 24. ${W.MISFIT_COUNT_UNREAD_TEXT}`)
+    expect(n).toContain(`Rule: in the group “High” and Training hours is less than 24. ${W.MISFIT_COUNT_UNREAD_TEXT}`)
     expect(n).toContain('Added by the researcher: Case 1: Moved schools.')
     expect(n).not.toContain('no longer in the project')
     const noRule = note(withMisfit({ ...MISFIT, rule: null }), new Map([['r1', 'unread']]))

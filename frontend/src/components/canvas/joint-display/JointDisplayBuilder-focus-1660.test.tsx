@@ -58,6 +58,10 @@ afterEach(() => { cleanup(); vi.clearAllMocks() })
 describe('#1660 (D345) — the builder', () => {
   it('Remove construct lands on the construct now in its place, then on the one before', async () => {
     mount(SLICE_1)
+    // #1705 (a) (D386, 11-18c): once the lists answer, the title takes focus on the next frame.
+    // A press inside that frame (only a test can make one) had its landing pre-empted by it:
+    // focus sat on the title — this test failed when run alone at 37daa4e7. Press after it.
+    await waitFor(() => expect(screen.getByLabelText('Display title')).toHaveFocus())
     press(await screen.findByRole('button', { name: 'Remove construct C2' }))
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove construct C2' })).toBeNull())
     // C3 took C2's place: it is now "Construct 2".
@@ -72,6 +76,8 @@ describe('#1660 (D345) — the builder', () => {
 
   it('slice 1’s Add … strand lands on the new strand’s name', async () => {
     mount(SLICE_1)
+    // The same frame as the open landing (D386) — see the test above; failed under load.
+    await waitFor(() => expect(screen.getByLabelText('Display title')).toHaveFocus())
     const add = await screen.findByRole('button', { name: STRAND_KIND_TERMS[0].add })
     press(add)
     // The slice-1 view gave way to the strands editor: the pressed button is gone.

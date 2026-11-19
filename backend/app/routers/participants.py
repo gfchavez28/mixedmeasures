@@ -41,7 +41,9 @@ from ..services.withdrawal_redaction import apply_withdrawal
 from ..services.canvas_embed_scrub import (
     ACT_DELETE,
     ACT_REPORT,
+    ACT_WITHDRAWAL,
     CanvasScrubError,
+    check_canvas_copies,
     scrub_misfit_cases,
 )
 from ..services.backup import DatabaseBusyError, create_backup
@@ -772,13 +774,17 @@ async def unlink_dataset_row(
     "/api/projects/{project_id}/participants/{participant_id}/withdrawal-report",
     response_model=WithdrawalReportResponse,
 )
-async def get_withdrawal_report(
+def get_withdrawal_report(  # def, not async: it walks the project's canvas — MUST_BE_SYNC
     project_id: int,
     participant_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """What would have to be removed to honour this participant's withdrawal — #702(2).
+
+    #1676 D362: `def` — the report parses every canvas copy (once since D362), which as an
+    `async def` ran on the event loop on every participant panel open (4.5 s on the slice 2
+    build's heavy canvas, during which no other request was answered).
 
     🔴 **Built before the cascade delete, deliberately.** The hard part of a
     withdrawal request is FINDING the data, not deleting it — and deleting the
@@ -922,6 +928,18 @@ def withdraw_participant(
     # entry travels in every export (and the Excel Audit Trail sheet).
     elsewhere = copies_elsewhere(db, project_id, participant.identifier)
 
+    # #1676 D363 — a canvas copy the act cannot read is refused BEFORE the backup: the
+    # `pre_withdrawal` backup is never rotated, so a refusal after it left one more full copy
+    # of the project behind each time. The same walk as the act's (its refusals are exactly
+    # these), read and dropped — never carried across the backup's minutes.
+    try:
+        check_canvas_copies(db, project_id, act=ACT_WITHDRAWAL)
+    except CanvasScrubError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Could not remove this participant, so nothing was changed. {exc}",
+        )
+
     # The forced backup comes first and is not optional. If it cannot be taken,
     # the withdrawal does not happen — an irreversible removal with no recovery
     # point is the one outcome this must never produce.
@@ -967,9 +985,12 @@ def withdraw_participant(
     except Exception as exc:  # noqa: BLE001 - every failure rolls back, then is said
         db.rollback()
         logger.error("Withdrawal failed and was rolled back: %s", exc)
-        reason = str(exc) if isinstance(exc, CanvasScrubError) else ""
+        refused = isinstance(exc, CanvasScrubError)
+        reason = str(exc) if refused else ""
         raise HTTPException(
-            status_code=500,
+            # #1676 D363 — a copy damaged in the backup's window is the same refusal the
+            # check above makes, so it is a 409 as the report's and the delete's are.
+            status_code=409 if refused else 500,
             detail=(
                 "Could not finish removing this participant, so nothing was changed. "
                 + (f"{reason} " if reason else "")

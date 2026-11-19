@@ -614,7 +614,8 @@ jobs:
       #       above reads the built .app, not the zip. electron-builder 26.15.4 changed the tool
       #       that makes it (Info-ZIP `zip -y` → 7-Zip 24.09 with `-snl`); upstream's regression
       #       test checks symlinks on an unsigned x64 app and nothing else. Squirrel.Mac (Electron
-      #       44.9.3 vendors it at fffea30e plus #54844's ShipIt patch; 44.5.1 had 8d808803, and
+      #       44.9.3 and 44.11.2 vendor it at fffea30e plus #54844's ShipIt patch, the same patch tree;
+      #       44.5.1 had 8d808803, and
       #       neither change touches the two files named here) runs `/usr/bin/ditto -xk` with only DITTOABORT=1 in
       #       its environment (SQRLZipArchiver.m), then accepts the bundle only if
       #       SecStaticCodeCheckValidityWithErrors(kSecCSCheckNestedCode | kSecCSStrictValidate |

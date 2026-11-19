@@ -106,6 +106,8 @@ from .audit import stripped_details
 from .canvas_embed_scrub import (
     ACT_WITHDRAWAL,
     UnplacedCanvasQuotes,
+    clear_drift_stamps,
+    read_canvas_copies,
     scrub_excerpt_embeds,
     scrub_misfit_cases,
     unplaced_canvas_quotes,
@@ -115,7 +117,7 @@ from . import tombstones as tomb
 from ..models.project import Project
 from .staleness import mark_metrics_stale
 from .withdrawal_history import deleted_lineage, history_starts, segment_history, wording_in
-from .withdrawal_report import build_withdrawal_report, reached_turns
+from .withdrawal_report import reached_turns
 
 
 #: What a redacted speaker is called. Numbered per project so two withdrawals
@@ -198,6 +200,9 @@ class RedactionOutcome:
     #: Joint display slice 2 (r3-6) — picked "cases that don't fit" naming them, removed
     #: with the researcher's reason (sections and snapshot copies together).
     canvas_misfit_cases_removed: int = 0
+    #: #1674 D357 — drift stamps whose figures were cleared (every one in the project's joint
+    #: displays, sections and snapshot copies together); the report counted them first.
+    canvas_drift_stamps_cleared: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -469,20 +474,21 @@ def answer_wordings(
 
 
 def canvas_quotes_unplaced(
-    db: Session, project_id: int, value_ids: list[int], *, act: str,
+    db: Session, project_id: int, value_ids: list[int], *, act: str, copies=None,
 ) -> UnplacedCanvasQuotes:
     """#1546 (D158) — for the REPORT: the canvas quotes this withdrawal would leave.
 
     The scrub's own predicate, read without writing, against the same answer
     wordings the act will use (asked only when a canvas holds an answer's orphan).
-    A copy it cannot read is refused in ``act``'s words (#1667, D341) — the report's own, or
-    the withdrawal's when `apply_withdrawal` builds the report (`build_withdrawal_report`).
+    A copy it cannot read is refused in ``act``'s words (#1667, D341). ``copies``: the
+    report's one read (#1676 D362).
     """
     return unplaced_canvas_quotes(
         db, project_id,
         answer_words=lambda: answer_wordings(db, project_id, value_ids)[1],
         placeholder_text=BLANKED_SEGMENT_TEXT,
         act=act,
+        copies=copies,
     )
 
 
@@ -526,10 +532,17 @@ def apply_withdrawal(db: Session, participant: Participant) -> RedactionOutcome:
     ⚠️ Not committed here. The caller owns the transaction so the forced backup,
     the redaction and the audit entry succeed or fail together — and it raises
     rather than carrying on past a copy it cannot read.
+
+    🔴 **The canvas is read ONCE, at the scrubs (#1676 D363), and never before the act's
+    own writes.** It used to build the whole withdrawal report first — two parses of every
+    copy, for the person's ID and for refusing a copy it cannot read in the act's words
+    (D341) — and then parse every copy again in each scrub. The endpoint now makes that
+    refusal BEFORE its backup (`canvas_embed_scrub.check_canvas_copies`), and the scrubs
+    refuse in the same words; the copies they share are read after the turns and rows have
+    been written, so a section saved by another request meanwhile is not written back over.
     """
     project_id = participant.project_id
-    # #1667 (D341): a canvas copy it cannot read is refused here first — in the ACT's words.
-    report = build_withdrawal_report(db, participant, act=ACT_WITHDRAWAL)
+    identifier = participant.identifier
 
     speakers = (
         db.query(Speaker).filter(Speaker.participant_id == participant.id).all()
@@ -801,17 +814,23 @@ def apply_withdrawal(db: Session, participant: Participant) -> RedactionOutcome:
         doc.participant_id = None
 
     # ── The canvas: its copies of every quote this removed (#1320) ────────
+    # #1676 D363 — every copy parsed ONCE, shared by the three passes below, which write back
+    # the same parsed documents in sequence.
     removed_excerpt_ids = set(turn_excerpt_ids) | set(value_excerpt_ids)
+    copies = read_canvas_copies(db, project_id, act=ACT_WITHDRAWAL)
     canvas = scrub_excerpt_embeds(
         db, project_id, removed_excerpt_ids,
         replacement_text=BLANKED_SEGMENT_TEXT,
         words_by_conversation=words_by_conversation,
         answer_words=answer_words,
         deleted_wordings=lineage.wordings_by_conversation(),
+        copies=copies,
     )
     # Joint display slice 2 (r3-6): a picked case names THEM and carries the researcher's
     # reason about them — removed whole, before the participant row it names goes.
-    misfit = scrub_misfit_cases(db, project_id, participant.id, act=ACT_WITHDRAWAL)
+    misfit = scrub_misfit_cases(db, project_id, participant.id, act=ACT_WITHDRAWAL, copies=copies)
+    # #1674 D357 — every drift stamp's figures: its *was* may print their answer.
+    drift = clear_drift_stamps(db, project_id, act=ACT_WITHDRAWAL, copies=copies)
 
     # ── The audit trail: strip the words, keep the entries (D9) ───────────
     #
@@ -841,7 +860,7 @@ def apply_withdrawal(db: Session, participant: Participant) -> RedactionOutcome:
 
     outcome = RedactionOutcome(
         participant_id=participant.id,
-        identifier=report.identifier,
+        identifier=identifier,
         speaker_label=speaker_label,
         segments_blanked=segments_blanked,
         # #1473 — every quote deleted: of their turns AND of their answers, the
@@ -867,6 +886,7 @@ def apply_withdrawal(db: Session, participant: Participant) -> RedactionOutcome:
         code_applications_deleted=code_applications_deleted,
         canvas_quotes_unplaced=canvas.quotes_unplaced,
         canvas_misfit_cases_removed=misfit.cases_removed,
+        canvas_drift_stamps_cleared=drift.stamps_cleared,
     )
 
     project_uuid = db.query(Project.project_uuid).filter(Project.id == project_id).scalar()

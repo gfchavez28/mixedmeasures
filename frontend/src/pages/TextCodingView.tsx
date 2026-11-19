@@ -1039,20 +1039,23 @@ export default function TextCodingView() {
     return comments.find(c => c.dataset_value_id === selectedValueIds[0]) ?? null
   }, [selectedValueIds, comments])
 
+  // #1692 (D378): the panel marks a code applied only where the ACTIVE coder applied it, as the
+  // other three panels do (#446's INV-6, `isCodeAppliedByActiveCoder`). The bare
+  // `applied_code_ids` is every coder's (#441's rule forbids reading it here): with colleagues
+  // shown it marked a colleague's code "applied", and the press — whose toggle already asks the
+  // active coder (`allHave`) — applied the viewer's, so the mark never changed.
   const appliedCodeIds = useMemo(() => {
     if (selectedValueIds.length === 0) return []
-    if (selectedValueIds.length === 1) {
-      return selectedComment?.applied_code_ids ?? []
-    }
+    const mine = (c: (typeof comments)[number] | undefined) => new Set(
+      (c?.applied_code_ids ?? []).filter(id =>
+        isCodeAppliedByActiveCoder(c?.applied_code_details, c?.applied_code_ids ?? [], id, self)),
+    )
+    if (selectedValueIds.length === 1) return [...mine(selectedComment ?? undefined)]
     // Intersection of all selected
-    const sets = selectedValueIds.map(dvId => {
-      const c = comments.find(cm => cm.dataset_value_id === dvId)
-      return new Set(c?.applied_code_ids ?? [])
-    })
-    if (sets.length === 0) return []
+    const sets = selectedValueIds.map(dvId => mine(comments.find(cm => cm.dataset_value_id === dvId)))
     const first = sets[0]
     return [...first].filter(id => sets.every(s => s.has(id)))
-  }, [selectedValueIds, comments, selectedComment])
+  }, [selectedValueIds, comments, selectedComment, self])
 
   // ── Progress display ──────────────────────────────────────────────────
 

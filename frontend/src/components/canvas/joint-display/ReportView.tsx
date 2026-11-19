@@ -16,6 +16,7 @@
  *   (`useReportBreakout`).
  */
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
+import { NoticeDetails } from '@/components/NoticeDetails'
 import type { JointDisplayReport } from '@/lib/joint-display-report'
 
 interface ReportViewProps {
@@ -59,7 +60,10 @@ export default function ReportView({ report, drifted, isEditable, onOpenConstruc
           <tbody>
             {report.rows.map((r, i) => r.kind === 'construct' ? (
               <tr key={`${r.rowKey}-${i}`} className="border-b border-mm-border-subtle">
-                <th scope="row" className="px-2.5 py-2 text-left align-top font-semibold text-mm-text min-w-[9rem]">
+                {/* #1714 (d), D399: the row header is named by its construct — its button's verb
+                    phrase is not what every cell of the row is announced under (#915's precedent). */}
+                <th scope="row" aria-label={r.construct}
+                  className="px-2.5 py-2 text-left align-top font-semibold text-mm-text min-w-[9rem]">
                   <button
                     type="button"
                     className="text-left hover:underline text-mm-blue-text"
@@ -82,6 +86,13 @@ export default function ReportView({ report, drifted, isEditable, onOpenConstruc
         </table>
       </ScrollableTable>
       <p className="text-[11px] leading-snug text-mm-text-muted">{report.note}</p>
+      {/* The notice rule (2026-11-18, rewrite D): the full definitions, closed on every render of
+          the view; every file prints them in full after the display. */}
+      {report.definitions.length > 0 && (
+        <NoticeDetails label={report.definitionsTitle} className="text-[11px]">
+          {report.definitions.map((p, i) => <p key={i} className="leading-snug">{p}</p>)}
+        </NoticeDetails>
+      )}
       {report.appendix.map((a, i) => (
         <div key={`${i}:${a.title}`} className="space-y-1 pt-1">
           <ScrollableTable tabIndex={0} role="region" aria-label={`Table: ${a.title}`}>

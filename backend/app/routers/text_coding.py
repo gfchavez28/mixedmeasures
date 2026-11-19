@@ -32,7 +32,7 @@ from ..services import magnitude
 from ..services.audit import log_action
 from ..services.consensus import consensus_enabled
 from ..services.consensus_staleness import mark_consensus_stale
-from ..services.participant_scores import mark_participant_scores_stale
+from ..services.participant_scores import mark_participant_scores_stale, withheld_rating_column_ids
 from ..services.coding_layers import (
     build_effective_code_map, layer_scope_filter, narrow_to_coders, non_consensus_filter,
 )
@@ -621,7 +621,17 @@ async def record_context(
     dataset_row_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    # #1675 D359 — bare default, LAST (direct-call tests); the client sends it while
+    # withholding (`useBlindScope`), as the Data view does.
+    coder_ids: str | None = None,
 ):
+    """One record's other cells, for Text Coding's context.
+
+    #1675 D359: a record of the participant table shows its rating columns (a score, its
+    rated-passage count, anything computed from one) — every coder's ratings rolled up.
+    While blind (``coder_ids``) they are left out, by `withheld_rating_column_ids`, the rule
+    the Data view and the profile ask, and ``withheld_rating_columns`` says how many.
+    """
     project = _get_project_or_404(db, project_id, user.id)
 
     result = (
@@ -634,6 +644,7 @@ async def record_context(
         raise HTTPException(status_code=404, detail="Record not found in this project")
 
     row, dataset = result
+    withheld = withheld_rating_column_ids(db, dataset, parse_int_list(coder_ids))
 
     # Get all columns for this dataset
     columns = (
@@ -642,6 +653,7 @@ async def record_context(
         .order_by(DatasetColumn.sequence_order)
         .all()
     )
+    columns = [c for c in columns if c.id not in withheld]  # #1675 D359
 
     # Get all values for this row
     values = (
@@ -717,6 +729,7 @@ async def record_context(
         texts=texts,
         other_columns=other_columns,
         column_positions=column_positions,
+        withheld_rating_columns=len(withheld),
     )
 
 

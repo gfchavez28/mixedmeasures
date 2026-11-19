@@ -48,6 +48,7 @@ const listCategories = vi.fn()
 const listCoders = vi.fn()
 const coderCoverage = vi.fn()
 const listMemos = vi.fn()
+const recordContext = vi.fn()
 
 vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api')
@@ -66,6 +67,7 @@ vi.mock('@/lib/api', async () => {
       bulkRemoveCode: (...a: unknown[]) => bulkRemoveCode(...a),
       setMagnitude: (...a: unknown[]) => setMagnitude(...a),
       updateConfig: (...a: unknown[]) => updateConfig(...a),
+      recordContext: (...a: unknown[]) => recordContext(...a),
     },
     codesApi: { ...actual.codesApi, list: (...a: unknown[]) => listCodes(...a) },
     categoriesApi: { ...actual.categoriesApi, list: (...a: unknown[]) => listCategories(...a) },
@@ -198,9 +200,82 @@ beforeEach(() => {
   bulkCode.mockResolvedValue({ results: [], success_count: 0, error_count: 0, failed_dataset_value_ids: [] })
   bulkRemoveCode.mockResolvedValue({ deleted_count: 0, code_id: 7 })
   setMagnitude.mockResolvedValue({ dataset_value_id: 101, code_id: 7, applied: true, magnitude: 7 })
+  recordContext.mockResolvedValue(context(0))
 })
 
 afterEach(cleanup)
+
+/** A record's context, as `GET …/record-context/{row}` answers it. */
+function context(withheld: number) {
+  return {
+    row_identifier: 'R1', participant_id: null, dataset_id: 1, dataset_name: 'Survey',
+    linked_conversations: [], demographics: [{ column_id: 30, column_name: 'Age', value: '40' }],
+    texts: [], other_columns: [], column_positions: [], withheld_rating_columns: withheld,
+  }
+}
+
+describe('#1692 (D378) — the code panel marks the ACTIVE coder\'s coding only', () => {
+  // R0103 carries Engagement applied by a COLLEAGUE (Bob, user 2) and nothing of Alice's.
+  const COLLEAGUE_ONLY = text(103, 'A colleague coded this.', {
+    applied_code_ids: [7],
+    applied_code_details: [{ code_id: 7, user_id: 2, attribution: null, is_universal: false,
+                             magnitude: null, magnitude_conflict: null }],
+  })
+
+  beforeEach(() => {
+    list.mockResolvedValue({ ...PAGE, texts: [...PAGE.texts, COLLEAGUE_ONLY], total_texts: 3, non_empty_texts: 3 })
+    listCoders.mockResolvedValue([
+      { id: 1, username: 'Alice', display_color: null, archived: false },
+      { id: 2, username: 'Bob', display_color: null, archived: false },
+    ])
+  })
+
+  it('a code only a colleague applied is NOT marked applied, and pressing it applies the viewer\'s', async () => {
+    renderView()
+    fireEvent.click(await findRow(103))
+    const option = await screen.findByRole('option', { name: /^Engagement/ })
+    expect(option).toHaveAttribute('aria-selected', 'false')
+    expect(option).not.toHaveAccessibleName(/, applied$/)
+
+    fireEvent.click(option)
+    await waitFor(() => expect(applyCode).toHaveBeenCalledWith(1, { dataset_value_id: 103, code_id: 7 }))
+    expect(removeCode).not.toHaveBeenCalled()
+  })
+
+  it('POSITIVE CONTROL: the viewer\'s own application is marked', async () => {
+    renderView()
+    fireEvent.click(await findRow(102))  // Engagement applied by Alice (user 1)
+    const option = await screen.findByRole('option', { name: /^Engagement/ })
+    expect(option).toHaveAttribute('aria-selected', 'true')
+    expect(option).toHaveAccessibleName(/, applied$/)
+  })
+})
+
+describe('#1701 (D381) — the By Text table says what its context columns leave out', () => {
+  beforeEach(() => {
+    getConfig.mockResolvedValue({
+      view_mode: 'by_text', focal_column_ids: [10], dataset_filter_ids: null, random_seed: null,
+      context_visibility: { demographics: true }, hide_empty: true, starred_value_ids: [],
+      treat_as_empty: [], treat_as_empty_is_default: true,
+    })
+  })
+
+  it('a blind reader\'s withheld rating columns are said above the table', async () => {
+    recordContext.mockResolvedValue(context(2))
+    renderView()
+    const notice = await screen.findByTestId('by-text-withheld')
+    expect(notice).toHaveTextContent(/^2 rating columns are hidden while blind\. /)
+    // Outside the grid: a conditional child inside a virtualised table risks the remount (#826).
+    expect(screen.getByRole('grid').contains(notice)).toBe(false)
+  })
+
+  it('POSITIVE CONTROL: nothing withheld, nothing said — after the contexts have answered', async () => {
+    renderView()
+    await waitFor(() => expect(recordContext).toHaveBeenCalled())
+    await screen.findAllByText('40')  // the demographics cell drew, so the contexts are in
+    expect(screen.queryByTestId('by-text-withheld')).not.toBeInTheDocument()
+  })
+})
 
 describe('the rating strip on the text-coding surface (#868 d)', () => {
   it('applying a scaled code by digit opens the strip below the grid, and a digit in it rates without coding', async () => {

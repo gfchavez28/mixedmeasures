@@ -46,6 +46,7 @@ const answers = (n: number) => ({
     dataset_value_id: 500 + i, text: `Answer ${i}`, column_id: 21, source_name: 'Survey › Comments',
     participant_id: 10 + i, participant_name: `T${10 + i}`, is_quoted: false,
   })),
+  segment_quote_ids: {}, answer_quote_ids: {},
 })
 
 afterEach(() => { cleanup(); vi.clearAllMocks() })
@@ -55,7 +56,7 @@ function mount(display: JointDisplay = DISPLAY) {
   render(
     <QueryClientProvider client={qc}>
       <PinPicker open onOpenChange={() => {}} projectId={1} display={display} construct="Planning"
-        group="High" codes={CODES} scope={EVERY} onPin={vi.fn(() => 'added' as const)} />
+        group="High" codes={CODES} scope={EVERY} onPin={vi.fn(() => 'added' as const)} pinnedExcerptIds={[]} />
     </QueryClientProvider>,
   )
 }
@@ -112,6 +113,36 @@ describe('#1668 (D344) — the words follow the strand the request reads', () =>
     mount()
     expect(await screen.findByText('3 coded passages in this group.')).toBeInTheDocument()
     expect(screen.getByRole('list', { name: 'Passages to pin' })).toBeInTheDocument()
+  })
+})
+
+/**
+ * #1714 (c), D398 — a *Pin* button names its quote by code points, cut at a word, marked "…".
+ * `p.text.slice(0, 60)` cut 60 UTF-16 units mid-word with no ellipsis (*"Pin “My line manager
+ * rewrote this plan without discussing it with”"* — a misquote), and could split an emoji.
+ */
+describe('#1714 (c) — the Pin button’s quote', () => {
+  const withTexts = (...texts: string[]) => {
+    const r = answers(texts.length)
+    r.answers.forEach((a, i) => { a.text = texts[i] })
+    return r
+  }
+  const EMOJI = '😀'.repeat(70)   // no space anywhere, and every character astral
+
+  it('a long quote: head and tail, each cut at a word; paragraphs collapsed; a short quote whole', async () => {
+    vi.mocked(jointDisplayApi.passages).mockResolvedValue(withTexts(
+      'My line manager rewrote this plan without discussing it with me, and then\nshared it with the whole team.',
+      'Yes.',
+      EMOJI,
+    ) as never)
+    mount()
+    expect(await screen.findByRole('button', { name: 'Pin “My line manager rewrote this…it with the whole team.”' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Pin “Yes.”' })).toBeInTheDocument()
+    // The astral quote is cut by CODE POINTS: no lone surrogate in the name, 29 + 29 emoji kept.
+    const emoji = screen.getAllByRole('button').find(b => b.getAttribute('aria-label')?.includes('😀'))!
+    const name = emoji.getAttribute('aria-label')!
+    expect(name).toBe(`Pin “${'😀'.repeat(29)}…${'😀'.repeat(29)}”`)
+    expect(name).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/)
   })
 })
 

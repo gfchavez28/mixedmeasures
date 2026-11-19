@@ -88,6 +88,8 @@ export interface RecordContext {
   texts: { column_id: number; column_name: string | null; value: string | null; sequence_order: number }[]
   other_columns: { column_id: number; column_name: string | null; value: string | null; column_type: string; sequence_order: number }[]
   column_positions: { column_id: number; column_name: string | null; sequence_order: number; column_type: string }[]
+  /** #1675 D359 — the participant table's rating columns left out while blind. */
+  withheld_rating_columns: number
 }
 
 export interface TextCodingColumn {
@@ -172,8 +174,13 @@ export const textCodingApi = {
     api.get<TextCodingListResponse>(`/projects/${pid}/text-coding/texts`, { params }).then(r => r.data),
   records: (pid: number, params: { column_ids: string; dataset_ids?: string; hide_empty?: boolean }) =>
     api.get<RecordsListResponse>(`/projects/${pid}/text-coding/records`, { params }).then(r => r.data),
-  recordContext: (pid: number, rowId: number) =>
-    api.get<RecordContext>(`/projects/${pid}/text-coding/record-context/${rowId}`).then(r => r.data),
+  // #1675 D359: `coderIds` while withholding — the participant table's rating columns are left
+  // out of the record's context, as the Data view leaves them out (`withheld_rating_columns`).
+  recordContext: (pid: number, rowId: number, coderIds?: string) =>
+    api.get<RecordContext>(
+      `/projects/${pid}/text-coding/record-context/${rowId}`,
+      coderIds ? { params: { coder_ids: coderIds } } : undefined,
+    ).then(r => r.data),
   progress: (pid: number, params?: { column_ids?: string; coder_id?: number }) =>
     api.get<CodingProgress>(`/projects/${pid}/text-coding/coding-progress`, { params }).then(r => r.data),
 

@@ -102,6 +102,7 @@ const report = (over: Partial<WithdrawalReport> = {}): WithdrawalReport => ({
   unlinked_records_with_identifier: 0,
   canvas_quotes_unplaced: { quotes: 0, sections: [], snapshots: [] },
   canvas_misfit_cases: 0,  // joint display slice 2 (r3-6)
+  canvas_drift_stamps: 0,  // #1674 (D357)
   other_projects_with_identifier: { projects: [], total: 0 },
   pre_update_copies: { count: 0, folder: '/home/r/backups' }, ...over,
 })
@@ -119,7 +120,7 @@ function renderPage(people: Participant[]) {
     return Promise.resolve(report({
       participant_id: id, identifier: p.identifier,
       documents: p.linked_documents.map(d => ({
-        document_id: d.id, name: d.name, segments: 2, code_applications: 0, excerpts: 0, notes: 0,
+        document_id: d.id, name: d.name, segments: 2, code_applications: 0, excerpts: 0, notes: 0, canvas_quotes: 0,
       })),
       total_items: 1 + p.linked_documents.length * 2,
     }))

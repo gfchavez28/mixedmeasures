@@ -20,19 +20,34 @@ import { cn } from '@/lib/utils'
 
 // ── Shared extensions for read-only rendering ────────────────────────────────
 
-const readOnlyExtensions: AnyExtension[] = [
+/** #1699 (D379) — which pane a read-only theme renders in. */
+type CompareSide = 'left' | 'right'
+
+/**
+ * Per SIDE: a snapshot's copy and the live copy of one joint display share one `displayKey`
+ * (a snapshot keeps its key, D348), so each side's display node keeps its open rows and view
+ * choice under its own scope (#1699, D379). Module scope, so an editor's extension list keeps
+ * its identity across renders.
+ */
+const readOnlyExtensionsFor = (side: CompareSide): AnyExtension[] => [
   ExcerptEmbed,
   ChartEmbed,
   MemoEmbed,
   CalloutStat,
   ImageEmbed,
   // ROADMAP row 56 — read-only here: the view drops every mutation control (#893).
-  JointDisplay,
+  JointDisplay.configure({ stateScope: `compare-${side}` }),
 ]
+const readOnlyExtensions: Record<CompareSide, AnyExtension[]> = {
+  left: readOnlyExtensionsFor('left'),
+  right: readOnlyExtensionsFor('right'),
+}
 
 // ── Read-only theme renderer ─────────────────────────────────────────────────
 
-function ReadOnlyTheme({ name, color, content, diffClass, materialDiff, changed, changedLabel, statusLabel }: {
+function ReadOnlyTheme({ side, name, color, content, diffClass, materialDiff, changed, changedLabel, statusLabel }: {
+  /** #1699 (D379) — REQUIRED, so every mount decides which pane's state its displays keep. */
+  side: CompareSide
   name: string
   color: string | null
   content: Record<string, unknown> | null
@@ -61,7 +76,7 @@ function ReadOnlyTheme({ name, color, content, diffClass, materialDiff, changed,
   const { editor } = useCanvasEditor({
     content: parsedContent,
     editable: false,
-    additionalExtensions: readOnlyExtensions,
+    additionalExtensions: readOnlyExtensions[side],
     // #850(a) — this hook names the editor only when passed a label, and every
     // other Tiptap surface threads one through here; this one was the exception.
     //
@@ -607,6 +622,7 @@ export default function CanvasCompareView() {
                     right, where its sentence is true. */}
                 {diff.matched.map(m => (
                   <ReadOnlyTheme
+                    side="left"
                     key={`m-l-${m.left.id}`}
                     name={m.left.name}
                     color={m.left.color}
@@ -617,6 +633,7 @@ export default function CanvasCompareView() {
                 ))}
                 {diff.leftOnly.map(t => (
                   <ReadOnlyTheme
+                    side="left"
                     key={`lo-${t.id}`}
                     name={t.name}
                     color={t.color}
@@ -628,7 +645,7 @@ export default function CanvasCompareView() {
               </>
             ) : (
               leftThemes.map(t => (
-                <ReadOnlyTheme key={`l-${t.id}`} name={t.name} color={t.color} content={t.content} />
+                <ReadOnlyTheme side="left" key={`l-${t.id}`} name={t.name} color={t.color} content={t.content} />
               ))
             )}
             {leftThemes.length === 0 && (
@@ -650,6 +667,7 @@ export default function CanvasCompareView() {
                   )
                   return (
                     <ReadOnlyTheme
+                      side="right"
                       key={`m-r-${m.right.id}`}
                       name={m.right.name}
                       color={m.right.color}
@@ -662,6 +680,7 @@ export default function CanvasCompareView() {
                 })}
                 {diff.rightOnly.map(t => (
                   <ReadOnlyTheme
+                    side="right"
                     key={`ro-${t.id}`}
                     name={t.name}
                     color={t.color}
@@ -673,7 +692,7 @@ export default function CanvasCompareView() {
               </>
             ) : (
               rightThemes.map(t => (
-                <ReadOnlyTheme key={`r-${t.id}`} name={t.name} color={t.color} content={t.content} />
+                <ReadOnlyTheme side="right" key={`r-${t.id}`} name={t.name} color={t.color} content={t.content} />
               ))
             )}
             {rightThemes.length === 0 && (

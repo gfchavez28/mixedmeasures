@@ -9,6 +9,11 @@ from ..database import Base
 class AnalysisDomain(Base):
     """A researcher-defined construct (e.g., 'Psychological Safety') grouping columns."""
     __tablename__ = "analysis_domains"
+    # #1678 (D366): a deleted variable group's id is never handed to the next one — a saved
+    # chart names its groups by id with no FK (`material_config.ID_KEYS`: `domain_ids`,
+    # `selected_domains`), so a reused id drew another group under the chart's stored name.
+    # Migration `bdf1ffd93239` makes the same table; `schema_diff_harness` compares.
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)

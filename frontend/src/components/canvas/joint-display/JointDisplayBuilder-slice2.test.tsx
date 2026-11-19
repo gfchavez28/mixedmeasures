@@ -17,6 +17,10 @@ vi.mock('@/lib/api', () => ({
     { id: 2, name: 'Survey', columns: [
       { id: 21, dataset_id: 2, dataset_name: 'Survey', column_code: null, column_name: 'Confidence', column_text: 'Confidence', column_type: 'ordinal', scale_labels: null, equivalence_group_id: null, domain_ids: [] },
     ] },
+    // #1712 (c): a dataset with no variable a survey strand can show (only an identifier).
+    { id: 3, name: 'Exit register', columns: [
+      { id: 41, dataset_id: 3, dataset_name: 'Exit register', column_code: null, column_name: 'Staff ID', column_text: 'Staff ID', column_type: 'identifier', scale_labels: null, equivalence_group_id: null, domain_ids: [] },
+    ] },
   ] }) },
   codesApi: { list: vi.fn().mockResolvedValue({ total: 2, codes: [
     { id: 31, name: 'Planning time', is_active: true, is_universal: false },
@@ -111,5 +115,70 @@ describe('joint display slice 2 — strands in the builder', () => {
     expect(d.strands.map((s: { key: string; label: string; dataset_id: number | null }) => [s.key, s.label, s.dataset_id]))
       .toEqual([['codes', '', null], ['variables', '', null]])
     expect(isImplicitPair(d)).toBe(true)
+  })
+})
+
+/**
+ * #1712 (a)–(c), D388–D390 — the builder's names and empty lists. With two constructs the tree had
+ * two of every "<strand> formed the groups", a code strand's filter read *"Filter survey
+ * comments"* over a list of CODES, and a survey strand with no dataset opened to *"Nothing
+ * matches."*. (d) is decided not to do (D391): the display answers an unlinked grouping itself.
+ */
+describe('#1712 — the builder names what each control is for', () => {
+  async function explicitDisplay() {
+    mount()
+    fireEvent.change(await screen.findByLabelText('Variable that forms the groups'), { target: { value: '11' } })
+    fireEvent.change(screen.getByLabelText('Construct 1 name'), { target: { value: 'Planning' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add construct' }))
+    fireEvent.change(screen.getByLabelText('Construct 2 name'), { target: { value: 'Support' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add an observation strand' }))
+    fireEvent.change(screen.getByLabelText('Strand 1 name'), { target: { value: 'Baseline survey' } })
+    fireEvent.change(screen.getByLabelText('Strand 2 name'), { target: { value: 'Interviews' } })
+    fireEvent.change(screen.getByLabelText('Strand 3 name'), { target: { value: 'Site visits' } })
+  }
+
+  it('D388: each "formed the groups" box names its construct, its visible words first', async () => {
+    await explicitDisplay()
+    for (const construct of ['Planning', 'Support']) {
+      for (const strand of ['Baseline survey', 'Interviews']) {
+        const box = screen.getByRole('checkbox', { name: `${strand} formed the groups for ${construct}` })
+        expect(box.closest('label')).toHaveTextContent(`${strand} formed the groups`)   // the visible words
+      }
+    }
+    // No two "formed the groups" boxes share a name (two constructs gave two of each).
+    const boxNames = screen.getAllByRole('checkbox', { name: /formed the groups/ }).map(b => b.getAttribute('aria-label'))
+    expect(boxNames).toHaveLength(4)
+    expect(new Set(boxNames).size).toBe(4)
+  })
+
+  it('D389: a code strand’s filter and list are named for the CODES they list; the trigger keeps the strand', async () => {
+    await explicitDisplay()
+    fireEvent.click(screen.getByRole('button', { name: /^Interviews for Planning/ }))
+    expect(await screen.findByRole('dialog', { name: 'Interviews for Planning' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Filter codes' })).toBeInTheDocument()
+    expect(screen.getByRole('list', { name: 'Codes' })).toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Filter interviews' })).toBeNull()
+  })
+
+  it('D390: a survey strand with no dataset says to choose one; one with nothing to show says so; a filter still says "Nothing matches."', async () => {
+    await explicitDisplay()
+    fireEvent.click(screen.getByRole('button', { name: /^Baseline survey for Planning/ }))
+    expect(await screen.findByRole('textbox', { name: 'Filter variables' })).toBeInTheDocument()
+    expect(screen.getByRole('list', { name: 'Variables' })).toHaveTextContent('Choose this strand’s dataset first.')
+    expect(screen.queryByText('Nothing matches.')).toBeNull()
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+    cleanup()
+
+    await explicitDisplay()
+    fireEvent.change(screen.getByLabelText('Dataset for Baseline survey'), { target: { value: '3' } })
+    fireEvent.click(screen.getByRole('button', { name: /^Baseline survey for Planning/ }))
+    expect(await screen.findByRole('list', { name: 'Variables' })).toHaveTextContent('This dataset has no variable this strand can show.')
+    cleanup()
+
+    // CONTROL: a list the FILTER emptied keeps "Nothing matches."
+    await explicitDisplay()
+    fireEvent.click(screen.getByRole('button', { name: /^Interviews for Planning/ }))
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Filter codes' }), { target: { value: 'zzz' } })
+    expect(screen.getByRole('list', { name: 'Codes' })).toHaveTextContent('Nothing matches.')
   })
 })

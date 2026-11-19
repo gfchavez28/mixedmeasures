@@ -23,7 +23,7 @@
  *   dataset (the Data view's sentence). The server is the guard: it refuses a score as the
  *   groups and leaves it out of a survey row and a quote's attribution.
  */
-import { useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowDown, ArrowUp, Plus, Trash2, Search } from 'lucide-react'
 import {
@@ -44,22 +44,24 @@ import { CATEGORICAL_GROUPING_TYPES, VALUE_NUMERIC_TYPES } from '@/lib/dataset-c
 import type { ListLoad } from '@/lib/list-status'
 import {
   bindingOf, emptyDisplay, emptyRow, fitsNamingStrand, readDisplay, IMPLICIT_CODES_KEY, IMPLICIT_VARIABLES_KEY, strandOfKind, withBinding, withStrand,
-  changeStrandDataset, constructsBindingStrandVariables,
+  changeStrandDataset, constructsBindingStrandVariables, unnamedConstructHoldingWork, regroupHolds, regroupNeedsAsking,
   type JointDisplay, type JointDisplayRow, type JointDisplayStrand, type StrandKind,
 } from '@/lib/joint-display'
+import { MODE_DISABLED_CLASS } from '@/lib/mode-disabled'
 import {
   emptyStrand, isImplicitPair, makeStrandsExplicit, moveStrand, removeStrand, rowBinding, strandPlacement, strandTag,
   strandsProblem,
 } from '@/lib/joint-display-strands'
 import { describeResult, isDisplayResult } from '@/lib/joint-display-results'
-import { atOrBefore, landAfterPress, lastIn } from './focus-landing'
+import { atOrBefore, landAfterPress, landOnFirstField, lastIn } from './focus-landing'
 import {
   ATTRIBUTION_MODES, BINDING_LIMIT_TEXT, CONSTRUCT_LIMIT_TEXT, FIT_VOCABULARIES, IMPLICATION_CITATION, MAX_CONSTRUCTS,
   MAX_IDS_PER_BINDING, MAX_STRANDS_IN_BUILDER,
-  OBSERVATIONS_FAILED_TITLE, QUESTIONS_FAILED_TITLE, STRAND_KIND_TERMS,
+  OBSERVATIONS_FAILED_TITLE, PICKER_NO_DATASET_TEXT, PICKER_NO_VARIABLE_TEXT, PICKER_NOTHING_TEXT, QUESTIONS_FAILED_TITLE, STRAND_KIND_TERMS,
   STRAND_LIMIT_TEXT, STRAND_QUESTIONS_LIMIT_TEXT, STRAND_REMOVE_CONFIRM_TEXT, STRAND_REMOVE_KEEP_TEXT, TEXT_STRAND_QUESTIONS_LABEL, strandRemovalWarningText,
-  STRAND_DATASET_CHANGE_TEXT, strandDatasetChangeWarningText, strandDatasetKeepText,
-  ATTRIBUTION_OPTION_UNOFFERED_TEXT, attributionOptionIneligibleText,
+  strandDatasetChangeText, strandDatasetChangeWarningText, strandDatasetKeepText,
+  ATTRIBUTION_OPTION_UNOFFERED_TEXT, attributionOptionIneligibleText, unnamedConstructText,
+  regroupChangeText, regroupKeepText, regroupWarningText,
   type AttributionMode,
 } from '@/lib/joint-display-vocabulary'
 
@@ -156,6 +158,15 @@ function BuilderBody({
   // D165 — the saved results a construct can stand beside it (the chart embeds' and drawer's key).
   const materialsQuery = useQuery({ queryKey: ['materials-all', projectId], queryFn: () => materialsApi.listAllMaterials(projectId) })
   const load = useListLoad(columnsQuery, codesQuery, convsQuery, docsQuery, materialsQuery)
+  // #1705 (a) (D386): the dialog opens before its lists answer, so Radix's open autofocus found
+  // only Close. Once they answer, the title takes focus — once, and never stealing.
+  const titleRef = useRef<HTMLInputElement>(null)
+  const landedOnTitle = useRef(false)
+  useEffect(() => {
+    if (load.status !== 'ready' || landedOnTitle.current) return
+    landedOnTitle.current = true
+    requestAnimationFrame(() => landOnFirstField(titleRef.current))
+  }, [load.status])
   // Joint display slice 2: the observations an observation strand reads — asked only once the
   // display has named strands, and NOT in the builder's load gate (a slice-1 display never needs it).
   // Sticky once the researcher edits a strand here: removing back to two unnamed strands must
@@ -164,6 +175,11 @@ function BuilderBody({
   const [strandsEdited, setStrandsEdited] = useState(false)
   // #1644 review, r3-3: what the disabled *Add construct* is described by (above the early return).
   const constructLimitId = useId()
+  const footerReasonId = useId()
+  const regroupWarnId = useId()
+  // #1671 D350: a grouping change on a display holding work under the current groups, asked first.
+  const [regroupConfirm, setRegroupConfirm] = useState<{ next: number | null } | null>(null)
+  const groupingSelectRef = useRef<HTMLSelectElement>(null)
   const explicit = strandsEdited || !isImplicitPair(draft)
   const obsQuery = useQuery({
     queryKey: ['observations', projectId], queryFn: () => observationsApi.list(projectId), enabled: explicit,
@@ -216,6 +232,9 @@ function BuilderBody({
     setDraft(d => ({ ...d, rows: d.rows.map(r => (r.key === key ? { ...r, ...patch } : r)) }))
 
   const groupingColumn = allColumns.find(c => c.id === draft.group_by_column_id) ?? null
+  // #1703 (a) (D371): what the asked-about change groups by — named on its button.
+  const regroupTarget = regroupConfirm?.next == null ? null : allColumns.find(c => c.id === regroupConfirm.next) ?? null
+  const regroupTargetName = regroupTarget ? columnLabel(regroupTarget) : null
   // #1653 (D346): the *Also show* variable the display holds but the list cannot offer — gone, or
   // retyped so it cannot form groups — shown as held; null when the held one is an offered option
   // (or none is held). Below the load gate, so an unanswered list is never read as "cannot be
@@ -228,7 +247,11 @@ function BuilderBody({
         : attributionOptionIneligibleText(columnLabel(heldAttributionColumn))
   const namedRows = draft.rows.filter(r => r.construct.trim())
   const problem = strandsProblem(draft)
+  // #1673 D355: saving drops nameless rows, so it is unavailable while one HOLDS work — its pins,
+  // fit, meta-inference and cases went with it, unsaid. *Remove construct* is the way to delete.
+  const unnamedHeld = unnamedConstructHoldingWork(draft)
   const canSubmit = draft.group_by_column_id != null && namedRows.length > 0 && problem == null
+    && unnamedHeld == null
   const datasetOf = (id: number) => allColumns.find(c => c.id === id)?.dataset_id ?? null
   const setStrand = (key: string, patch: Partial<JointDisplayStrand>) =>
     setDraft(d => ({ ...d, strands: d.strands.map(s => (s.key === key ? { ...s, ...patch } : s)) }))
@@ -248,6 +271,7 @@ function BuilderBody({
       <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-5 text-sm">
         <Section n={1} title="Title">
           <Input
+            ref={titleRef}
             aria-label="Display title"
             placeholder="e.g. Teachers by gain group: what they reported, what they said"
             value={draft.title}
@@ -257,10 +281,18 @@ function BuilderBody({
 
         <Section n={2} title="Compare groups by">
           <select
+            ref={groupingSelectRef}
             aria-label="Variable that forms the groups"
             className="w-full h-9 rounded-md border border-mm-border-medium bg-mm-surface px-2 text-sm text-mm-text"
             value={draft.group_by_column_id ?? ''}
-            onChange={e => set({ group_by_column_id: e.target.value ? Number(e.target.value) : null })}
+            onChange={e => {
+              const next = e.target.value ? Number(e.target.value) : null
+              if (next === draft.group_by_column_id) return
+              // #1671 D350: pins, a rule's group condition, picked cases and drift stamps were
+              // chosen under the current groups — asked first, and nothing is cleared.
+              if (regroupNeedsAsking(draft)) setRegroupConfirm({ next })
+              else set({ group_by_column_id: next })
+            }}
           >
             <option value="">Choose a variable…</option>
             {datasets.map(ds => {
@@ -273,6 +305,28 @@ function BuilderBody({
               )
             })}
           </select>
+          {regroupConfirm && (
+            <div className="mt-2 rounded-md border border-amber-300 dark:border-amber-800/60 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-200 space-y-2">
+              <p id={regroupWarnId}>
+                {regroupWarningText(regroupHolds(draft))}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {/* The safe choice takes focus; either choice hands it back to the select (#1665's shape). */}
+                <Button type="button" size="sm" variant="outline" autoFocus aria-describedby={regroupWarnId}
+                  onClick={() => { setRegroupConfirm(null); groupingSelectRef.current?.focus() }}>
+                  {regroupKeepText(groupingColumn ? columnLabel(groupingColumn) : null)}
+                </Button>
+                <Button type="button" size="sm" variant="destructive" aria-describedby={regroupWarnId}
+                  onClick={() => {
+                    set({ group_by_column_id: regroupConfirm.next })
+                    setRegroupConfirm(null)
+                    groupingSelectRef.current?.focus()
+                  }}>
+                  {regroupChangeText(regroupTargetName)}
+                </Button>
+              </div>
+            </div>
+          )}
           <p className="mt-1 text-xs text-mm-text-muted">
             Any ordinal, nominal, binary or demographic variable of a dataset linked to
             participants. A continuous variable can be banded into groups with a recode first.
@@ -383,15 +437,19 @@ function BuilderBody({
                     onChange={v => setRow(row.key, { result_material_ids: v })}
                   />
                 )}
+                {/* #1712 (a), D388: each "formed the groups" box names its construct — the visible
+                    words first (WCAG 2.5.3), then "for <construct>", as its siblings in the row do. */}
                 <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-mm-text-secondary">
                   {!explicit && (<>
                   <label className="inline-flex items-center gap-1.5">
                     <input type="checkbox" checked={bindingOf(row, varsKey).marked_formed}
+                      aria-label={`The survey strand formed the groups for ${row.construct.trim() || `construct ${i + 1}`}`}
                       onChange={e => setRow(row.key, withBinding(row, varsKey, { marked_formed: e.target.checked }))} />
                     The survey strand formed the groups
                   </label>
                   <label className="inline-flex items-center gap-1.5">
                     <input type="checkbox" checked={bindingOf(row, codesKey).marked_formed}
+                      aria-label={`The coded strand formed the groups for ${row.construct.trim() || `construct ${i + 1}`}`}
                       onChange={e => setRow(row.key, withBinding(row, codesKey, { marked_formed: e.target.checked }))} />
                     The coded strand formed the groups
                   </label>
@@ -399,6 +457,7 @@ function BuilderBody({
                   {row.result_material_ids.length > 0 && (
                     <label className="inline-flex items-center gap-1.5">
                       <input type="checkbox" checked={row.results_marked_formed}
+                        aria-label={`The result at another unit formed the groups for ${row.construct.trim() || `construct ${i + 1}`}`}
                         onChange={e => setRow(row.key, { results_marked_formed: e.target.checked })} />
                       The result at another unit formed the groups
                     </label>
@@ -514,15 +573,24 @@ function BuilderBody({
       </div>
       <DialogFooter className="px-5 py-3 border-t border-mm-border-subtle">
         {!canSubmit && (
-          <p className="mr-auto text-xs text-mm-text-muted">
-            {problem ?? 'Choose the variable that forms the groups and name at least one construct.'}
+          <p id={footerReasonId} className="mr-auto text-xs text-mm-text-muted">
+            {unnamedHeld != null ? unnamedConstructText(unnamedHeld)
+              : problem ?? 'Choose the variable that forms the groups and name at least one construct.'}
           </p>
         )}
         <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
         <Button
           type="button"
-          disabled={!canSubmit}
-          onClick={() => onSubmit({ ...draft, rows: namedRows })}
+          // #1673 D355: a nameless construct holding work keeps the button FOCUSABLE, described
+          // by the sentence that names the construct (the other unmet states stay native-disabled).
+          disabled={!canSubmit && unnamedHeld == null}
+          aria-disabled={unnamedHeld != null ? true : undefined}
+          aria-describedby={unnamedHeld != null ? footerReasonId : undefined}
+          className={MODE_DISABLED_CLASS}
+          onClick={e => {
+            if (!canSubmit) { e.preventDefault(); return }
+            onSubmit({ ...draft, rows: namedRows })
+          }}
         >
           {mode === 'insert' ? 'Insert joint display' : 'Save changes'}
         </Button>
@@ -585,9 +653,16 @@ function SourcePicker({
 
 /** A searchable checkbox list in a popover. Its BODY mounts only while open (§8). */
 function IdMultiPicker({
-  label, rowName, options, value, onChange, max, limitText = BINDING_LIMIT_TEXT,
+  label, itemsLabel = label, rowName, options, value, onChange, max, limitText = BINDING_LIMIT_TEXT,
+  emptyText = PICKER_NOTHING_TEXT,
 }: {
   label: string
+  /**
+   * #1712 (b), D389: what the LIST holds, which names its filter and list (*Filter codes*,
+   * *Codes*). The trigger and the popover keep `label` — a strand's name is its binding for
+   * the construct, and the visible button text starts with it. Default: `label`.
+   */
+  itemsLabel?: string
   rowName: string
   options: Option[]
   value: (number | null)[]
@@ -596,6 +671,8 @@ function IdMultiPicker({
   max?: number
   /** What the list says at `max` — a construct's binding by default; a strand's questions say their own. */
   limitText?: string
+  /** #1712 (c), D390: what the list says when it offers nothing at all (never "Nothing matches."). */
+  emptyText?: string
 }) {
   const [open, setOpen] = useState(false)
   const chosen = value.filter((x): x is number => x != null)
@@ -617,8 +694,9 @@ function IdMultiPicker({
           the field beneath it (driven 2026-11-12e: it pressed *Add construct*). Select's z-[201]. */}
       <PopoverContent className="w-72 p-0 z-[201]" align="start" aria-label={`${label} for ${rowName}`}>
         {open && (
-          <MultiPickerBody label={label} options={options} chosen={chosen} full={max != null && chosen.length >= max}
-            limitText={limitText} onToggle={(id, on) => onChange(on ? [...value, id] : value.filter(x => x !== id))} />
+          <MultiPickerBody label={itemsLabel} options={options} chosen={chosen} full={max != null && chosen.length >= max}
+            limitText={limitText} emptyText={emptyText}
+            onToggle={(id, on) => onChange(on ? [...value, id] : value.filter(x => x !== id))} />
         )}
       </PopoverContent>
     </Popover>
@@ -626,14 +704,17 @@ function IdMultiPicker({
 }
 
 function MultiPickerBody({
-  label, options, chosen, full = false, limitText = BINDING_LIMIT_TEXT, onToggle,
+  label, options, chosen, full = false, limitText = BINDING_LIMIT_TEXT, emptyText = PICKER_NOTHING_TEXT, onToggle,
 }: {
+  /** What the list holds — its filter's and its own name. */
   label: string
   options: Option[]
   chosen: number[]
   /** At the cap: nothing more is offered, and the list says why (a chosen one still clears). */
   full?: boolean
   limitText?: string
+  /** Said when `options` is empty; "Nothing matches." is only for a list the filter emptied (D390). */
+  emptyText?: string
   onToggle: (id: number, on: boolean) => void
 }) {
   const [q, setQ] = useState('')
@@ -655,7 +736,9 @@ function MultiPickerBody({
       </div>
       {full && <p id={limitId} className="px-3 py-1.5 text-xs text-mm-text-muted border-b border-mm-border-subtle">{limitText}</p>}
       <ul className="overflow-y-auto py-1" aria-label={label}>
-        {shown.length === 0 && <li className="px-3 py-2 text-xs text-mm-text-muted">Nothing matches.</li>}
+        {shown.length === 0 && (
+          <li className="px-3 py-2 text-xs text-mm-text-muted">{options.length === 0 ? emptyText : 'Nothing matches.'}</li>
+        )}
         {shown.map(o => {
           const blocked = full && !chosen.includes(o.id)
           return (
@@ -708,7 +791,8 @@ function SurveyPicker({
         {datasets.map(ds => <option key={ds.id} value={ds.id}>{ds.name}</option>)}
       </select>
       {current && (
-        <IdMultiPicker label="Survey variables" rowName={rowName} options={options} value={value} onChange={onChange} max={MAX_IDS_PER_BINDING} />
+        <IdMultiPicker label="Survey variables" itemsLabel="Variables" rowName={rowName} options={options} value={value}
+          onChange={onChange} max={MAX_IDS_PER_BINDING} emptyText={PICKER_NO_VARIABLE_TEXT} />
       )}
       {current && withheldNotice && (
         <span className="text-xs text-mm-text-muted" data-testid="builder-withheld-rating-scores">{withheldNotice}</span>
@@ -865,7 +949,8 @@ function StrandsEditor({
                     </Button>
                     <Button type="button" size="sm" variant="destructive" aria-describedby={datasetWarnId}
                       onClick={() => { onChangeDataset(s.key, datasetConfirm.next); setDatasetConfirm(null); focusDatasetSelect(s.key) }}>
-                      {STRAND_DATASET_CHANGE_TEXT}
+                      {strandDatasetChangeText(datasetConfirm.next == null ? null
+                        : datasets.find(ds => ds.id === datasetConfirm.next)?.name ?? null)}
                     </Button>
                   </div>
                 </div>
@@ -912,22 +997,28 @@ function RowStrandPickers({ draft, row, rowName, codes, datasets, onChange }: {
             // #1615 D279: the list hides the rating scores and SAYS how many (the Data view's sentence).
             const options = eligible.filter(c => !isWithheld(c)).map(c => ({ id: c.id, name: columnLabel(c) }))
             const withheld = withheldRatingColumnsNotice(eligible.length - options.length)
+            // #1712 (b)/(c), D389–D390: the list is named for what it lists (the trigger keeps the
+            // strand's name), and an empty one says why — no dataset yet, or none it can show.
             return (
               <span key={s.key} className="inline-flex flex-wrap items-center gap-2">
-                <IdMultiPicker label={tag} rowName={rowName} options={options}
-                  value={b.column_ids} onChange={v => onChange(s.key, { column_ids: v })} max={MAX_IDS_PER_BINDING} />
+                <IdMultiPicker label={tag} itemsLabel="Variables" rowName={rowName} options={options}
+                  value={b.column_ids} onChange={v => onChange(s.key, { column_ids: v })} max={MAX_IDS_PER_BINDING}
+                  emptyText={ds ? PICKER_NO_VARIABLE_TEXT : PICKER_NO_DATASET_TEXT} />
                 {withheld && <span className="text-xs text-mm-text-muted">{withheld}</span>}
               </span>
             )
           }
-          return <IdMultiPicker key={s.key} label={tag} rowName={rowName} options={codes}
+          // Codes, survey comments and observation strands all list CODES.
+          return <IdMultiPicker key={s.key} label={tag} itemsLabel="Codes" rowName={rowName} options={codes}
             value={b.code_ids} onChange={v => onChange(s.key, { code_ids: v })} max={MAX_IDS_PER_BINDING} />
         })}
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-mm-text-secondary">
         {draft.strands.filter(s => strandPlacement(s.kind) === 'per_group').map(s => (
           <label key={s.key} className="inline-flex items-center gap-1.5">
+            {/* #1712 (a), D388: the box names its construct, the visible words first. */}
             <input type="checkbox" checked={rowBinding(draft, row, s).marked_formed}
+              aria-label={`${strandTag(draft, s)} formed the groups for ${rowName}`}
               onChange={e => onChange(s.key, { marked_formed: e.target.checked })} />
             {strandTag(draft, s)} formed the groups
           </label>

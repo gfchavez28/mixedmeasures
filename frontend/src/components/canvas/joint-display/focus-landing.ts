@@ -37,6 +37,22 @@ export function landAfterPress(
   })
 }
 
+/**
+ * #1705 (a) (D386) — a dialog whose body is not ready when Radix runs its open autofocus opens
+ * with focus on Close (the only tabbable then: the wrapper renders Close after its children,
+ * `components/ui/dialog.tsx`). Once the body is ready, focus moves to its first field — but only
+ * while it is still where the opening put it: Close, the dialog itself, or `<body>`. It never
+ * steals: a researcher who has moved into the dialog keeps their place (`dialog-focus.md`).
+ */
+export function landOnFirstField(field: HTMLElement | null | undefined): void {
+  if (!field) return
+  const dialog = field.closest<HTMLElement>('[role="dialog"]')
+  const active = document.activeElement as HTMLElement | null
+  const onClose = active != null && dialog != null && active.parentElement === dialog
+    && active.tagName === 'BUTTON' && active.textContent?.trim() === 'Close'
+  if (active == null || active === document.body || active === dialog || onClose) field.focus()
+}
+
 /** The last element matching `selector` in `scope` — a new item's field after an add. */
 export function lastIn(scope: ParentNode, selector: string): HTMLElement | null {
   const all = scope.querySelectorAll<HTMLElement>(selector)

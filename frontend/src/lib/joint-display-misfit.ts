@@ -10,6 +10,9 @@
  */
 import {
   CASE_OPERATOR_TEXT,
+  CASE_OUTSIDE_GROUPS_TEXT,
+  codeConditionText,
+  groupConditionText,
   MISFIT_HEADING,
   MISFIT_ADDED_LABEL,
   MISFIT_NO_REASON_TEXT,
@@ -119,12 +122,16 @@ export function misfitUnresolvedCount(m: JointDisplayMisfit | null): number {
 }
 
 export interface RuleNames {
-  /** The grouping variable's name — a group condition reads "Gain group is “High”". */
-  groupBy: string
+  // #1703 (b) (D372): no grouping variable's name — a group condition reads by its group alone
+  // ("in the group “High”"), because the rule stores the group's NAME and after a regroup the
+  // current variable's name beside an old group's value was false ("Pay band is “Community Health”").
   column: (id: number) => string | null
   code: (id: number) => string | null
   /** A code strand's label — said only when the display has more than one code strand. */
   strand: (key: string) => string | null
+  /** #1704 (c) (D385) — a code strand's kind, so a code condition says what the case HAS:
+   *  a passage (a codes strand) or an answer (a survey comments strand). */
+  strandKind: (key: string) => string | null
   codeStrandCount: number
 }
 
@@ -136,7 +143,7 @@ function quote(s: string): string {
 export function conditionText(c: MisfitCondition, names: RuleNames): string {
   switch (c.kind) {
     case 'group':
-      return `${names.groupBy} is ${quote(c.group)}`
+      return groupConditionText(c.group)
     case 'variable': {
       const name = (c.column_id != null && names.column(c.column_id)) || 'a variable this row no longer binds'
       const op = CASE_OPERATOR_TEXT[c.op] ?? 'compared in a way this version cannot read'
@@ -147,7 +154,8 @@ export function conditionText(c: MisfitCondition, names: RuleNames): string {
     case 'code': {
       const name = (c.code_id != null && names.code(c.code_id)) || 'a code this row no longer binds'
       const strand = names.codeStrandCount > 1 ? names.strand(c.strand_key) : null
-      return `${c.present ? 'used' : 'did not use'} ${quote(name)}${strand ? ` (${strand})` : ''}`
+      const unit = names.strandKind(c.strand_key) === 'text_codes' ? 'answer' : 'passage'
+      return `${codeConditionText(c.present, unit, name)}${strand ? ` (${strand})` : ''}`
     }
     default:
       return 'a condition this version cannot read'
@@ -179,6 +187,9 @@ export interface MisfitExportInput {
   countText?: string
   /** participant id → identifier (absent = no longer in the project). */
   identifier: (participantId: number) => string | null
+  /** #1703 (d) (D374) — a case in none of the display's groups now: the note says so, as the
+   *  Compact view does (`CASE_OUTSIDE_GROUPS_TEXT`), in either attribution mode. */
+  outsideGroups: (participantId: number) => boolean
 }
 
 /**
@@ -197,7 +208,9 @@ export function misfitNoteLine(x: MisfitExportInput): string | null {
   const items = (cases: MisfitCase[]) => cases.map(c => {
     const who = c.participant_id != null ? x.identifier(c.participant_id) : null
     const label = who == null ? 'a participant no longer in the project' : exportCaseLabel(x.attribution, who, n++)
-    return `${label}: ${(c.reason.trim() || MISFIT_NO_REASON_TEXT).replace(/\.$/, '')}`
+    const outside = who != null && c.participant_id != null && x.outsideGroups(c.participant_id)
+      ? ` (${CASE_OUTSIDE_GROUPS_TEXT})` : ''
+    return `${label}${outside}: ${(c.reason.trim() || MISFIT_NO_REASON_TEXT).replace(/\.$/, '')}`
   }).join('; ')
   const closed = (s: string) => (/[!?…]$/.test(s) ? s : `${s}.`)
   const parts = [`${MISFIT_HEADING} — ${x.construct || 'Untitled construct'}.`]

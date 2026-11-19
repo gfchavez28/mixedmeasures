@@ -250,8 +250,9 @@ while it shows. **The same is true of the renderer-recovery dialogs
 (#1046):** the suite drives every rule through fakes. A throwaway harness has driven
 them in a real Electron on Linux: 42.3.3 (2026-09-26), 42.11.8 at the runtime
 bump (2026-09-28), 44.5.1 at the major move (2026-10-04 — the kill-by-process-id
-fallback still fires there), and 44.9.3 at #1366's move (2026-10-28, all seven
-results as before). Whether they appear on the packaged Windows build, and whether
+fallback still fires there), 44.9.3 at #1366's move (2026-10-28, all seven
+results as before), and 44.11.2 for 1.7.0 (2026-11-18, the RESULTS line
+identical to 44.9.3's). Whether they appear on the packaged Windows build, and whether
 the hang path's kill behaves the same there, is a §4b check. **Re-run that harness in
 the new binary whenever the runtime moves**
 (the internal design notes, git-ignored; run steps in its
@@ -287,9 +288,11 @@ and confirm the backend process exits and a shutdown backup is written.
   platforms get a clean `SIGTERM` shutdown, except a quit while the backend is
   updating the database: that is a `SIGKILL` on every platform, and the update is
   undone and runs again at the next launch (#1362).
-- The shipped Electron runtime is locked to a release on a supported line (44.9.3,
-  taken on 2026-10-28 for 1.5.8 — GHSA-jr5w names 44.5.1, which the 44 move took on
-  2026-10-04 as the line's head, #1366; 42 reached end of life 2026-10-20),
+- The shipped Electron runtime is locked to a release on a supported line (44.11.2,
+  taken on 2026-11-18 for 1.7.0 — 44.9.3 lacks the fix for CVE-2026-125350, an
+  exploited Chromium bug fixed in 44.11.1; before it 44.9.3, taken on 2026-10-28 for
+  1.5.8 — GHSA-jr5w names 44.5.1, which the 44 move took on 2026-10-04 as the line's
+  head, #1366; 42 reached end of life 2026-10-20),
   with a floor guarded by `runtime-floor.test.js`. **Supported is dated:** Electron
   supports the latest three majors; 44's end of life is 2027-03-02, and the move
   after it needs #1121 first (Electron 46 removes the synchronous `safeStorage`

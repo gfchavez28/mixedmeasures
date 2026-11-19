@@ -16,6 +16,7 @@ import {
   isImplicitPair, makeStrandsExplicit, nextPair, pairNotApplicable, rowFits, writeFits, moveStrand, removeStrand, rowStrands, strandsProblem, strandTag,
 } from '@/lib/joint-display-strands'
 import { buildJointDisplayReport, type ReportConstructRow } from '@/lib/joint-display-report'
+import { NOTE_OBSERVATION_TEXT, NOTE_TEXT_CODES_TEXT } from '@/lib/joint-display-vocabulary'
 import { stampBaseline } from '@/components/canvas/joint-display/display-helpers'
 
 const CTX = { coderName: () => 'Me', withholding: false, self: 1, asOf: '15 Nov 2026' }
@@ -174,7 +175,7 @@ describe('r2-7 = r1-7 (R4) — drift keys: per strand, and slice 1’s keys kept
   it('the implicit pair keeps slice 1’s keys, on either wire — a slice-1 baseline does not read as moved', () => {
     expect(Object.keys(rowCells(slice1Row())).sort()).toEqual(Object.keys(rowCells(c2ImplicitRow())).sort())
     expect(rowCells(slice1Row())['code:31:High']).toBe('7 of 11')
-    expect(rowDrift(stampBaseline(slice1Row()), c2ImplicitRow())).toEqual([])
+    expect(rowDrift(stampBaseline(slice1Row(), 'all'), c2ImplicitRow())).toEqual([])
   })
 
   it('two strands binding ONE code keep two cells, keyed by strand, and the drift line names the strand', () => {
@@ -185,14 +186,14 @@ describe('r2-7 = r1-7 (R4) — drift keys: per strand, and slice 1’s keys kept
     expect(cells['observation:31@s-obs:beside']).toBe('2 of 3 observations · 15% of observed time (9 min)')
     const moved = namedRow()
     moved.by_strand!['s-fg'] = strandOf('codes', 'covers', { codes: [codeStrand(31, 'Planning time', 3, 2)] })
-    const changes = rowDrift(stampBaseline(namedRow()), moved, k => ({ 's-fg': 'Focus groups' } as Record<string, string>)[k] ?? k)
+    const changes = rowDrift(stampBaseline(namedRow(), 'all'), moved, k => ({ 's-fg': 'Focus groups' } as Record<string, string>)[k] ?? k)
     expect(changes.map(c => c.label)).toEqual(['Planning time (Focus groups), High', 'Planning time (Focus groups), difference'])
   })
 
   it('found beside: a group whose label holds a colon is named whole', () => {
     const row = slice1Row()
     row.codes[0].cells[0].group = 'Band: 6'
-    const changes = rowDrift({ hash: 'x', cells: {}, stamped_at: '' }, row)
+    const changes = rowDrift({ hash: 'x', cells: {}, stamped_at: '', scope: 'all', cleared: null }, row)
     expect(changes.map(c => c.label)).toContain('Planning time, Band: 6')
   })
 })
@@ -237,8 +238,11 @@ describe('r2-2, r2-6 — the report table (the Report view and the three exports
   })
   it('the note lists each strand by kind and the observation strand’s basis', () => {
     expect(r.note).toContain('Strands: Interviews and Focus groups (codes); Baseline survey (survey variables); Site visits (observation codes).')
-    expect(r.note).toContain("An observation cell gives the observations with at least one clip coded with the code, out of the strand's observations, and the coded time as a share of the observed time. It never counts participants.")
-    expect(r.note).toContain('Clips are not counted while each coder cuts their own')
+    // The notice rule (2026-11-18, rewrite D): short in the note, word for word in the Definitions.
+    expect(r.note).toContain(NOTE_OBSERVATION_TEXT)
+    const d = r.definitions.join(' ')
+    expect(d).toContain("An observation cell gives the observations with at least one clip coded with the code, out of the strand's observations, and the coded time as a share of the observed time. It never counts participants.")
+    expect(d).toContain('Clips are not counted while each coder cuts their own')
   })
   it('a not-measured observation strand says so beside the row and in the fit', () => {
     const r2 = report(NAMED, [namedRow({ ...OBS_OPEN, status: 'not_measured', observation_codes: [] })])
@@ -262,14 +266,16 @@ describe('r2-6 / R6 — the observation strand in its own unit (the literature�
   it('a clip count only where clips are agreed; the note says which', () => {
     expect(rowCells(namedRow(agreed))['observation:31@s-obs:beside']).toBe('2 of 3 observations · <1% of observed time (10 s) · 5 clips')
     const r = report(NAMED, [namedRow(agreed)], [obsFacts('agreed', 3)])
-    expect(r.note).toContain("Clips are counted because the observations' clips were agreed (their segmentation is frozen).")
-    expect(r.note).not.toContain('Clips are not counted')
+    const d = r.definitions.join(' ')  // the clip rule is in the Definitions (rewrite D)
+    expect(d).toContain("Clips are counted because the observations' clips were agreed (their segmentation is frozen).")
+    expect(d).not.toContain('Clips are not counted')
   })
   it('mixed segmentation: clips are counted in the AGREED observations only, and the note says how many (R6)', () => {
     const r = report(NAMED, [namedRow(agreed)], [obsFacts('mixed', 2)])
-    expect(r.note).toContain("Clips are counted in the 2 of 3 observations whose clips were agreed; the others' clips are not counted, because each coder cut their own.")
-    expect(r.note).not.toContain("Clips are counted because the observations' clips were agreed")
-    expect(r.note).not.toContain('Clips are not counted while')
+    const d = r.definitions.join(' ')  // the clip rule is in the Definitions (rewrite D)
+    expect(d).toContain("Clips are counted in the 2 of 3 observations whose clips were agreed; the others' clips are not counted, because each coder cut their own.")
+    expect(d).not.toContain("Clips are counted because the observations' clips were agreed")
+    expect(d).not.toContain('Clips are not counted while')
   })
   it('D304: a RATED code on clips says why it draws no rating — beside the row, so the Compact view and every file carry it', () => {
     // The prototype defined the sentence and rendered it nowhere (found by the build's drive).
@@ -362,7 +368,9 @@ describe('r2-12 — r4’s open-text strand ("Survey comments") in the cells and
   it('a cell is "4 of 9 answered (30 surveyed)", the note carries r4’s sentence, and the questions ride the request', () => {
     const r = report(TEXT, [row], [txtFacts])
     expect((r.rows[0] as ReportConstructRow).cells[0]).toContain('Survey comments: Planning time 4 of 9 answered (30 surveyed).')
-    expect(r.note).toContain('An open-text count is the participants whose answer to these questions carries the code')
+    // The notice rule (2026-11-18, rewrite D): short in the note, r4's sentence in the Definitions.
+    expect(r.note).toContain(NOTE_TEXT_CODES_TEXT)
+    expect(r.definitions.join(' ')).toContain('An open-text count is the participants whose answer to these questions carries the code')
     // Drift keeps the row's own numbers; the surveyed count is a display-level fact, not a row cell.
     expect(rowCells(row)['code:31@s-txt:High']).toBe('4 of 9 answered')
     expect(computeRequest(readDisplay(TEXT), displayCoderScope(false, 1))!.strands[1].text_column_ids).toEqual([44])
@@ -401,7 +409,7 @@ describe('r2-1, r2-4 — the builder’s strand edits', () => {
     expect(d.rows[0].bindings.codes.code_ids).toEqual([31])   // the codes binding keeps its key
     expect(isImplicitPair(before)).toBe(true)   // R5: reading split nothing — the edit did
     expect(before.strands.find(s => s.kind === 'variables')!.dataset_id).toBeNull()
-    expect(rowDrift(stampBaseline(slice1Row()), c2ImplicitRow())).toEqual([])
+    expect(rowDrift(stampBaseline(slice1Row(), 'all'), c2ImplicitRow())).toEqual([])
     expect(strandTag(d, d.strands[2])).toBe('Codes')   // unnamed until the researcher names it
     expect(strandsProblem(d)).toBe('Name every strand.')
   })

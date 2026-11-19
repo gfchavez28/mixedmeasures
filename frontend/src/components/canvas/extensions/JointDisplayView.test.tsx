@@ -104,7 +104,8 @@ function mount(opts: { editable?: boolean; display?: unknown; host?: boolean } =
   return { updateAttributes, openDialog, displayKey }
 }
 
-const openConstruct = () => fireEvent.click(screen.getByRole('button', { name: /Protected planning time/ }))
+// Exact: the open construct's own controls name it too (#1714 a, D396).
+const openConstruct = () => fireEvent.click(screen.getByRole('button', { name: 'Protected planning time' }))
 const lastDisplay = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls[fn.mock.calls.length - 1][0].display
 
 beforeEach(() => {
@@ -213,7 +214,9 @@ describe('#893 — a read-only surface offers no mutation control', () => {
     expect(screen.getAllByRole('radio')).toHaveLength(2)
     expect(screen.getAllByRole('radio').every(r => viewSwitch.contains(r))).toBe(true)
     expect(screen.queryByRole('button', { name: /Pin a quote/ })).toBeNull()
-    expect(screen.queryByLabelText('Unpin this quote')).toBeNull()
+    // #1714 (b), D397: by the name it has now — the old literal would pass against an editable pin.
+    expect(screen.queryByRole('button', { name: /^Unpin/ })).toBeNull()
+    expect(screen.queryByRole('combobox', { name: /^Role of/ })).toBeNull()
   })
 })
 
@@ -264,7 +267,7 @@ describe('the dialogs live outside the node view, which ProseMirror re-creates (
     openConstruct()
     fireEvent.change(screen.getByLabelText('Meta-inference for Protected planning time'), { target: { value: 'Half written' } })
     rerender(tree(2))   // a new key: React mounts a new instance, as a re-created node view does
-    expect(screen.getByRole('button', { name: /Protected planning time/ })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: 'Protected planning time' })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByLabelText('Meta-inference for Protected planning time')).toHaveValue('Half written')
   })
 })
@@ -284,23 +287,26 @@ describe('an open construct is where the researcher writes', () => {
     await screen.findByRole('table')
     openConstruct()
     fireEvent.change(screen.getByLabelText('Meta-inference for Protected planning time'), { target: { value: 'Only high gain plan.' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save meta-inference' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save meta-inference for Protected planning time' }))
     const row = lastDisplay(updateAttributes).rows[0]
     expect(row.meta_inference).toMatchObject({ text: 'Only high gain plan.', author_id: 1 })
     expect(row.meta_inference.written_at).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     expect(row.baseline.cells['code:31:Low']).toBe('0 of 11')
+    expect(row.baseline.scope).toBe('all')   // #1672 D353: the scope it was read under
   })
 
   it('a moved number is marked on the closed construct and named in the open one', async () => {
     const display = structuredClone(DISPLAY) as typeof DISPLAY & { rows: Record<string, unknown>[] }
-    display.rows[0].baseline = { hash: 'old', cells: { 'code:31:High': '7 of 11', 'code:31:Low': '0 of 11', 'code:31:difference': '+64 pp' }, stamped_at: '2026-11-06' }
+    // #1672 D354: compared only within one scope — this viewer is not blind, so 'all'.
+    display.rows[0].baseline = { hash: 'old', cells: { 'code:31:High': '7 of 11', 'code:31:Low': '0 of 11', 'code:31:difference': '+64 pp' }, stamped_at: '2026-11-06', scope: 'all' }
     api.compute.mockResolvedValue(payload(1))
     const { updateAttributes } = mount({ display })
     expect(await screen.findByText('numbers moved')).toBeInTheDocument()
     openConstruct()
     expect(screen.getByText(/Planning time, Low: 0 of 11 → 1 of 11/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Accept the new numbers' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Accept the new numbers for Protected planning time' }))
     expect(lastDisplay(updateAttributes).rows[0].baseline.cells['code:31:Low']).toBe('1 of 11')
+    expect(lastDisplay(updateAttributes).rows[0].baseline.scope).toBe('all')
   })
 
   it('a colleague’s meta-inference is named — and reads "A colleague" while withholding (D170, #964)', async () => {
@@ -356,7 +362,7 @@ describe('an open construct is where the researcher writes', () => {
     expect(screen.queryByLabelText('Kind of insight for Protected planning time')).toBeNull()
     fireEvent.click(screen.getByRole('radio', { name: 'Global' }))
     fireEvent.change(screen.getByLabelText('Kind of insight for Protected planning time'), { target: { value: 'causal' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save meta-inference' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save meta-inference for Protected planning time' }))
     expect(lastDisplay(updateAttributes).rows[0].meta_inference).toMatchObject({ level: 'global', type: 'causal' })
   })
 })
@@ -384,8 +390,10 @@ describe('the Report view (D176): the export’s own table, read only, per viewe
     const table = await screen.findByRole('table', { name: /Side-by-side joint display by construct: Teachers by gain group/ })
     expect(within(table).getByRole('columnheader', { name: 'High (11 participants)' })).toBeInTheDocument()
     expect(within(table).getByRole('columnheader', { name: 'High − Low' })).toBeInTheDocument()
-    const row = within(table).getByRole('rowheader', { name: /Protected planning time/ })
-    expect(row).toBeInTheDocument()
+    // #1714 (d), D399: the row header is named by the construct ALONE (its button's verb phrase
+    // made every cell of the row read under "Edit … in Compact view").
+    const row = within(table).getByRole('rowheader', { name: 'Protected planning time' })
+    expect(row).toHaveAttribute('aria-label', 'Protected planning time')
     expect(within(table).getByText(/Coded: Planning time 7 of 11\. “We plan on Fridays\.” \(T-04 · Focus group, typical\)/)).toBeInTheDocument()
     expect(within(table).getByText('Planning time: +64 pp.')).toBeInTheDocument()
     expect(screen.getByText(/Groups: the participants with each value of Gain group \(Roster\)/)).toBeInTheDocument()

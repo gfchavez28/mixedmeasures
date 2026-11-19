@@ -92,7 +92,9 @@ vi.mock('@/lib/api', () => ({
 vi.mock('@/layouts/ProjectLayout', () => ({ useProjectLayout: () => ({ projectId: 2 }) }))
 
 vi.mock('@/components/canvas/extensions', () => ({
-  ExcerptEmbed: {}, ChartEmbed: {}, MemoEmbed: {}, CalloutStat: {}, ImageEmbed: {}, JointDisplay: {},
+  ExcerptEmbed: {}, ChartEmbed: {}, MemoEmbed: {}, CalloutStat: {}, ImageEmbed: {},
+  // #1699 (D379): each side configures its own display node scope.
+  JointDisplay: { configure: (options: unknown) => ({ configured: options }) },
 }))
 
 import { canvasApi } from '@/lib/api'

@@ -48,6 +48,7 @@ describe('canvasApi.exportDocx', () => {
     const report = {
       title: 'Side-by-side joint display by construct: T', message: null, headers: ['Construct', 'A (2 participants)'],
       rows: [['Training', 'Coded: x 1 of 2.'], ['Beside “Training”: …']], span_rows: [1], note: 'Groups: …', appendix: [],
+      definitions_title: 'Definitions', definitions: ['Fit, after …'],
     }
     await canvasApi.exportDocx(3, 9, undefined, undefined, 'Report', new Map([['k-1', report]]))
     const [, body] = post.mock.calls[0] as [string, Record<string, unknown>]

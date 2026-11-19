@@ -197,11 +197,15 @@ describe('#1422 — user text is text, never markup', () => {
       title: 'Display *one*', message: null, headers: ['Construct', 'A'],
       rows: [{ kind: 'construct', construct: '*Trust*', cells: ['<Trust> | x'] } as never],
       note: 'Scope: coders: _me_.', appendix: [],
+      definitionsTitle: 'Definitions and *cases*', definitions: ['Rule: used “*Trust*”.'],
     }
     const out = reportToMarkdown(report)
     expect(out).toContain('**Display \\*one\\***')
     expect(out).toContain('| \\*Trust\\* | \\<Trust> \\| x |')
     expect(out).toContain('Scope: coders: \\_me\\_.')
+    // The notice rule (2026-11-18, rewrite D): the Definitions take the same escape.
+    expect(out).toContain('**Definitions and \\*cases\\***')
+    expect(out).toContain('Rule: used “\\*Trust\\*”.')
   })
 
   it('CONTROL: ordinary prose, bold, italics, a quote and a list are byte-identical to before', async () => {

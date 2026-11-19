@@ -28,7 +28,7 @@ describe('the page hosts each display dialog (Q1, D213)', () => {
   it('a cases request opens the case view, and nothing else', () => {
     render(
       <DisplayDialogHost projectId={1}>
-        <Opener request={{ kind: 'cases', displayKey: 'k', display, rowKey: 'r1', groupBy: 'Gain group', scope: displayCoderScope(false, 1), noViewer: false }} />
+        <Opener request={{ kind: 'cases', displayKey: 'k', display, rowKey: 'r1', scope: displayCoderScope(false, 1), noViewer: false }} />
       </DisplayDialogHost>,
     )
     expect(screen.queryByText('case view for r1')).toBeNull()

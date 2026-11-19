@@ -219,6 +219,8 @@ export interface WithdrawalOutcome {
   /** Joint display slice 2 (r3-6) — picked "cases that don't fit" naming them, removed with
    *  the researcher's reason (sections and snapshot copies together). */
   canvas_misfit_cases_removed: number
+  /** #1674 (D357) — drift stamps cleared (sections and snapshot copies together). */
+  canvas_drift_stamps_cleared: number
   backup_filename: string
   /** #1606 (D234, D235) — the report's two fields, read by the endpoint before it acted,
    *  so the note after can say them. Returned only: the audit entry never stores them. */
@@ -291,6 +293,9 @@ export interface WithdrawalReport {
     code_applications: number
     excerpts: number
     notes: number
+    /** #1702 (D382) — canvas quotes (embeds and joint display pins) showing its passages; they
+     *  stay with the document, and the confirm's document line counts them. */
+    canvas_quotes: number
   }[]
   total_items: number
   /**
@@ -311,6 +316,9 @@ export interface WithdrawalReport {
   /** Joint display slice 2 (r3-6) — REQUIRED (#1123's rule); not part of `total_items`:
    *  picked "cases that don't fit" naming them, which the withdrawal removes with the reasons. */
   canvas_misfit_cases: number
+  /** #1674 (D357) — REQUIRED (#1123's rule); not part of `total_items`: the sets of numbers
+   *  saved beside meta-inferences in joint displays, which the withdrawal clears. */
+  canvas_drift_stamps: number
   /** #1606 (D234) — REQUIRED (#1123's rule); not part of `total_items`. */
   other_projects_with_identifier: OtherProjectsWithIdentifier
   /** #1606 (D235) — REQUIRED (#1123's rule); a fact of the install. */

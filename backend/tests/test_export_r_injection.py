@@ -605,6 +605,18 @@ CLASSIFIED = {
     ("export_r_data", "coder_scope_filename_suffix(db, scope)"): (
         NOT_SCRIPT, "the archive's file name (#1530 `_coder-<name>`, ASCII through sanitize_content_disposition)",
     ),
+    # #1677 D364 — a stray code's LABEL (its stored text, a number beside it on a clash);
+    # every label reaches the script through `_escape_r_string(str(l))` at the factor call.
+    ("_get_factor_mapping", "text"): (ESCAPED, "a label, escaped where `labels` is emitted"),
+    ("_get_factor_mapping", "_fmt_level_number(value)"): (NUMBER, "a stored value_numeric"),
+    # #1677 D365 — a SENTENCE built in Python, then emitted only through _escape_r_string
+    # (`_unnumbered_lines`, a comment and a cat() string).
+    ("_unnumbered_answers_note", "r_name"): (ESCAPED, "inside the sentence, escaped at emission"),
+    ("_unnumbered_answers_note", "total"): (ESCAPED, "a count, inside the escaped sentence"),
+    ("_unnumbered_answers_note", "noun"): (ESCAPED, "'answer has' / 'answers have', inside the sentence"),
+    ("_unnumbered_answers_note", "which"): (ESCAPED, "answers + counts, inside the escaped sentence"),
+    ("_unnumbered_answers_note", "a"): (ESCAPED, "an answer's text, inside the escaped sentence"),
+    ("_unnumbered_answers_note", "n"): (ESCAPED, "a count, inside the escaped sentence"),
     ("_r_reason_vector", "key"): (NUMBER, "an int id, refused otherwise (bools too)"),
     ("_r_reason_vector", "reason"): (VOCAB, "a member of undefined_stats.UNDEFINED_REASONS, refused otherwise"),
     ("_r_reason_vector", "', '.join(parts)"): (COMPOSED, _PARTS),

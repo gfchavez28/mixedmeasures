@@ -389,6 +389,11 @@ class JointDisplayPassagesResponse(CodeSegmentsWithContextResponse):
 
     answer_total: int = 0
     answers: list[JointDisplayAnswerPassage] = []
+    # #1704 (b) (D384): each listed passage's WHOLE quote id (segment id / dataset value id →
+    # excerpt id), so the picker can say "pinned here" (a pin IS that quote) apart from
+    # "already a quote". A passage with no whole quote is absent.
+    segment_quote_ids: dict[int, int] = {}
+    answer_quote_ids: dict[int, int] = {}
 
 
 class JointDisplayPinFactsRequest(BaseModel):
@@ -562,6 +567,8 @@ class JointDisplayCasesResponse(BaseModel):
     unknown: int | None
     rule_unavailable_reason: str | None
     rule_withheld_columns: list[str]
+    # #1671 (D351): with `group_missing`, the groups a condition names that the display lacks now.
+    rule_missing_groups: list[str] = []
     list_size: int
     added_outside: int
     codes: list[JointDisplayCaseCode]

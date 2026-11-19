@@ -180,6 +180,8 @@ class TestReachability:
             "documents": [{
                 "document_id": 1, "name": "Workplan 2026",
                 "segments": 1, "code_applications": 1, "excerpts": 1, "notes": 1,
+                # #1702 (D382): its quotes on the canvas — none here; not in `total_items`.
+                "canvas_quotes": 0,
             }],
             # 1 participant + (3+1+1+1+2) + (1+1+1+1+1+1+1) + (1+1+1+1)
             "total_items": 20,
@@ -193,6 +195,9 @@ class TestReachability:
             # Joint display slice 2 (r3-6) — beside the report too; no canvas here (the
             # count's own tests are `test_joint_display_slice2_cases.py`).
             "canvas_misfit_cases": 0,
+            # #1674 D357 — beside the report too; no canvas here (the count's own tests
+            # are `test_withdrawal_joint_display_1674.py`).
+            "canvas_drift_stamps": 0,
             # #1606 D234/D235 — beside the report too; one project here, and the
             # suite's own backup folder holds no update copy (their own tests are
             # `test_withdrawal_copies_elsewhere_1606.py`).
@@ -418,8 +423,9 @@ class TestEndpoint:
         from app.routers.participants import get_withdrawal_report
         db, subject, _ = populated
         user = db.query(User).filter_by(id=1).first()
-        out = _run(get_withdrawal_report(
-            project_id=1, participant_id=subject.id, user=user, db=db))
+        # #1676 D362: a plain `def` — direct calls take no `asyncio.run`.
+        out = get_withdrawal_report(
+            project_id=1, participant_id=subject.id, user=user, db=db)
         assert out["identifier"] == "P001"
         assert out["total_items"] == 20
 
@@ -430,8 +436,8 @@ class TestEndpoint:
         db.add(Project(id=2, name="Other", user_id=1)); db.flush()
         user = db.query(User).filter_by(id=1).first()
         with pytest.raises(HTTPException) as exc:
-            _run(get_withdrawal_report(
-                project_id=2, participant_id=subject.id, user=user, db=db))
+            get_withdrawal_report(
+                project_id=2, participant_id=subject.id, user=user, db=db)
         assert exc.value.status_code == 404
 
     def test_changes_nothing(self, populated):
@@ -445,8 +451,8 @@ class TestEndpoint:
                       CodeApplication, Excerpt, Note, Memo, RowScore)
         }
         user = db.query(User).filter_by(id=1).first()
-        _run(get_withdrawal_report(
-            project_id=1, participant_id=subject.id, user=user, db=db))
+        get_withdrawal_report(
+            project_id=1, participant_id=subject.id, user=user, db=db)
         after = {
             m.__name__: db.query(m).count()
             for m in (Participant, Speaker, Segment, DatasetRow, DatasetValue,

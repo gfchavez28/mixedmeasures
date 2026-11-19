@@ -201,6 +201,8 @@ class WithdrawalDocumentTouchpoint(BaseModel):
     code_applications: int = 0
     excerpts: int = 0
     notes: int = 0
+    #: #1702 (D382) — canvas quotes showing this document's passages; they stay with it.
+    canvas_quotes: int = 0
 
 
 class WithdrawalCanvasPlace(BaseModel):
@@ -284,6 +286,9 @@ class WithdrawalReportResponse(BaseModel):
     # picked "cases that don't fit" naming them, which the withdrawal removes with their
     # reasons (`canvas_embed_scrub.count_misfit_cases`).
     canvas_misfit_cases: int
+    # #1674 D357 — REQUIRED (#1123's rule), NOT part of `total_items`: the drift stamps the
+    # withdrawal clears (`canvas_embed_scrub.count_drift_stamps`).
+    canvas_drift_stamps: int
     # #1606 D234/D235 — REQUIRED (#1123's rule), NOT part of `total_items`: where their
     # data still is that this withdrawal does not reach.
     other_projects_with_identifier: WithdrawalOtherProjects

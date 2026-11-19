@@ -118,14 +118,17 @@ export function compareQuotesInPassageOrder(a: CharQuoteLike, b: CharQuoteLike):
  * decode). Only the CUT side moves — the head keeps its first word and the tail its
  * last, which are what tell two quotes apart. A half with no space in it (one long
  * word, or a script written without spaces) keeps its code-point cut.
+ *
+ * `max` is the label's length in code points (the row's menus: 30; a whole quote's name,
+ * `wholeQuoteLabel`: 60).
  */
 export const QUOTE_LABEL_MAX = 30
 
-export function quoteLabel(text: string, start: number, end: number): string {
+export function quoteLabel(text: string, start: number, end: number, max: number = QUOTE_LABEL_MAX): string {
   const words = sliceByCodePoints(text, start, end)
   const n = codePointLength(words)
-  if (n <= QUOTE_LABEL_MAX) return words
-  const half = Math.floor((QUOTE_LABEL_MAX - 1) / 2)
+  if (n <= max) return words
+  const half = Math.floor((max - 1) / 2)
 
   let head = sliceByCodePoints(words, 0, half)
   if (!/\s/u.test(sliceByCodePoints(words, half, half + 1))) {
@@ -138,4 +141,21 @@ export function quoteLabel(text: string, start: number, end: number): string {
     if (whole.trim()) tail = whole
   }
   return `${head.trimEnd()}…${tail.trimStart()}`
+}
+
+/**
+ * A WHOLE quote's name in a control — the joint display's pins and the pin picker's *Pin*
+ * (#1714, D397–D398). The quote's text with its whitespace collapsed (a passage's paragraphs
+ * read as one line in a name), named by `quoteLabel`'s head…tail: code points, cut at a word,
+ * so two quotes sharing their first words still get different names. Empty text gives ''
+ * (the caller says "this quote").
+ *
+ * ⚠️ The review (D398) asked for a new `lib/quote-label.ts::shortQuote`, on the premise that no
+ * shared helper existed; this module's `quoteLabel` is that helper, so a second one was not made.
+ */
+export const WHOLE_QUOTE_LABEL_MAX = 60
+
+export function wholeQuoteLabel(text: string, max: number = WHOLE_QUOTE_LABEL_MAX): string {
+  const flat = text.replace(/\s+/gu, ' ').trim()
+  return quoteLabel(flat, 0, codePointLength(flat), max)
 }

@@ -294,6 +294,37 @@ def test_export_docx_renders_a_joint_display_report(db_session):
     assert body.index("Before") < body.index(_REPORT.title) < body.index("After")
 
 
+def test_export_docx_prints_the_definitions_after_the_display(db_session):
+    """The notice rule (2026-11-18, rewrite D): the note under the table is short; the full bases
+    and definitions are their own section, after the beside results' tables, one paragraph each."""
+    from dataclasses import replace
+    p, canvas = _canvas_with_display(db_session)
+    report = replace(_REPORT, definitions_title="Definitions and cases that don’t fit",
+                     definitions=["Fit, after Fetters (2013). Confirmation: they agree.", "Cases that don’t fit — Training."])
+    body = _body(Document(export_canvas_docx(canvas, p.id, None, None, {"k-1": report})))
+    title_at = body.index("Definitions and cases that don’t fit")
+    assert body.index(_REPORT.note) < body.index("Welch t") < title_at
+    assert title_at < body.index("Fit, after Fetters (2013).") < body.index("Cases that don’t fit — Training.") < body.index("After")
+    # The control: a report without them prints no title.
+    assert "Definitions" not in _body(Document(export_canvas_docx(canvas, p.id, None, None, {"k-1": _REPORT})))
+
+
+def test_decode_display_tables_reads_the_definitions():
+    out = _decode_display_tables({"k": _wire(definitions_title="Definitions", definitions=["A.", "B."])}, 0)
+    assert out["k"].definitions == ["A.", "B."] and out["k"].definitions_title == "Definitions"
+    # An older client sends neither: none, and the report is kept.
+    assert _decode_display_tables({"k": _wire()}, 0)["k"].definitions == []
+    # Malformed: dropped, like every other malformed field.
+    assert _decode_display_tables({"k": _wire(definitions="A.")}, 0) == {}
+    assert _decode_display_tables({"k": _wire(definitions=["A.", 3])}, 0) == {}
+    assert _decode_display_tables({"k": _wire(definitions_title=None, definitions=["A."])}, 0) == {}
+    # Over a limit: refused whole as too large, never cut.
+    long = _decode_display_tables({"k": _wire(definitions=["x" * (canvas_router._MAX_DISPLAY_NOTE_CHARS + 1)])}, 0)
+    assert long["k"].too_large
+    many = _decode_display_tables({"k": _wire(definitions=["a"] * (canvas_router._MAX_DISPLAY_DEFINITIONS + 1))}, 0)
+    assert many["k"].too_large
+
+
 def test_export_docx_never_renders_a_display_as_nothing(db_session):
     """Before session C the node had no arm: the walker found no children and the display
     vanished from the Word file without a word."""

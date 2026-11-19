@@ -1,6 +1,8 @@
 """The joint display's live numbers (ROADMAP row 56; `services/joint_display.py`) and the reads
 its pinned quotes are chosen from and attributed by (`services/joint_display_pins.py`)."""
 
+import threading
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -41,6 +43,19 @@ from .helpers import _get_project_or_404
 
 router = APIRouter(prefix="/api/projects/{project_id}/joint-display", tags=["joint-display"])
 
+#: #1679 D368 — ONE heavy joint display gather at a time per process: `compute` and `cases`,
+#: both fired per display when a canvas mounts (the Writing view mounts every section). Measured
+#: on plaintext D12 (the 2026-11-17c review, `…-audit-probes/review/sem_probe.py`): one compute
+#: 18 s alone; three at once 84 s each; FOUR at once ~720 s each — a cliff inside one
+#: interpreter (four processes were fine; memory refuted, 194 MB peak), mechanism unknown.
+#: Behind a lock of one, four finish at 18 / 34 / 53 / 70 s; a lock of two gives the same total
+#: and a later first display. Acquired INSIDE the `def` (the threadpool), so the event loop is
+#: untouched; a waiting request holds a pool thread. ⚠️ Waiting counts toward the client's
+#: 15-minute `EXPORT_TIMEOUT_MS` (a canvas of ~25 displays on encrypted D12 could pass it —
+#: not measured). `passages` stays OUTSIDE: the pin picker asks one at a time, and holding it
+#: behind a canvas's computes would stall an open dialog.
+_HEAVY_GATHER = threading.BoundedSemaphore(1)
+
 
 def _strand_requests(strands) -> list[StrandRequest]:
     """The request's strands as the services read them — ONE translation, used by the
@@ -68,7 +83,16 @@ def compute(  # def, not async: the comparison's gather — test_endpoint_event_
     """Each row's code and survey strands per group, live (D165–D172). Reads only."""
     _get_project_or_404(db, project_id, user.id)
     try:
-        return compute_joint_display(
+        with _HEAVY_GATHER:  # #1679 D368
+            return _compute(db, project_id, body)
+    except GroupingColumnError as exc:
+        # #1639 (r1-5): a 404 here is the grouping variable gone (deleted, or a D202 import's
+        # id) — said by the display in its own words, keyed on this code, never on the text.
+        raise _grouping_refusal(exc)
+
+
+def _compute(db: Session, project_id: int, body: JointDisplayComputeRequest):
+    return compute_joint_display(
             db, project_id,
             group_by_column_id=body.group_by_column_id,
             rows=[
@@ -94,10 +118,6 @@ def compute(  # def, not async: the comparison's gather — test_endpoint_event_
             layer_scope=body.layer_scope,
             newcombe=body.newcombe,
         )
-    except GroupingColumnError as exc:
-        # #1639 (r1-5): a 404 here is the grouping variable gone (deleted, or a D202 import's
-        # id) — said by the display in its own words, keyed on this code, never on the text.
-        raise _grouping_refusal(exc)
 
 
 def _grouping_refusal(exc: GroupingColumnError) -> HTTPException:
@@ -193,7 +213,14 @@ def case_rows(  # def, not async: the compute's gather, per code strand — MUST
     else:
         strands = _strand_requests(body.strands)
     try:
-        return read_cases(
+        with _HEAVY_GATHER:  # #1679 D368 — the compute's gather, per code strand
+            return _read_cases(db, project_id, body, strands)
+    except GroupingColumnError as exc:
+        raise _grouping_refusal(exc)  # #1653 (D347)
+
+
+def _read_cases(db: Session, project_id: int, body: JointDisplayCasesRequest, strands):
+    return read_cases(
             db, project_id,
             group_by_column_id=body.group_by_column_id,
             strands=strands,
@@ -208,5 +235,3 @@ def case_rows(  # def, not async: the compute's gather, per code strand — MUST
             offset=body.offset,
             limit=body.limit,
         )
-    except GroupingColumnError as exc:
-        raise _grouping_refusal(exc)  # #1653 (D347)

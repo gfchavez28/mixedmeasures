@@ -3,6 +3,7 @@ import type {
   WithdrawalReport,
 } from '@/lib/api/participants'
 import { isServerRefusal, serverDetailMessage } from '@/lib/api/error-utils'
+import { plural } from '@/lib/format'
 
 /**
  * Copy for the withdrawal report — #702(2).
@@ -159,16 +160,27 @@ export function withdrawalHeadline(report: WithdrawalReport): string {
  * D233 adds the two missing kinds and removes none.
  */
 export const WITHDRAWAL_SCOPE_NOTE =
-  'The withdrawal button in this participant’s row blanks their conversation turns, '
-  + 'deletes their survey responses and this record, and unlinks documents about them. '
-  + 'It does not edit recordings, and backups, safety copies, database copies taken before '
-  + 'an update, projects duplicated from this one and files exported before the withdrawal '
-  + 'still hold their data. '
-  + 'Quotes on a canvas taken from a conversation or dataset deleted before the '
-  + 'withdrawal stay when it cannot tell whose words they hold. '
-  + 'It cannot find their name in other people’s turns, in free-text answers, or in '
-  + 'notes and memos — search for those yourself. This describes the software; it is '
-  + 'not compliance advice.'
+  // The notice rule (2026-11-18, rewrite B, approved; the internal design notes):
+  // on screen, what it does, every kind of copy it does not reach (D233 names all five), what it
+  // cannot find, and the compliance line (decision 3: kept on screen). The rest is
+  // `WITHDRAWAL_SCOPE_DETAILS`, behind the panel's Details.
+  'Withdrawing blanks their conversation turns, deletes their survey responses and this record, '
+  + 'and unlinks documents about them. Copies made before it (backups, safety copies, database '
+  + 'copies taken before an update, projects duplicated from this one and exported files) and '
+  + 'recordings keep their data. It cannot find their name in other people’s turns, in free-text '
+  + 'answers, or in notes and memos: search for those yourself. This describes the software; it '
+  + 'is not compliance advice.'
+
+/** The panel note's Details (the notice rule's R3): its label names what is inside. */
+export const WITHDRAWAL_SCOPE_DETAILS_LABEL = 'Canvas quotes, and where the update copies are'
+export const WITHDRAWAL_SCOPE_DETAILS: readonly string[] = [
+  'Quotes on a canvas taken from a conversation or dataset deleted before the withdrawal stay '
+  + 'when it cannot tell whose words they hold.',
+  // #1674 (D356) — the researcher's line beside a pinned quote goes with the quote.
+  'A quote of theirs pinned in a joint display is blanked with the note written beside it.',
+  'The database copies taken before each update are in the backup folder, which Settings does '
+  + 'not list.',
+]
 
 /**
  * #1190 — what the withdrawal LEAVES behind on purpose: a record of it (the removal
@@ -209,20 +221,35 @@ export const WITHDRAWAL_SCOPE_NOTE =
  * purpose (D9), and the Excel *Audit Trail* sheet carries entries' details. "Keeps their
  * ID … as one-way codes" alone read as if the ID were kept plainly nowhere.
  */
-export const WITHDRAWAL_RECORD_NOTE =
-  'Afterwards this project keeps a record of the withdrawal: merging or importing a copy '
-  + 'of it, or linking records or speakers to participants, does not bring them back, and '
-  + 'adding a participant with their ID asks first. A transcript that names a speaker with '
-  + 'their ID, or with a name this project knew them by, does not make them a participant '
-  + 'again — even written with different capitals or spacing, or with its accents encoded '
-  + 'differently — and its import says so; a name this project never used for them is not '
-  + 'recognised. Elsewhere their ID is recognised with its accents encoded either way, but '
-  + 'its capitals count (P01 and p01 can be two people). Project files exported afterwards '
-  + 'carry that record. It keeps their ID and those names as one-way codes, which is not '
-  + 'anonymisation — anyone who can guess one can confirm it from the code, and the audit '
-  + 'trail records the withdrawal under their ID. A withdrawal made '
-  + 'in an earlier version of Mixed Measures recognises the names it kept only as they were '
-  + 'written, and the oldest versions kept their ID only.'
+//
+// The notice rule (2026-11-18, rewrite A, approved): the record's facts were one 183-word
+// sentence in the confirm's opening prose. Now what the researcher decides on (it stays, it is
+// not anonymisation, the audit trail keeps the ID) is ONE item under the confirm's "This will
+// stay"; every other clause above is a line of `WITHDRAWAL_CONFIRM_DETAILS`, word for word.
+export const WITHDRAWAL_RECORD_ITEM =
+  'A record of the withdrawal, so a merge, import or link cannot bring them back. It keeps their '
+  + 'ID and names as one-way codes, which is not anonymisation, and the audit trail records the '
+  + 'withdrawal under their ID.'
+
+/** The confirm's Details (the notice rule's R3): its label names what is inside. */
+export const WITHDRAWAL_CONFIRM_DETAILS_LABEL = 'Where the copies are, and what the record recognises'
+export const WITHDRAWAL_CONFIRM_DETAILS: readonly string[] = [
+  'The database copies taken before each update are in the backup folder, which Settings does '
+  + 'not list; the five most recent are kept.',
+  'Automatic and On quit backups are replaced over time; the others stay until you delete them '
+  + 'in Settings › Backup & Data.',
+  'Adding a participant with their ID asks first.',
+  'A transcript that names a speaker with their ID, or with a name this project knew them by, '
+  + 'does not make them a participant again — even written with different capitals or spacing, '
+  + 'or with its accents encoded differently — and its import says so. A name this project never '
+  + 'used for them is not recognised.',
+  'Elsewhere their ID is recognised with its accents encoded either way, but its capitals count '
+  + '(P01 and p01 can be two people).',
+  'Project files exported afterwards carry the record.',
+  'Anyone who can guess their ID or one of those names can confirm it from its one-way code.',
+  'A withdrawal made in an earlier version of Mixed Measures recognises the names it kept only as '
+  + 'they were written, and the oldest versions kept their ID only.',
+]
 
 /**
  * #1320 (D12) — what the confirm says BEFORE it lists anything: the backup, every
@@ -238,17 +265,14 @@ export const WITHDRAWAL_RECORD_NOTE =
  * which projects and how many copies (`otherProjectsNote`, `preUpdateCopiesNote`).
  */
 export const WITHDRAWAL_RESIDUAL_NOTE =
-  'For honouring a withdrawal request. A full backup is taken first. That backup, your '
-  + 'earlier backups, the safety copies kept before a merge or overwrite, any project '
-  + 'duplicated from this one before now, and any file already exported or shared still '
-  + 'hold everything this removes until they are deleted. So do the copies of the whole '
-  + 'database taken before each update; they are in the backup folder, which Settings '
-  + 'does not list, and the five most recent are kept. Automatic and On quit backups are '
-  + 'replaced over time; the others stay until you delete them in Settings › Backup & '
-  + 'Data. A duplicated project is a project of its own: withdraw them there too. '
-  + 'Recordings are not edited — their voice stays in the audio or video. There is no '
-  + 'per-person undo: restoring a backup also undoes any work done after it. '
-  + WITHDRAWAL_RECORD_NOTE
+  // The notice rule (2026-11-18, rewrite A, approved): 322 words of prose became this, the
+  // record's item under "This will stay" and `WITHDRAWAL_CONFIRM_DETAILS`. D233's five kinds of
+  // copy stay named here.
+  'A full backup is taken first. There is no per-person undo: restoring a backup also undoes all '
+  + 'work done since. Copies made before now still hold their data until you delete them: '
+  + 'backups, safety copies, the database copies taken before each update, projects duplicated '
+  + 'from this one (withdraw them there too) and files already exported or shared. Recordings are '
+  + 'not edited.'
 
 /** #1320 (D12) — appended to the note after a withdrawal. #1606 (D233, the developer's
  *  wording) — with the update copies, which Settings does not list, and a duplicated
@@ -355,12 +379,18 @@ export function keptSummary(r: WithdrawalReport | null): string[] {
   // because "about them" is equally true of a workplan they wrote and a policy
   // that names them, and only a person reading it can tell which
   // (`withdrawal_redaction.apply_withdrawal`). The confirm never said so.
+  // #1702 (D382): its passages quoted on the canvas stay with it (a pin with the line written
+  // beside it among them), so the line counts them for that reading to find — seven words, only
+  // when there are any (R5: decided, 2026-11-18c).
   const docs = r.documents
+  const quotes = docs.reduce((n, d) => n + d.canvas_quotes, 0)
+  const withQuotes = quotes === 0 ? ''
+    : `, with ${docs.length === 1 ? 'its' : 'their'} ${quotes} ${plural(quotes, 'quote', 'quotes')} on the canvas`
   if (docs.length === 1) {
-    out.push(`The document “${docs[0].name}” stays, no longer linked to them — `
-      + 'read it yourself: a document about someone can also be their own words')
+    out.push(`The document “${docs[0].name}” stays, no longer linked to them${withQuotes} — `
+      + `read ${quotes > 0 ? 'them' : 'it'} yourself: a document about someone can also be their own words`)
   } else if (docs.length > 1) {
-    out.push(`${docs.length} documents about them stay, no longer linked to them — `
+    out.push(`${docs.length} documents about them stay, no longer linked to them${withQuotes} — `
       + 'read them yourself: a document about someone can also be their own words')
   }
   const unlinked = unlinkedRecordsNote(r)
@@ -490,7 +520,7 @@ export function withdrawalDoneNote(
   outcome: Pick<
     WithdrawalOutcome,
     'documents_unlinked' | 'canvas_quotes_unplaced' | 'other_projects_with_identifier'
-    | 'pre_update_copies'
+    | 'pre_update_copies' | 'canvas_drift_stamps_cleared'
   >,
 ): string {
   const base = 'Now search your transcripts and free-text answers for their name — '
@@ -513,7 +543,8 @@ export function withdrawalDoneNote(
     .filter((s): s is string => s !== null)
     .map(s => ` ${s}.`)
     .join('')
-  return `${base}${documents}${canvas}${elsewhere} ${WITHDRAWAL_BACKUP_RESIDUAL}`
+  const stamps = driftStampsClearedNote(outcome.canvas_drift_stamps_cleared)
+  return `${base}${documents}${canvas}${stamps}${elsewhere} ${WITHDRAWAL_BACKUP_RESIDUAL}`
 }
 
 /**
@@ -553,6 +584,27 @@ export function bulkDeleteRefusals(errors: unknown[]): string | null {
 /** #1667 (D342) — the participant panel's *If this person withdraws*, when its report could not
  *  be read; the server's sentence (naming the canvas copy) follows it. */
 export const WITHDRAWAL_SECTION_FAILED_TITLE = 'What a withdrawal would remove could not be checked.'
+
+/**
+ * #1674 (D357) — the drift stamps a withdrawal clears: EVERY set of numbers saved beside a
+ * meta-inference in the project's joint displays (and their snapshots). A stamp printed the
+ * cells as they were, so for a group of one its *was* is their answer. Null when there are none.
+ */
+export function driftStampsNote(r: Pick<WithdrawalReport, 'canvas_drift_stamps'>): string | null {
+  const n = r.canvas_drift_stamps
+  if (!(n > 0)) return null
+  return n === 1
+    ? '1 set of numbers saved beside a meta-inference in a joint display will be cleared.'
+    : `${n} sets of numbers saved beside meta-inferences in joint displays will be cleared.`
+}
+
+/** #1674 (D357) — the same fact after the act, in the done note. */
+function driftStampsClearedNote(cleared: number): string {
+  if (!(cleared > 0)) return ''
+  return cleared === 1
+    ? ' 1 set of numbers saved beside a meta-inference in a joint display was cleared.'
+    : ` ${cleared} sets of numbers saved beside meta-inferences in joint displays were cleared.`
+}
 
 /**
  * Joint display slice 2 (r3-6) — the cases picked as not fitting in a joint display that name

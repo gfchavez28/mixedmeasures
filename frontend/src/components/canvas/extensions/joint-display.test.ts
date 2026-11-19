@@ -56,7 +56,8 @@ describe('the joint-display node', () => {
       const path = join(__dirname, rel)
       const src = stripComments(readFileSync(path, 'utf8'), path)
       expect(src.length, `read ${rel}`).toBeGreaterThan(2_000)
-      expect(src, rel).toMatch(/\bJointDisplay,/)
+      // The theme editor lists the node; Compare configures it per side (#1699, D379).
+      expect(src, rel).toMatch(/\bJointDisplay(,|\.configure\(\{ stateScope: )/)
     }
   })
 

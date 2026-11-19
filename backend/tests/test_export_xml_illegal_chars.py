@@ -373,6 +373,9 @@ _DISPLAY = DisplayTable(
     span_rows=frozenset({1}),
     note=f"DN {PAY}",
     appendix=[DisplayAppendix(title=f"AT {PAY}", headers=[f"AH {PAY}"], rows=[[f"AC {PAY}"]], note=f"AN {PAY}")],
+    # The notice rule (2026-11-18, rewrite D): the Definitions are strings Word writes too.
+    definitions_title=f"DFT {PAY}",
+    definitions=[f"DF {PAY}"],
 )
 
 
@@ -386,7 +389,7 @@ def test_the_canvas_word_export_writes_every_string_cleaned(db_session):
     assert addresses == {f"https://x.example/{CLEAN}"}
     want = {
         f"DT {CLEAN}", f"DH {CLEAN}", f"DC {CLEAN}", f"DS {CLEAN}", f"DN {CLEAN}",
-        f"AT {CLEAN}", f"AH {CLEAN}", f"AC {CLEAN}", f"AN {CLEAN}",
+        f"AT {CLEAN}", f"AH {CLEAN}", f"AC {CLEAN}", f"AN {CLEAN}", f"DFT {CLEAN}", f"DF {CLEAN}",
         f"Canvas {CLEAN}", f"Theme {CLEAN}", f"Child {CLEAN}",
         f"Para {CLEAN}Bold {CLEAN}", f"@Men {CLEAN}Link {CLEAN}", f"Head {CLEAN}", f"Bullet {CLEAN}", f"Numbered {CLEAN}",
         f"Quote {CLEAN}", f"“Excerpt {CLEAN}”\n— Src {CLEAN}", f"Tag: Tag {CLEAN}",

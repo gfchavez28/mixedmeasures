@@ -184,11 +184,11 @@ describe('#1646 — the Quotes line counts each pin against its own strand', () 
 })
 
 describe('#1664 — the open construct names a saved rule’s inactive code', () => {
-  it('"did not use “Workload”" with the reason it is not run — never "a code this row no longer binds"', async () => {
+  it('"has no passage coded “Workload”" with the reason it is not run — never "a code this row no longer binds"', async () => {
     api.compute.mockResolvedValue(PAYLOAD_A)
     mount(DISPLAY_A)
     await openConstruct()
-    expect(await screen.findByText(/did not use “Workload”/)).toBeInTheDocument()
+    expect(await screen.findByText(/has no passage coded “Workload”/)).toBeInTheDocument()
     expect(screen.queryByText(/no longer binds/)).toBeNull()
     expect(await screen.findByText(MISFIT_RULE_UNAVAILABLE_TEXT.code_inactive)).toBeInTheDocument()
   })

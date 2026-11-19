@@ -53,11 +53,18 @@ describe('the misfit note in every export (r3-11)', () => {
     const reports = await fetchDisplayReports(themes(MISFIT), 1, { ...LENS, blind: true }, NAMES)
     expect(api.cases).toHaveBeenCalledTimes(1)
     expect(api.cases.mock.calls[0][1]).toMatchObject({ limit: 0, coder_ids: [7], row_key: 'r1', added_participant_ids: [11] })
-    const note = reports.get('k-1')!.note
-    expect(note).toContain('Cases that don’t fit — Planning time. Rule: Gain group is “High”. 3 of 22 cases meet the rule.')
-    expect(note).toContain('Added by the researcher: T11: Moved schools.')
-    // Word reads the same note (`reportToDocx`)
-    expect(docxDisplayTables(reports).get('k-1')!.note).toBe(note)
+    // The notice rule (2026-11-18, rewrite D): the cases that don't fit are in the Definitions.
+    const report = reports.get('k-1')!
+    const defs = report.definitions.join(' ')
+    expect(report.definitionsTitle).toBe('Definitions and cases that don’t fit')
+    expect(defs).toContain('Cases that don’t fit — Planning time. Rule: in the group “High”. 3 of 22 cases meet the rule.')
+    expect(defs).toContain('Added by the researcher: T11: Moved schools.')
+    expect(report.note).not.toContain('Cases that don’t fit')
+    // Word reads the same report (`reportToDocx`)
+    const docx = docxDisplayTables(reports).get('k-1')!
+    expect(docx.note).toBe(report.note)
+    expect(docx.definitions).toEqual(report.definitions)
+    expect(docx.definitions_title).toBe(report.definitionsTitle)
   })
 
   it('blind with no viewer (D96): no read, and the note says the count could not be read', async () => {
@@ -70,9 +77,9 @@ describe('the misfit note in every export (r3-11)', () => {
 
   it('a failed read is said, never a count', async () => {
     api.cases.mockRejectedValue(new Error('boom'))
-    const note = (await fetchDisplayReports(themes(MISFIT), 1, LENS, NAMES)).get('k-1')!.note
-    expect(note).toContain(MISFIT_COUNT_UNREAD_TEXT)
-    expect(note).not.toMatch(/meet the rule/)
+    const defs = (await fetchDisplayReports(themes(MISFIT), 1, LENS, NAMES)).get('k-1')!.definitions.join(' ')
+    expect(defs).toContain(MISFIT_COUNT_UNREAD_TEXT)
+    expect(defs).not.toMatch(/meet the rule/)
   })
 
   it('control: a display with no misfit makes no case read and prints no misfit line', async () => {

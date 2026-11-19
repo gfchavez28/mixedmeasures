@@ -37,7 +37,7 @@ vi.mock('@/hooks/useAnalysisScope', () => ({
 
 import JointDisplayBuilder from './JointDisplayBuilder'
 import { readDisplay, type JointDisplay } from '@/lib/joint-display'
-import { STRAND_DATASET_CHANGE_TEXT, strandDatasetChangeWarningText, strandDatasetKeepText } from '@/lib/joint-display-vocabulary'
+import { strandDatasetChangeText, strandDatasetChangeWarningText, strandDatasetKeepText } from '@/lib/joint-display-vocabulary'
 
 const initial = (svy: number[]): JointDisplay => readDisplay({
   title: 'T', group_by_column_id: 11,
@@ -85,7 +85,8 @@ describe('#1665 — a survey strand’s new dataset starts the strand over', () 
     const onSubmit = mount(initial([21, 22]))
     await screen.findByRole('combobox', { name: 'Dataset for Survey' })
     fireEvent.change(select(), { target: { value: '3' } })
-    fireEvent.click(screen.getByRole('button', { name: STRAND_DATASET_CHANGE_TEXT }))
+    // #1703 (a) (D371): the button names the dataset the strand changes TO.
+    fireEvent.click(screen.getByRole('button', { name: strandDatasetChangeText('Follow-up') }))
     expect(select().value).toBe('3')
     await waitFor(() => expect(select()).toHaveFocus())
     expect(screen.getByRole('button', { name: /^Survey for Planning: 0 chosen/ })).toBeInTheDocument()
@@ -100,6 +101,16 @@ describe('#1665 — a survey strand’s new dataset starts the strand over', () 
     await screen.findByRole('combobox', { name: 'Dataset for Survey' })
     fireEvent.change(select(), { target: { value: '3' } })
     expect(select().value).toBe('3')
-    expect(screen.queryByRole('button', { name: STRAND_DATASET_CHANGE_TEXT })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Use “/ })).toBeNull()
+  })
+
+  it('#1703 (a): the button reads Use “Follow-up”, and choosing no dataset reads Remove the dataset', async () => {
+    mount(initial([21, 22]))
+    await screen.findByRole('combobox', { name: 'Dataset for Survey' })
+    fireEvent.change(select(), { target: { value: '3' } })
+    expect(screen.getByRole('button', { name: 'Use “Follow-up”' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Keep “Baseline”' }))
+    fireEvent.change(select(), { target: { value: '' } })
+    expect(screen.getByRole('button', { name: 'Remove the dataset' })).toBeInTheDocument()
   })
 })

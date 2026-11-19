@@ -1368,11 +1368,12 @@ class TestGetFactorMappingTypeFilter:
     unquoted → invalid R) with levels/labels inverted. It must be ignored and fall
     through to the column's scale_labels (or None).
 
-    These columns are ORDINAL, so their cell is `value_numeric` and the emitter
-    never queries for observed values — hence `db=None`. A nominal column would
-    need a real session (#765: its levels include values the declaration never
-    named), and passing None there is meant to fail loudly rather than silently
-    drop them.
+    These columns are ORDINAL, so their cell is `value_numeric`. Since #1677 (D364)
+    the numeric branch asks for observed codes the declaration never named too, as
+    the nominal arm has since #765 — so a mapping that reaches it takes a real
+    (here empty) session, and `db=None` is kept only where the mapping returns
+    before any read. Passing None to a branch that reads fails loudly rather than
+    silently dropping a stray code.
     """
 
     def _col(self, **kw):
@@ -1395,21 +1396,21 @@ class TestGetFactorMappingTypeFilter:
         # Must NOT return the group-name strings as factor levels — falls to None.
         assert _get_factor_mapping(None, col, cg) is None
 
-    def test_category_group_primary_falls_through_to_scale_labels(self):
+    def test_category_group_primary_falls_through_to_scale_labels(self, db_session):
         from app.routers.export_r import _get_factor_mapping
         col = self._col(scale_labels=json.dumps(["Poor", "Fair", "Good"]),
                         scale_values=json.dumps([1, 2, 3]))
         cg = self._recode("category_group", {"1": "Low", "2": "Low", "3": "High"}, "categorical")
-        result = _get_factor_mapping(None, col, cg)
+        result = _get_factor_mapping(db_session, col, cg)
         # Priority 2 (scale_labels), NOT the group names.
         assert result == {"levels": [1, 2, 3], "labels": ["Poor", "Fair", "Good"],
                           "codes": [1, 2, 3]}
 
-    def test_scale_map_primary_still_used(self):
+    def test_scale_map_primary_still_used(self, db_session):
         from app.routers.export_r import _get_factor_mapping
         col = self._col()
         sm = self._recode("scale_map", {"Poor": 1, "Good": 3, "Excellent": 5})
-        result = _get_factor_mapping(None, col, sm)
+        result = _get_factor_mapping(db_session, col, sm)
         assert result is not None
         # #765: `levels` is what the CSV cell carries — the code here, since an
         # ordinal cell is `value_numeric` and this primary is not a reverse.

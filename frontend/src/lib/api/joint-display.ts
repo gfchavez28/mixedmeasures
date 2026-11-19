@@ -269,6 +269,11 @@ export interface JointDisplayAnswerPassage {
 export interface JointDisplayPassagesResponse extends CodeSegmentsWithContextResponse {
   answer_total: number
   answers: JointDisplayAnswerPassage[]
+  /** #1704 (b) (D384) — each listed passage's WHOLE quote id (segment id / dataset value id →
+   *  excerpt id; JSON keys are strings). A pin IS that quote, so the picker can say "pinned
+   *  here" apart from "already a quote". Absent = no whole quote. */
+  segment_quote_ids: Record<string, number>
+  answer_quote_ids: Record<string, number>
 }
 
 export interface JointDisplayPinFact {
@@ -338,6 +343,8 @@ export interface JointDisplayCasesResponse {
   rule_unavailable_reason: string | null
   /** #1615 — the withheld variables a rule names while blind, by name (r3-3). */
   rule_withheld_columns: string[]
+  /** #1671 (D351) — with `group_missing`, the groups a condition names that the display lacks now. */
+  rule_missing_groups: string[]
   list_size: number
   /** Added cases no longer among the display's groups. */
   added_outside: number

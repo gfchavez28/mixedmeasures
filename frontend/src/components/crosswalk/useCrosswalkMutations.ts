@@ -24,6 +24,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { crosswalkApi, domainsApi, equivalenceApi, recodeApi, metricsApi } from '@/lib/api'
+import { useAnalysisScope } from '@/hooks/useAnalysisScope'
 import type { ColumnSwap, EquivalenceGroupSwapResponse } from '@/lib/api/equivalence'
 import type {
   MoveMembersRequest,
@@ -308,6 +309,10 @@ export function useCrosswalkMutations({
   onSwapTypeMismatch,
 }: UseCrosswalkMutationsOptions) {
   const queryClient = useQueryClient()
+  // #1675 D358: the metrics list is keyed by the analysis scope (`CrosswalkView`'s read), and
+  // `getQueryData`/`setQueryData` are EXACT-match — so the Σ badge patch below names it too.
+  const { coderScope, scopeKey } = useAnalysisScope(projectId)
+  const metricsKey = ['metrics', projectId, scopeKey] as const
 
   // ── Score metric chain (A1 degraded-state propagation) ────────────────────
   // Kept as a standalone mutation so:
@@ -326,7 +331,7 @@ export function useCrosswalkMutations({
       // MetricListResponse as a minimal summary. This is belt — onSettled
       // invalidates ['metrics'] anyway — but it avoids a flicker where the
       // badge state flips missing → ok after a 200ms refetch round-trip.
-      const existing = queryClient.getQueryData<MetricListResponse>(['metrics', projectId])
+      const existing = queryClient.getQueryData<MetricListResponse>(metricsKey)
       if (existing) {
         const alreadyListed = existing.metrics.some((m) => m.id === data.metric.id)
         if (!alreadyListed) {
@@ -361,7 +366,7 @@ export function useCrosswalkMutations({
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           }
-          queryClient.setQueryData<MetricListResponse>(['metrics', projectId], {
+          queryClient.setQueryData<MetricListResponse>(metricsKey, {
             ...existing,
             metrics: [...existing.metrics, patched],
             total: existing.total + 1,
@@ -532,7 +537,7 @@ export function useCrosswalkMutations({
       // shares, and skipped the rename altogether once one existed.
       if (data.name) {
         try {
-          const metricsRes = await metricsApi.list(projectId)
+          const metricsRes = await metricsApi.list(projectId, coderScope)
           const scaleScore = metricsRes.metrics.find(
             (m) => m.is_scale_score && m.input_source_id === domainId,
           )

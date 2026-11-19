@@ -29,7 +29,7 @@ function renderView() {
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <CaseView open onOpenChange={vi.fn()} projectId={9} display={DISPLAY} rowKey="r1"
-        scope={displayCoderScope(false, 1)} noViewer={false} groupBy="Gain group" onCommit={vi.fn(() => true)} />
+        scope={displayCoderScope(false, 1)} noViewer={false} onCommit={vi.fn(() => true)} />
     </QueryClientProvider>,
   )
 }

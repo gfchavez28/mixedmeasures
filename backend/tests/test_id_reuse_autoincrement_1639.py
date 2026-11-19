@@ -43,9 +43,30 @@ REVISION_FILE = BACKEND / "alembic" / "versions" / "c3a7e1f9b5d8_never_reuse_bou
 REMAP_TO_SQL = {"excerpts": "excerpt", "coders": "users"}
 #: A table the node names that may keep reusing ids, and why (r2-1).
 EXEMPT = {"users": "nothing deletes a user (no route, no service)"}
-#: The tables that must never reuse an id (r2-1).
-NEVER_REUSED = {"codes", "dataset_columns", "conversations", "documents", "observations",
-                "datasets", "materials", "excerpt", "participants"}
+#: The tables `c3a7e1f9b5d8` made never reuse an id (r2-1).
+NEVER_REUSED_1639 = {"codes", "dataset_columns", "conversations", "documents", "observations",
+                     "datasets", "materials", "excerpt", "participants"}
+#: #1678 D366 — `bdf1ffd93239`: a saved chart's variable groups (`domain_ids`).
+NEVER_REUSED_1678 = {"analysis_domains"}
+NEVER_REUSED = NEVER_REUSED_1639 | NEVER_REUSED_1678
+FIX_1678 = "bdf1ffd93239"
+REVISION_FILE_1678 = BACKEND / "alembic" / "versions" / "bdf1ffd93239_analysis_domains_never_reuse_ids_1678.py"
+
+#: #1678 D367 — a chart setting's id KIND (`services/material_config.py`) → its table.
+CHART_KIND_TABLES = {
+    "column": "dataset_columns", "domain": "analysis_domains", "code": "codes",
+    "category": "code_categories", "conversation": "conversations", "document": "documents",
+    "observation": "observations", "participant": "participants", "coder": "users",
+    "metric": "metric_definitions",
+}
+#: A chart setting's table that may keep reusing ids, and why (D367).
+CHART_EXEMPT = {
+    "users": "nothing deletes a user — a coder id names the same person for good",
+    "metric_definitions": "only inside `custom_order`, which orders the chart's axis and selects "
+                          "nothing: a reused id moves a bar, never draws another variable",
+    "code_categories": "only inside `custom_order` (under `code_mode: categories`): it orders, "
+                       "and selects nothing",
+}
 
 
 def _node_tables() -> set[str]:
@@ -109,8 +130,8 @@ def _downgrade(db: Path, revision: str) -> None:
     command.downgrade(cfg, revision)
 
 
-def _revision_module():
-    spec = importlib.util.spec_from_file_location("rev_1639", REVISION_FILE)
+def _revision_module(path: Path = REVISION_FILE):
+    spec = importlib.util.spec_from_file_location(f"rev_{path.stem[:12]}", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -137,19 +158,56 @@ class TestTheSchemaTheSuiteBuilds:
         assert new == freed
 
 
+def _chart_tables() -> dict[str, set[str]]:
+    """#1678 D367 — every table a saved chart's settings can name, by where it is named:
+    `ID_KEYS` and `TAGGED_KEYS` select what the chart draws; `custom_order` only orders it."""
+    from app.services import material_config as mc
+    selecting = {k.kind for k in mc.ID_KEYS.values()}
+    selecting |= {kind for tags in mc.TAGGED_KEYS.values() for kind in tags.values()}
+    ordering = {mc.METRIC, mc.CATEGORY, mc.CODE}  # `order_kind`'s three answers
+    unknown = (selecting | ordering) - set(CHART_KIND_TABLES)
+    assert not unknown, f"a chart setting names a kind this census has no table for: {unknown}"
+    return {"selecting": {CHART_KIND_TABLES[k] for k in selecting},
+            "ordering": {CHART_KIND_TABLES[k] for k in ordering}}
+
+
 class TestTheCensus:
     def test_every_table_the_display_names_never_reuses_an_id(self, models_db):
         named = _node_tables()
-        assert named - set(EXEMPT) == NEVER_REUSED, (
+        assert named - set(EXEMPT) <= NEVER_REUSED, (
             "joint_display_node names a table that reuses ids — add it to a migration with "
             "AUTOINCREMENT (and to NEVER_REUSED), or exempt it with a reason")
         assert NEVER_REUSED <= _autoincrement_tables(models_db)
 
+    def test_every_table_a_chart_setting_names_never_reuses_an_id(self):
+        """#1678 D367 — `analysis_domains` was the one a chart's `domain_ids` named that still
+        reused ids, and the census read only the joint display's keys."""
+        chart = _chart_tables()
+        reusing = (chart["selecting"] | chart["ordering"]) - NEVER_REUSED - set(CHART_EXEMPT)
+        assert not reusing, (
+            f"a chart setting names {sorted(reusing)}, which reuse ids — give it AUTOINCREMENT "
+            "in a revision (and NEVER_REUSED), or exempt it in CHART_EXEMPT with the reason")
+        # An exemption for a SELECTING key must be the no-delete kind (coders) — ordering ones
+        # are exempt because they only order.
+        assert chart["selecting"] & set(CHART_EXEMPT) == {"users"}
+
+    def test_the_tables_that_must_not_reuse_are_exactly_the_two_censuses(self):
+        named = (_node_tables() - set(EXEMPT)) | (
+            (_chart_tables()["selecting"] | _chart_tables()["ordering"]) - set(CHART_EXEMPT))
+        assert named == NEVER_REUSED
+
     def test_the_exemptions_are_named_by_the_display(self):
         assert set(EXEMPT) <= _node_tables()
 
+    def test_the_chart_exemptions_are_named_by_a_chart(self):
+        chart = _chart_tables()
+        assert set(CHART_EXEMPT) <= chart["selecting"] | chart["ordering"]
+
     def test_the_revisions_frozen_list_is_the_same_set(self):
-        assert set(_revision_module().TABLES) == NEVER_REUSED
+        """#1678 D367: the union of both revisions' frozen lists."""
+        assert set(_revision_module().TABLES) == NEVER_REUSED_1639
+        assert set(_revision_module(REVISION_FILE_1678).TABLES) == NEVER_REUSED_1678
+        assert NEVER_REUSED_1639 | NEVER_REUSED_1678 == NEVER_REUSED
 
     def test_the_fix_is_in_the_chain_the_app_runs(self):
         from alembic.script import ScriptDirectory
@@ -206,12 +264,12 @@ class TestTheUpgrade:
             _a_db_before_the_fix(db)
         except sqlite3.Error as exc:  # a column this fixture does not know — fix the fixture
             pytest.fail(f"fixture: {exc}")
-        assert NEVER_REUSED.isdisjoint(_autoincrement_tables(db)), "precondition: before"
+        assert NEVER_REUSED_1639.isdisjoint(_autoincrement_tables(db)), "precondition: before"
         before = _q(db, "SELECT segment_id, code_id FROM code_applications ORDER BY 1")
 
         _upgrade(db, FIX)
 
-        assert NEVER_REUSED <= _autoincrement_tables(db)
+        assert NEVER_REUSED_1639 <= _autoincrement_tables(db)
         assert _q(db, "SELECT id, name FROM codes ORDER BY id") == [(1, "A"), (2, "B"), (3, "C")]
         assert _q(db, "SELECT segment_id, code_id FROM code_applications ORDER BY 1") == before
         assert _q(db, "PRAGMA foreign_key_check") == []
@@ -245,7 +303,7 @@ class TestTheUpgrade:
         _a_db_before_the_fix(db)
         _upgrade(db, FIX)
         _downgrade(db, BEFORE)
-        assert NEVER_REUSED.isdisjoint(_autoincrement_tables(db))
+        assert NEVER_REUSED_1639.isdisjoint(_autoincrement_tables(db))
         assert _q(db, "SELECT name FROM sqlite_sequence WHERE name IN ('codes', 'participants')") == []
         assert _q(db, "SELECT id FROM codes ORDER BY id") == [(1,), (2,), (3,)]
         assert _q(db, "PRAGMA foreign_key_check") == []
@@ -272,3 +330,69 @@ class TestTheHarnessSeesIt:
         assert any("AUTOINCREMENT" in line
                    for line in h.diff_schemas(h.introspect(a), h.introspect(b)))
         assert h.diff_schemas(h.introspect(b), h.introspect(b)) == []
+
+
+class TestTheUpgrade1678:
+    """#1678 D366 — `bdf1ffd93239`: `analysis_domains` the same way, from the revision before."""
+
+    def _a_db_before(self, db: Path) -> None:
+        _upgrade(db, FIX)
+        c = sqlite3.connect(str(db))
+        c.executescript("""
+            INSERT INTO users (id, username, is_admin, created_at, coder_type)
+                VALUES (1, 'Owner', 0, '2026-01-01', 'human');
+            INSERT INTO projects (id, name, user_id, status, created_at, updated_at)
+                VALUES (1, 'P', 1, 'active', '2026-01-01', '2026-01-01');
+            INSERT INTO analysis_domains (id, project_id, name, origin, created_at, updated_at)
+                VALUES (1, 1, 'Wellbeing', 'human', '2026-01-01', '2026-01-01'),
+                       (2, 1, 'Burnout', 'human', '2026-01-01', '2026-01-01');
+            INSERT INTO analysis_domain_members (domain_id, member_type, member_id, sequence_order,
+                                                 created_at)
+                VALUES (2, 'column', 7, 0, '2026-01-01');
+            INSERT INTO audit_entries (timestamp, action, entity_type, entity_id, project_id)
+                VALUES ('2026-01-01', 'created', 'analysis_domain', 3, 1),
+                       ('2026-01-01', 'deleted', 'analysis_domain', 3, 1);
+        """)
+        c.commit()
+        c.close()
+
+    def test_ids_and_members_are_kept_and_the_table_never_reuses(self, tmp_path):
+        db = tmp_path / "pre.db"
+        try:
+            self._a_db_before(db)
+        except sqlite3.Error as exc:  # a column this fixture does not know — fix the fixture
+            pytest.fail(f"fixture: {exc}")
+        assert "analysis_domains" not in _autoincrement_tables(db), "precondition: before"
+        _upgrade(db, FIX_1678)
+        assert "analysis_domains" in _autoincrement_tables(db)
+        assert _q(db, "SELECT id, name FROM analysis_domains ORDER BY id") == [(1, "Wellbeing"), (2, "Burnout")]
+        assert _q(db, "SELECT domain_id, member_id FROM analysis_domain_members") == [(2, 7)]
+        assert _q(db, "PRAGMA foreign_key_check") == []
+
+    def test_an_id_the_audit_trail_names_is_not_issued_again(self, tmp_path):
+        """Group 3 was made and deleted before the upgrade; the copy alone starts at 2."""
+        db = tmp_path / "pre.db"
+        self._a_db_before(db)
+        _upgrade(db, FIX_1678)
+        assert _q(db, "SELECT seq FROM sqlite_sequence WHERE name = 'analysis_domains'") == [(3,)]
+        c = sqlite3.connect(str(db))
+        new = c.execute("INSERT INTO analysis_domains (project_id, name, origin, created_at, updated_at) "
+                        "VALUES (1, 'New', 'human', '2026-01-02', '2026-01-02')").lastrowid
+        c.commit()
+        c.close()
+        assert new == 4
+
+    def test_the_downgrade_returns_the_table_and_keeps_the_ids(self, tmp_path):
+        db = tmp_path / "pre.db"
+        self._a_db_before(db)
+        _upgrade(db, FIX_1678)
+        _downgrade(db, FIX)
+        assert "analysis_domains" not in _autoincrement_tables(db)
+        assert NEVER_REUSED_1639 <= _autoincrement_tables(db), "the nine stay as they were"
+        assert _q(db, "SELECT id FROM analysis_domains ORDER BY id") == [(1,), (2,)]
+
+    def test_the_fix_is_in_the_chain_the_app_runs(self):
+        from alembic.script import ScriptDirectory
+
+        script = ScriptDirectory.from_config(_script_only_alembic_config())
+        assert script.get_revision(FIX_1678).down_revision == FIX

@@ -112,6 +112,11 @@ MISFIT_RULE_REFERENCE_MISSING = "reference_missing"  # names nothing the row bin
 MISFIT_RULE_CONDITION_INVALID = "condition_invalid"  # an operator its variable's type lacks
 #: #1664 (D333) — a condition on a bound code the codebook made inactive: kept, never run.
 MISFIT_RULE_CODE_INACTIVE = "code_inactive"
+#: #1671 (D351) — a group condition naming a group the display does not have NOW (a regroup, a
+#: relabel of the grouping variable's answers, a group that lost its last member). Its own
+#: reason, not `reference_missing`: the remedy is re-picking the group, not re-binding a variable.
+#: The groups it names ride the response (`rule_missing_groups`) for the sentence.
+MISFIT_RULE_GROUP_MISSING = "group_missing"
 #: #1615 — a condition on a variable withheld while blind: never evaluated, never dropped.
 MISFIT_RULE_RATING_WITHHELD = VARIABLE_RATING_WITHHELD
 
@@ -330,9 +335,9 @@ def read_cases(
 
     # ── The rule: checked against the row's bindings first, then per case ────────
     bound_columns = {c: columns[c] for s in var_strands for c in _strand_columns(s)}
-    rule_reason, withheld_names, evaluators = _compile_rule(
+    rule_reason, withheld_names, missing_groups, evaluators = _compile_rule(
         rule, code_strands, var_strands, bindings, codes, inactive, bound_columns, withheld,
-        code_facts, _value)
+        code_facts, _value, set(groups))
 
     names = dict(db.query(Participant.id, Participant.identifier)
                  .filter(Participant.project_id == project_id))
@@ -373,6 +378,8 @@ def read_cases(
         "unknown": sum(1 for v in matches.values() if v is None) if evaluators is not None else None,
         "rule_unavailable_reason": rule_reason,
         "rule_withheld_columns": withheld_names,
+        # #1671 (D351): the groups a condition names that this display does not have now.
+        "rule_missing_groups": missing_groups,
         "list_size": len(in_list),
         # Added cases no longer among the display's groups (no group value, or gone).
         "added_outside": len(added - set(population)),
@@ -418,16 +425,20 @@ def misfit_list(population: list[int], matches: dict[int, bool | None],
 
 
 def _compile_rule(rule, code_strands, var_strands, bindings, codes, inactive, columns, withheld,
-                  code_facts, value_of):
+                  code_facts, value_of, current_groups):
     """The rule's conditions as per-case evaluators — or why the rule is not evaluated.
 
-    Returns ``(reason, withheld column names, evaluators | None)``; ``None`` evaluators with
-    no reason means there is no rule. Withheld is reported FIRST (#1615: say it, by name).
+    Returns ``(reason, withheld column names, missing group names, evaluators | None)``; ``None``
+    evaluators with no reason means there is no rule. Withheld is reported FIRST (#1615: say it,
+    by name). ``current_groups`` are the display's groups now: a group condition naming another
+    one is `MISFIT_RULE_GROUP_MISSING` (#1671 D351) — it used to match nobody and report
+    "0 matched" as a finding, indistinguishable from a group nobody falls in.
     """
     if not rule:
-        return None, [], None
+        return None, [], [], None
     code_keys = {s.key for s in code_strands}
     withheld_names: list[str] = []
+    missing_groups: list[str] = []
     reason = None
     evaluators = []
     for cond in rule:
@@ -436,6 +447,11 @@ def _compile_rule(rule, code_strands, var_strands, bindings, codes, inactive, co
             group = cond.get("group")
             if not isinstance(group, str):
                 reason = reason or MISFIT_RULE_CONDITION_INVALID
+                continue
+            if group not in current_groups:
+                if group not in missing_groups:
+                    missing_groups.append(group)
+                reason = reason or MISFIT_RULE_GROUP_MISSING
                 continue
             evaluators.append(lambda pid, g, want=group: g == want)
         elif kind == "variable":
@@ -494,7 +510,7 @@ def _compile_rule(rule, code_strands, var_strands, bindings, codes, inactive, co
         else:
             reason = reason or MISFIT_RULE_CONDITION_INVALID
     if withheld_names:
-        return MISFIT_RULE_RATING_WITHHELD, withheld_names, None
+        return MISFIT_RULE_RATING_WITHHELD, withheld_names, [], None
     if reason:
-        return reason, [], None
-    return None, [], evaluators
+        return reason, [], missing_groups, None
+    return None, [], [], evaluators

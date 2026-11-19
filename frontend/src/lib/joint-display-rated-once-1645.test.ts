@@ -100,7 +100,10 @@ describe('#1645 — the report: one "Rated:" sentence per rated code, after the 
   it('an unrated code draws no rating (the control), and the note says the rating belongs to no strand', () => {
     const { r, row } = report(TWO, BOTH)
     expect(row.cells[0]).not.toContain(`${RATED_LINE_TAG}: Workload`)
-    expect(r.note).toContain(RATING_BASIS_TEXT)
+    // The notice rule (2026-11-18, rewrite D): short in the note, word for word in the Definitions.
+    expect(r.note).toContain('A rated cell is the mean of the group\'s participant scores')
+    expect(r.note).toContain('it is shown once')
+    expect(r.definitions.join(' ')).toContain(RATING_BASIS_TEXT)
     expect(RATING_BASIS_TEXT).toMatch(/belongs to no one strand/)
   })
 

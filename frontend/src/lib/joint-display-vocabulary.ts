@@ -82,6 +82,7 @@ export const SERVER_VOCABULARY = {
   MISFIT_RULE_REFERENCE_MISSING: 'reference_missing',
   MISFIT_RULE_CONDITION_INVALID: 'condition_invalid',
   MISFIT_RULE_CODE_INACTIVE: 'code_inactive',
+  MISFIT_RULE_GROUP_MISSING: 'group_missing',
   MISFIT_RULE_RATING_WITHHELD: 'rating_withheld_blind',
   CASE_OP_LT: 'lt',
   CASE_OP_LE: 'le',
@@ -347,6 +348,14 @@ export function surveyAnswerSourceText(sourceName: string): string {
 /** Joint display slice 2 (r4-5): the pin picker's description — passages AND answers. */
 export const PIN_PICKER_DESCRIPTION =
   'Suggestions come from this group’s own coded passages and open-text answers. Pinning saves the whole passage or answer as a quote, so it is on the Quote Board too, and a withdrawal removes it like any other quote.'
+/**
+ * #1704 (b) (D384) — a suggestion's mark: "pinned here" (its whole quote is a pin of THIS group;
+ * *Pin* is unavailable and described by the sentence) apart from "already a quote" (a quote
+ * anywhere — on the Quote Board, another group — which pinning simply reuses).
+ */
+export const PIN_PINNED_HERE_TEXT = 'pinned here'
+export const PIN_ALREADY_QUOTED_TEXT = 'already a quote'
+export const PIN_ALREADY_PINNED_TEXT = 'Already pinned in this group.'
 
 export const ATTRIBUTION_MODES = [
   { key: 'participant', label: 'Participant identifier' },
@@ -396,6 +405,15 @@ export const MISFIT_RULE_UNAVAILABLE_TEXT: Record<string, string> = {
   // #1664 (D333): kept and not run — the code's coding was merged elsewhere or set aside.
   [SERVER_VOCABULARY.MISFIT_RULE_CODE_INACTIVE]:
     'The rule names a code the codebook made inactive, so it selects no cases. Edit the rule.',
+}
+
+/** #1671 (D351) — a group condition naming a group the display does not have now (a regroup, a
+ *  relabel, a group that lost its last member): the groups by name, from `rule_missing_groups`. */
+export function misfitRuleGroupMissingText(groups: string[]): string {
+  if (groups.length <= 1) {
+    return `A condition names the group “${groups[0] ?? ''}”, which this display does not have now.`
+  }
+  return `Conditions name the groups ${groups.map(g => `“${g}”`).join(', ')}, which this display does not have now.`
 }
 
 /** #1615 — a condition on a rating-derived variable while blind: named, never dropped. */
@@ -580,6 +598,31 @@ export const CODED_COUNT_BASIS_TEXT =
 export const SURVEY_CELL_BASIS_TEXT =
   "A survey cell summarises each linked participant's own value: the mean (SD) and n of a numeric or ordinal variable, or the categories present for a categorical one."
 
+/**
+ * The notice rule (2026-11-18, rewrite D, approved; git-ignored record
+ * the internal design notes): the report's note UNDER the table says what
+ * each cell is in one short sentence. The full sentences (the `*_BASIS_TEXT`s), the fit,
+ * meta-inference and quote-role definitions, the clip rule, the cases that don't fit and the
+ * citations are its Definitions, word for word: after the display in every file, behind a closed
+ * Details in the Report view.
+ */
+export const NOTE_CODED_TEXT =
+  'A coded count is the participants with a coded passage, out of those in the group with material (interviewer turns left out).'
+export const NOTE_SURVEY_TEXT =
+  "A survey cell is each participant's own value: mean (SD) and n, or the categories present."
+export const NOTE_TEXT_CODES_TEXT =
+  'An open-text count is the participants whose answer carries the code, out of those who answered (an empty answer such as “N/A” is not one); the surveyed count is shown too.'
+export const NOTE_RATING_TEXT =
+  "A rated cell is the mean of the group's participant scores, each over all of that person's rated passages; it is shown once."
+export const NOTE_OBSERVATION_TEXT =
+  'An observation cell is the observations with a coded clip and the coded share of observed time, drawn once across the groups.'
+/** Why a coded difference has no interval — moved from the note's differences sentence. */
+export const CODED_DIFFERENCE_NO_INTERVAL_TEXT =
+  'A coded difference has no interval because coded passages come from a chosen sample, not one built for estimation.'
+/** The Definitions' title: what the section holds (the Report view's Details label too). */
+export const DEFINITIONS_TITLE = 'Definitions'
+export const DEFINITIONS_WITH_CASES_TITLE = 'Definitions and cases that don’t fit'
+
 /** r2-12 — the builder's question list for an open-text strand. */
 export const TEXT_STRAND_QUESTIONS_LABEL = 'Questions'
 
@@ -617,6 +660,14 @@ export const MAX_IDS_PER_BINDING = 50
 export const BINDING_LIMIT_TEXT = `A construct holds up to ${MAX_IDS_PER_BINDING} codes or variables from each strand. Clear one to choose another.`
 /** The same server cap on a survey comments strand's questions (`text_column_ids`): a 51st 422'd the display. */
 export const STRAND_QUESTIONS_LIMIT_TEXT = `A survey comments strand holds up to ${MAX_IDS_PER_BINDING} questions. Clear one to choose another.`
+
+/**
+ * #1712 (c), D390 — what a builder list says when it has NOTHING to offer (before any filter).
+ * "Nothing matches." is kept for a list the filter emptied, so an empty list never blames it.
+ */
+export const PICKER_NO_DATASET_TEXT = 'Choose this strand’s dataset first.'
+export const PICKER_NO_VARIABLE_TEXT = 'This dataset has no variable this strand can show.'
+export const PICKER_NOTHING_TEXT = 'Nothing to choose from.'
 
 // ── #1644 review (r3): the server's bounds the builder mirrors ───────────────────────────────
 /**
@@ -691,7 +742,12 @@ export const otherDatasetVariablesText = (n: number) =>
 export const strandDatasetChangeWarningText = (constructs: number) =>
   `Changing the dataset removes the variables ${constructs} ${constructs === 1 ? 'construct' : 'constructs'} chose for this strand.`
 export const strandDatasetKeepText = (dataset: string | null) => (dataset ? `Keep “${dataset}”` : 'Keep the dataset')
-export const STRAND_DATASET_CHANGE_TEXT = 'Change the dataset'
+/**
+ * #1703 (a) (D371) — the change button names what the strand changes TO (the closed select's
+ * arrow keys change it too, so the named target is what makes that change visible).
+ */
+export const strandDatasetChangeText = (dataset: string | null) =>
+  (dataset ? `Use “${dataset}”` : 'Remove the dataset')
 /**
  * #1646 (D337) — the open construct's Quotes line: each pin counted against its OWN strand's
  * coded passages (a codes strand) or coded answers (a survey comments strand). One pool item:
@@ -737,3 +793,90 @@ export const STRAND_REMOVE_KEEP_TEXT = 'Keep the strand'
 export const OBSERVATIONS_FAILED_TITLE = 'The observations could not be loaded'
 /** The same for a survey comments strand's questions (the open-text columns' own read). */
 export const QUESTIONS_FAILED_TITLE = 'The questions could not be loaded'
+
+/**
+ * #1671 D350 — the builder's warning before *Compare groups by* changes on a display that holds
+ * work tied to its groups (#1665's dataset-change shape). Nothing is cleared.
+ *
+ * #1688 (D370): it names the GROUPS the work sits under, never a variable. A pin and a rule's
+ * group condition record only the group's NAME ("Community Health"), not the variable it was
+ * chosen under, so after one kept regroup "chosen under the groups of “Pay band”" named the wrong
+ * variable — and within one edit, a variable never saved. The group names are what a later
+ * grouping brings back. A stamp's and a picked case's groups are counted, not named.
+ */
+export function regroupWarningText(
+  h: { pins: number; groupRules: number; pickedCases: number; stamps: number; groups: readonly string[] },
+): string {
+  const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`
+  const items = [
+    h.pins > 0 ? n(h.pins, 'pinned quote', 'pinned quotes') : null,
+    h.groupRules > 0 ? n(h.groupRules, 'rule naming a group', 'rules naming a group') : null,
+    h.pickedCases > 0 ? n(h.pickedCases, 'case picked by hand', 'cases picked by hand') : null,
+    h.stamps > 0 ? n(h.stamps, 'set of numbers saved with a meta-inference', 'sets of numbers saved with meta-inferences') : null,
+  ].filter((s): s is string => s != null)
+  const list = joinAnd(items)
+  if (h.groups.length === 0) return `This display holds ${list}, chosen under its groups. Nothing is cleared.`
+  const shown = h.groups.slice(0, REGROUP_GROUPS_NAMED).map(g => `“${g}”`)
+  const more = h.groups.length - shown.length
+  const names = more > 0 ? `${shown.join(', ')} and ${more} more` : joinAnd(shown)
+  const one = h.groups.length === 1
+  const total = h.pins + h.groupRules + h.pickedCases + h.stamps
+  return `This display holds ${list}, under the ${one ? 'group' : 'groups'} ${names}. Nothing is cleared: `
+    + `a grouping with ${one ? 'that group' : 'those groups'} brings ${total === 1 ? 'it' : 'them'} back.`
+}
+/**
+ * #1703 (b) (D372) — a rule's group condition, by its group alone: true under any grouping. The
+ * rule stores the group's NAME, so the current variable's name beside it was false after a
+ * regroup (*"Pay band is “Community Health”"*); the `group_missing` sentence (D351) follows when
+ * the group is gone.
+ */
+export const groupConditionText = (group: string) => `in the group “${group}”`
+/** #1703 (c) (D373) — the case view's group select: a group a condition holds that the display
+ *  does not have now, shown disabled and selected (D346's shape), never as "…". */
+export const heldGroupOptionText = (group: string) => `“${group}” (not a group now)`
+/**
+ * #1704 (c) (D385) — a rule's code condition, with its subject: the server tests whether one of
+ * the case's units in that strand carries the code (`(pid, code) in used`), so it reads as what
+ * the case HAS — a passage (a codes strand) or an answer (a survey comments strand).
+ */
+export const codeConditionText = (present: boolean, unit: 'passage' | 'answer', code: string) =>
+  `has ${present ? (unit === 'answer' ? 'an answer' : 'a passage') : `no ${unit}`} coded “${code}”`
+/**
+ * #1705 (b) (D387) — after a display's computing line, while other displays compute in this
+ * window: the server computes one at a time (D368), so this one MAY be waiting — "may", because
+ * the client cannot tell which one runs, and another window's are not counted.
+ */
+export const computeQueueText = (others: number) =>
+  `Displays compute one at a time, so this may wait for ${others} ${others === 1 ? 'other' : 'others'}.`
+/** D370 — how many group names the regroup warning spells out before "and N more". */
+export const REGROUP_GROUPS_NAMED = 3
+function joinAnd(items: readonly string[]): string {
+  return items.length <= 1 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`
+}
+export const regroupKeepText = (variable: string | null) => (variable ? `Keep “${variable}”` : 'Keep the grouping')
+/** #1703 (a) (D371) — the change button names the variable the display is grouped by NEXT. */
+export const regroupChangeText = (target: string | null) => (target ? `Group by “${target}”` : 'Remove the grouping')
+
+/** #1671 D352 — pins under groups the display does not have now: counted and named, kept. */
+export function pinsOutsideGroupsText(count: number, groups: string[]): string {
+  const names = groups.map(g => `“${g}”`).join(', ')
+  return count === 1
+    ? `1 pinned quote is under a group this display does not have now: ${names}.`
+    : `${count} pinned quotes are under groups this display does not have now: ${names}.`
+}
+
+/** #1673 D355 — the builder's footer while a nameless construct holds work. */
+export const unnamedConstructText = (n: number) =>
+  `Construct ${n} has no name. Name it, or remove it with Remove construct.`
+
+// ── The drift stamp's other states (#1672 D354, #1674 D357) — on screen only ──────────
+/** D354: a stamp read under another coder view (or an unrecorded one) is not compared. */
+export const DRIFT_OTHER_SCOPE_TEXT =
+  'The numbers saved with this inference were read under another coder view, so they are not compared here.'
+/** D357: a withdrawal cleared the stamp's figures; its date is kept. */
+// #1700 (c) (D380): the sentence ends at "withdrew." — the button after it, *Accept the current
+// numbers*, carries the action (it read the button's words twice).
+export const driftClearedText = (date: string) =>
+  `The numbers saved${date ? ` on ${date}` : ''} were cleared when a participant withdrew.`
+/** The button that re-stamps under the viewer's own coder view (D354, D357). */
+export const DRIFT_ACCEPT_CURRENT_TEXT = 'Accept the current numbers'

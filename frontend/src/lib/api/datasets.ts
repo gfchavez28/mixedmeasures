@@ -584,6 +584,8 @@ export interface DomainScoreColumn {
 
 export interface DomainScoresResponse {
   domain_scores: DomainScoreColumn[]
+  /** #1615 / #1675 — variable groups left out while blind (each holds a rating score). */
+  withheld_rating_variables: number
 }
 
 export interface DatasetValueCell {
@@ -1032,9 +1034,12 @@ export const datasetsApi = {
       `/projects/${projectId}/datasets/${datasetId}/columns/computed/preview`, data,
       coderIds ? { params: { coder_ids: coderIds } } : undefined,
     ).then(res => res.data),
-  getDomainScores: (projectId: number, datasetId: number) =>
+  // #1675 D358: `coderIds` while withholding — a variable group holding a participant rating
+  // score is left out (its scale score averages every coder's ratings) and counted.
+  getDomainScores: (projectId: number, datasetId: number, coderIds?: string) =>
     api.get<DomainScoresResponse>(
-      `/projects/${projectId}/datasets/${datasetId}/domain-scores`
+      `/projects/${projectId}/datasets/${datasetId}/domain-scores`,
+      coderIds ? { params: { coder_ids: coderIds } } : undefined,
     ).then(res => res.data),
   updateValue: (projectId: number, datasetId: number, valueId: number, data: ValueUpdate) =>
     api.patch<ValueCellResponse>(

@@ -164,9 +164,12 @@ describe('joint display slice 2 — the Compact view draws every strand by its n
     const table = await screen.findByRole('table')
     const high = within(table).getAllByRole('columnheader').find(h => h.textContent?.startsWith('High'))!
     // The top-level `groups` carry only the first strand's 2; Focus groups' own count is 5.
-    expect(high).toHaveTextContent('High · 11 · Interviews: 2 with no coding · Focus groups: 5 with no coding')
+    expect(high).toHaveTextContent('High · 11 participants · Interviews: 2 with no coding · Focus groups: 5 with no coding')
     const low = within(table).getAllByRole('columnheader').find(h => h.textContent?.startsWith('Low'))!
-    expect(low).toHaveTextContent(/^Low · 10$/)   // a 0 is not printed in a header
+    expect(low).toHaveTextContent(/^Low · 10 participants$/)   // a 0 is not printed in a header
+    // #1713 (c), D395: the count's noun is for the NAME only — the visible header stays "· 10".
+    expect(within(low).getByText('participants', { exact: false })).toHaveClass('sr-only')
+    expect(within(table).getByRole('columnheader', { name: 'Low · 10 participants' })).toBe(low)
     // …and the footer's note says it per strand, each over its own groups.
     expect(screen.getByText(/Interviews: Some participants have .* \(High: 2, Low: 0\)\..*Focus groups: Some participants have .* \(High: 5, Low: 0\)/))
       .toBeInTheDocument()
@@ -200,7 +203,7 @@ describe('joint display slice 2 — the open construct', () => {
     await screen.findByRole('table')
     fireEvent.click(screen.getByRole('button', { name: /Protected planning time/ }))
     expect(screen.getAllByRole('group', { name: /^Fit for Protected planning time/ })).toHaveLength(1)
-    fireEvent.click(screen.getByRole('button', { name: 'Compare another pair' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Compare another pair for Protected planning time' }))
     expect(lastDisplay(updateAttributes).rows[0].fits).toEqual([
       { strands: ['s-int', 's-fg'], fit: 'expansion' }, { strands: ['s-int', 's-svy'], fit: null }])
   })

@@ -14,14 +14,14 @@
  * - **While blind a colleague's authorship reads "a colleague"** (D170, #964).
  * - **A pin's attribution is derived at render** (D163.4), from the live facts the parent read.
  */
-import { useId, useState } from 'react'
+import { useId, useState, type MouseEvent } from 'react'
 import { Pin, Plus, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import type { JointDisplayGroup, JointDisplayPinFact, JointDisplayRowResult, JointDisplayStrandResult } from '@/lib/api'
 import {
   primaryFit, withPrimaryFit,
-  codeDifferenceNote, effectNote, formatCodeDifference, formatEffect, rowDrift, IMPLICIT_CODES_KEY,
+  codeDifferenceNote, effectNote, formatCodeDifference, formatEffect, rowDriftState, baselineScopeOf, IMPLICIT_CODES_KEY,
   type JointDisplay, type JointDisplayPin, type JointDisplayRow, type RecordedStrandStatus,
 } from '@/lib/joint-display'
 import {
@@ -38,6 +38,7 @@ import { besideSentence, observationBesideText } from '@/lib/joint-display-repor
 import { boundResultIds } from '@/lib/joint-display-results'
 import { ScrollableTable } from '@/components/ui/ScrollableTable'
 import { LoadingNotice } from '@/components/LoadStatus'
+import { wholeQuoteLabel } from '@/lib/quote-runs'
 import { formatWrittenDate, pinAttribution, stampBaseline, todayIso } from './display-helpers'
 import { useKeptState } from './display-store'
 import { atOrBefore, landAfterPress } from './focus-landing'
@@ -51,6 +52,7 @@ import {
   CASE_GONE_TEXT, CASE_NAME_LOADING_TEXT, CASE_NAME_UNREAD_TEXT, CASE_OUTSIDE_GROUPS_TEXT, CASE_VIEW_OPEN_TEXT, CASES_NO_VIEWER_TEXT,
   MISFIT_ADDED_LABEL, MISFIT_COUNT_FAILED_TEXT, MISFIT_COUNT_LOADING_TEXT, MISFIT_HEADING, MISFIT_NONE_TEXT,
   MISFIT_REMOVED_LABEL, MISFIT_RULE_LABEL, caseViewOpenLabel,
+  DRIFT_ACCEPT_CURRENT_TEXT, DRIFT_OTHER_SCOPE_TEXT, driftClearedText,
 } from '@/lib/joint-display-vocabulary'
 
 /** Whether the pins' live facts have answered — an unanswered list is never "this quote is gone". */
@@ -79,7 +81,8 @@ interface ConstructDetailProps {
   /** Null where no dialog can be hosted (read-only, or no host) — then no pin control. */
   onPinRequest: ((group: string) => void) | null
   /** Joint display slice 2, round 2 (r5-1): the count read's context — the compute's own scope. */
-  cases: { projectId: number; scope: DisplayCoderScope; settled: boolean; noViewer: boolean; groupBy: string }
+  // #1703 (b) (D372): no grouping variable's name — the rule's group clause no longer reads it.
+  cases: { projectId: number; scope: DisplayCoderScope | null; settled: boolean; noViewer: boolean }
   /** r5-2: opens the case view (hosted by the page, D213); null where no dialog can be hosted. */
   onCasesRequest: (() => void) | null
 }
@@ -101,7 +104,21 @@ export default function ConstructDetail({
   const setLevel = (v: 'global' | 'specific' | null) => setDraft(d => ({ ...d, level: v }))
   const setType = (v: string | null) => setDraft(d => ({ ...d, type: v }))
   const setImplication = (v: string) => setDraft(d => ({ ...d, implication: v }))
-  const drift = result ? rowDrift(row.baseline, result, strandTagOf(display)) : []
+  // #1672 D353–D354: the stamp is compared only within the viewer's own coder view, and a new
+  // stamp records that view — the compute's own scope, never a second derivation.
+  const viewerScope = baselineScopeOf(cases.scope)
+  const drift = result ? rowDriftState(row.baseline, result, viewerScope, strandTagOf(display)) : { kind: 'none' as const }
+  const restamp = result && viewerScope != null ? () => onChange({ baseline: stampBaseline(result, viewerScope) }) : null
+  // #1689 (D375): *Accept the new numbers*, *Accept the current numbers* (each unmounts with its
+  // note) and *Save meta-inference* (disables itself) take their own button away; the open
+  // construct is in the node view, so focus fell to <body>. Each lands on the text box beside them.
+  const metaTextId = `${fieldId}-meta-text`
+  const landOnMetaText = (pressed: HTMLElement) => landAfterPress(pressed, () => document.getElementById(metaTextId))
+  const restampPressed = restamp && ((e: MouseEvent<HTMLElement>) => {
+    const land = landOnMetaText(e.currentTarget)
+    restamp()
+    land()
+  })
   // Joint display slice 2: the row's strands in display order, each with its answer.
   const strands = rowStrands(display, result, strandFacts)
   const implicit = isImplicitPair(display)
@@ -130,8 +147,9 @@ export default function ConstructDetail({
     const savedType = level != null ? type : null
     onChange({
       meta_inference: { text, author_id: self, written_at: todayIso(), level, type: savedType },
-      // D168.5: the row's numbers are stamped when its meta-inference is saved.
-      baseline: result ? stampBaseline(result) : row.baseline,
+      // D168.5: the row's numbers are stamped when its meta-inference is saved (#1672 D353:
+      // with the coder view they were read under).
+      baseline: result && viewerScope != null ? stampBaseline(result, viewerScope) : row.baseline,
     })
     setDraft(d => ({ ...d, type: savedType }))
   }
@@ -329,30 +347,48 @@ export default function ConstructDetail({
       {/* Meta-inference (D170) — typed, signed, stamped. */}
       <section aria-labelledby={`${fieldId}-meta`}>
         <h4 id={`${fieldId}-meta`} className="text-[11px] font-bold uppercase tracking-wide text-mm-text-muted mb-1">Meta-inference</h4>
-        {drift.length > 0 && (
+        {drift.kind === 'moved' && (
           <div role="status" className="mb-2 rounded-md border border-amber-200 dark:border-amber-800/60 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
             <p className="font-medium">
-              Numbers moved{row.baseline?.stamped_at ? ` since ${formatWrittenDate(row.baseline.stamped_at)}` : ''}:
+              Numbers moved{drift.stampedAt ? ` since ${formatWrittenDate(drift.stampedAt)}` : ''}:
             </p>
             <ul className="list-disc pl-4">
-              {drift.map(c => (
+              {drift.changes.map(c => (
                 <li key={c.key}>{c.label}: {c.was ?? 'not shown'} → {c.now ?? 'not shown'}</li>
               ))}
             </ul>
-            {isEditable && result && (
+            {isEditable && restampPressed && (
               <p className="mt-1">
                 Check the text still says what the data says.{' '}
-                <button type="button" className="underline font-medium" onClick={() => onChange({ baseline: stampBaseline(result) })}>
+                {/* #1714 (a), D396: every per-construct control names its construct, its words first. */}
+                <button type="button" className="underline font-medium" onClick={restampPressed}
+                  aria-label={`Accept the new numbers for ${construct}`}>
                   Accept the new numbers
                 </button>
               </p>
             )}
           </div>
         )}
+        {(drift.kind === 'other_scope' || drift.kind === 'cleared') && (
+          <div role="status" className="mb-2 rounded-md border border-mm-border-subtle bg-mm-surface-hover px-3 py-2 text-xs text-mm-text-secondary">
+            <p>
+              {drift.kind === 'cleared' ? driftClearedText(formatWrittenDate(drift.stampedAt)) : DRIFT_OTHER_SCOPE_TEXT}
+              {isEditable && restampPressed && (
+                <>
+                  {' '}
+                  <button type="button" className="underline font-medium" onClick={restampPressed}
+                    aria-label={`${DRIFT_ACCEPT_CURRENT_TEXT} for ${construct}`}>
+                    {DRIFT_ACCEPT_CURRENT_TEXT}
+                  </button>
+                </>
+              )}
+            </p>
+          </div>
+        )}
         {isEditable ? (
           <div className="space-y-2">
             <Textarea
-              id={`${fieldId}-meta-text`}
+              id={metaTextId}
               aria-label={`Meta-inference for ${construct}`}
               placeholder="What do the strands say together about this construct?"
               value={text}
@@ -360,7 +396,11 @@ export default function ConstructDetail({
               rows={3}
             />
             <fieldset className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-              <legend className="text-mm-text-secondary mr-1 float-left">Type (optional)</legend>
+              <legend className="text-mm-text-secondary mr-1 float-left">
+                {/* The space sits OUTSIDE the sr-only span: a name computation may trim a child's
+                    own leading space, which ran "Type (optional)— …" together (#1713's shape). */}
+                Type (optional) <span className="sr-only">— meta-inference for {construct}</span>
+              </legend>
               {META_INFERENCE_LEVELS.map(t => (
                 <label key={t.key} className="inline-flex items-center gap-1" title={t.definition}>
                   <input type="radio" name={`${fieldId}-level`} checked={level === t.key}
@@ -384,7 +424,11 @@ export default function ConstructDetail({
             </fieldset>
             <p className="text-xs text-mm-text-muted">{META_INFERENCE_CITATION}</p>
             <div className="flex items-center gap-2">
-              <Button type="button" size="sm" disabled={!dirty} onClick={saveMeta}>Save meta-inference</Button>
+              <Button type="button" size="sm" disabled={!dirty} aria-label={`Save meta-inference for ${construct}`} onClick={e => {
+                const land = landOnMetaText(e.currentTarget)
+                saveMeta()
+                land()
+              }}>Save meta-inference</Button>
               {byline() && <span className="text-xs text-mm-text-muted">{byline()}</span>}
             </div>
           </div>
@@ -488,6 +532,14 @@ function PairFits({ construct, display, row, result, isEditable, fieldId, onChan
           if (strandsNow[0] === strandsNow[1]) strandsNow[1 - at] = stored[i].strands[at]
           write(stored.map((f, j) => (j === i ? { ...f, strands: strandsNow } : f)))
         }
+        // #1704 (a) (D383): a pair ANOTHER fit records is not offered — choosing it made two fits
+        // of one pair, and `rowFits`' de-duplication then silently dropped the one being edited.
+        const recordedElsewhere = (a: string, b: string) => stored.some((f, j) => j !== i
+          && ((f.strands[0] === a && f.strands[1] === b) || (f.strands[0] === b && f.strands[1] === a)))
+        // The first select's pick swaps the two when it names the second strand (`setPair`), so
+        // that option keeps this fit's own pair and is always offered.
+        const firstOptions = strands.filter(st => st.key === pair[1].key || !recordedElsewhere(st.key, pair[1].key))
+        const secondOptions = strands.filter(st => st.key !== pair[0].key && !recordedElsewhere(pair[0].key, st.key))
         return (
           <div key={`${pair[0].key}|${pair[1].key}`} className="space-y-1" data-fit>
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
@@ -495,12 +547,12 @@ function PairFits({ construct, display, row, result, isEditable, fieldId, onChan
                 <>
                   <select aria-label={`First strand of fit ${i + 1} for ${construct}`} className={cls} value={pair[0].key}
                     onChange={e => setPair(0, e.target.value)}>
-                    {strands.map(st => <option key={st.key} value={st.key}>{strandTag(display, st)}</option>)}
+                    {firstOptions.map(st => <option key={st.key} value={st.key}>{strandTag(display, st)}</option>)}
                   </select>
                   <span aria-hidden className="text-mm-text-secondary">·</span>
                   <select aria-label={`Second strand of fit ${i + 1} for ${construct}`} className={cls} value={pair[1].key}
                     onChange={e => setPair(1, e.target.value)}>
-                    {strands.filter(st => st.key !== pair[0].key).map(st => <option key={st.key} value={st.key}>{strandTag(display, st)}</option>)}
+                    {secondOptions.map(st => <option key={st.key} value={st.key}>{strandTag(display, st)}</option>)}
                   </select>
                 </>
               ) : <span className="font-medium text-mm-text-secondary">{name}</span>}
@@ -541,7 +593,7 @@ function PairFits({ construct, display, row, result, isEditable, fieldId, onChan
         )
       })}
       {next && (
-        <Button type="button" variant="outline" size="sm" data-fit-add
+        <Button type="button" variant="outline" size="sm" data-fit-add aria-label={`${ADD_FIT_PAIR_TEXT} for ${construct}`}
           onClick={e => {
             // #1660 (D345): adding the LAST pair unmounts this button (`nextPair` is then null) —
             // land on the new fit. Below that, the button stays and keeps focus.
@@ -596,6 +648,10 @@ function PinCard({
 }) {
   const [purpose, setPurpose] = useState(pin.purpose)
   const role = PIN_ROLES.find(r => r.key === pin.role)
+  // #1714 (b), D397: each per-pin control names its quote (two pins in a group gave two of each,
+  // named nothing); the picker's own *Pin “…”* is the shape. A pin with no words says "this quote".
+  const words = wholeQuoteLabel(pin.displayText ?? '')
+  const quoted = words ? `“${words}”` : 'this quote'
   return (
     <div className="rounded-md border border-mm-border-subtle bg-mm-surface px-3 py-2">
       <blockquote className="text-sm text-mm-text">“{pin.displayText}”</blockquote>
@@ -603,7 +659,7 @@ function PinCard({
         {attribution && <span>{attribution}</span>}
         {isEditable ? (
           <select
-            aria-label="What this quote is"
+            aria-label={`Role of ${quoted}`}
             className="h-6 rounded border border-mm-border-medium bg-mm-surface px-1 text-xs text-mm-text"
             value={pin.role ?? ''}
             onChange={e => onChange({ ...pin, role: (e.target.value || null) as PinRole | null })}
@@ -613,7 +669,7 @@ function PinCard({
           </select>
         ) : role && <span>{role.label}</span>}
         {isEditable && (
-          <button type="button" onClick={e => onRemove(e.currentTarget)} aria-label="Unpin this quote" data-unpin
+          <button type="button" onClick={e => onRemove(e.currentTarget)} aria-label={`Unpin ${quoted}`} data-unpin
             className="ml-auto p-0.5 rounded text-mm-text-faint hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30">
             <Trash2 className="w-3.5 h-3.5" aria-hidden />
           </button>
@@ -621,7 +677,7 @@ function PinCard({
       </div>
       {pin.role === 'discrepant' && (isEditable ? (
         <input
-          aria-label="Why this discrepant quote is here"
+          aria-label={`Why ${quoted} is here`}
           className="mt-1 w-full h-7 rounded border border-mm-border-medium bg-mm-surface px-2 text-xs text-mm-text"
           placeholder="Why it is here, in one line"
           value={purpose}
@@ -653,7 +709,7 @@ function MisfitSection({ construct, display, row, strands, cases, inactiveCodes,
   const read = reads.get(row.key)
   const m = row.misfit
   const conditions = m?.rule?.conditions ?? []
-  const names = ruleNamesFrom(display, cases.groupBy, {
+  const names = ruleNamesFrom(display, {
     codes: strands.flatMap(rs => rs.result?.codes ?? []),
     variables: strands.flatMap(rs => rs.result?.variables ?? []),
     inactive: inactiveCodes,  // #1664 (D333): a rule naming one names it

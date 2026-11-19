@@ -113,7 +113,10 @@ from ..models.excerpt import Excerpt
 from ..models.note import Note
 from ..models.memo import Memo
 from ..models.row_score import RowScore
-from .canvas_embed_scrub import ACT_REPORT, UnplacedCanvasQuotes, count_misfit_cases
+from .canvas_embed_scrub import (
+    ACT_REPORT, UnplacedCanvasQuotes, canvas_quote_counts, count_drift_stamps, count_misfit_cases,
+    read_canvas_copies,
+)
 from .participant_dataset import MANAGED_COLUMN_SOURCE
 from .tombstones import identifier_key
 
@@ -181,6 +184,11 @@ class DocumentTouchpoint:
     code_applications: int = 0
     excerpts: int = 0
     notes: int = 0
+    #: #1702 (D382) — how many canvas quotes (embeds and joint display pins, sections and
+    #: snapshots) show this document's passages. They stay with the document, which stays for
+    #: the researcher to read; the confirm's document line counts them so that reading finds
+    #: them. NOT in `total_items` (nothing here is removed).
+    canvas_quotes: int = 0
 
 
 #: How a project is linked to this one by a Duplicate (#1606, D234): ``"copy"`` — it was
@@ -248,6 +256,10 @@ class WithdrawalReport:
     # and snapshot copies), so the confirm says how many. Beside `total_items`, as the
     # canvas quotes are (the withdrawal's data items stay the count they were).
     canvas_misfit_cases: int = 0
+    # #1674 D357 — the drift stamps the withdrawal CLEARS: every set of numbers saved beside a
+    # meta-inference in the project's joint displays (sections and snapshot copies). Beside
+    # `total_items`, as the cases are; a stamp is the researcher's, re-made with one press.
+    canvas_drift_stamps: int = 0
     # #1606 D234 — other projects here holding someone with this ID (a Duplicate made
     # before the withdrawal keeps everything). Possibly the same person, never provably:
     # beside the report, NOT in `total_items` — the withdrawal does not reach them.
@@ -612,8 +624,8 @@ def build_withdrawal_report(
 
     Raises `canvas_embed_scrub.CanvasScrubError` on a canvas copy it cannot read, naming the
     copy in ``act``'s words (#1667, D341): the report's own (`ACT_REPORT`, read by both
-    Participants-page confirms and the panel), or `ACT_WITHDRAWAL` when `apply_withdrawal`
-    builds it as its first step — the act's refusal keeps the act's words.
+    Participants-page confirms and the panel). (`apply_withdrawal` no longer builds it — #1676
+    D363: the endpoint refuses an unreadable copy before its backup instead.)
     """
     # ── The conversation side, via Speaker ────────────────────────────────
     #
@@ -724,12 +736,19 @@ def build_withdrawal_report(
     # segments are the unit, counted with the same unfiltered rule as the
     # conversation arm (a merged/split-away segment still holds the words).
     documents: list[DocumentTouchpoint] = []
+    # #1702 (D382): each linked document's quotes (any shape), for its canvas count below —
+    # joined through the segment's document, so no id list is bound.
+    doc_excerpts: dict[int, list[int]] = {}
     linked_docs = (
         db.query(Document)
         .filter(Document.participant_id == participant.id)
         .all()
     )
     for doc in linked_docs:
+        doc_excerpts[doc.id] = [eid for (eid,) in (
+            db.query(Excerpt.id).join(Segment, Excerpt.segment_id == Segment.id)
+            .filter(Segment.document_id == doc.id)
+        )]
         seg_ids = [
             s[0] for s in
             db.query(Segment.id).filter(Segment.document_id == doc.id).all()
@@ -751,6 +770,17 @@ def build_withdrawal_report(
     # the act leaves. ⚠️ Imported here: `withdrawal_redaction` imports this module.
     from .withdrawal_redaction import canvas_quotes_unplaced
 
+    # #1676 D362 — every canvas copy parsed ONCE for the report's three canvas counts. It was
+    # parsed per count, on every participant panel open: 4.5 s on the slice 2 build's heavy
+    # canvas, which is also why the endpoint is `def`.
+    copies = read_canvas_copies(db, participant.project_id, act=act)
+    # #1702 (D382): a linked document stays (row 46), and so do its passages quoted on the
+    # canvas, with any line written beside a pin — the confirm's document line counts them.
+    if documents:
+        quote_counts = canvas_quote_counts(db, participant.project_id, act=act, copies=copies)
+        for tp in documents:
+            tp.canvas_quotes = sum(quote_counts[eid] for eid in doc_excerpts[tp.document_id])
+
     return WithdrawalReport(
         participant_id=participant.id,
         identifier=participant.identifier,
@@ -763,9 +793,11 @@ def build_withdrawal_report(
         documents=sorted(documents, key=lambda d: d.document_id),
         unlinked_records_with_identifier=_unlinked_records_with_identifier(db, participant),
         canvas_quotes_unplaced=canvas_quotes_unplaced(
-            db, participant.project_id, answer_ids, act=act),
+            db, participant.project_id, answer_ids, act=act, copies=copies),
         canvas_misfit_cases=count_misfit_cases(
-            db, participant.project_id, participant.id, act=act),
+            db, participant.project_id, participant.id, act=act, copies=copies),
+        canvas_drift_stamps=count_drift_stamps(
+            db, participant.project_id, act=act, copies=copies),
         other_projects_with_identifier=other_projects_with_identifier(
             db, participant.project_id, participant.identifier),
         pre_update_copies=pre_update_copies(),

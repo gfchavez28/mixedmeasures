@@ -33,7 +33,7 @@ const facts = (used: boolean | null, hours: number | null) => ({
 function resp(over: Partial<JointDisplayCasesResponse> = {}): JointDisplayCasesResponse {
   return {
     groups: ['High', 'Low'], total: 3, listed: 3, matched: null, unknown: null, rule_unavailable_reason: null,
-    rule_withheld_columns: [], list_size: 0, added_outside: 0,
+    rule_withheld_columns: [], rule_missing_groups: [], list_size: 0, added_outside: 0,
     codes: [{ code_id: 3, name: 'Positive response' }],
     variables: [{ column_id: 8, name: 'Training hours', dataset_id: 1, withheld: false, operators: ['lt', 'le', 'gt', 'ge', 'eq', 'ne', 'missing'] }],
     cases: [
@@ -53,7 +53,7 @@ function renderView(misfit: unknown = null, over: { noViewer?: boolean; scope?: 
   render(
     <QueryClientProvider client={client()}>
       <CaseView open onOpenChange={vi.fn()} projectId={9} display={display} rowKey="r1"
-        scope={over.scope ?? displayCoderScope(false, 1)} noViewer={over.noViewer ?? false} groupBy="Gain group" onCommit={onCommit} />
+        scope={over.scope ?? displayCoderScope(false, 1)} noViewer={over.noViewer ?? false} onCommit={onCommit} />
     </QueryClientProvider>,
   )
   return { onCommit, stored: () => stored }
@@ -138,7 +138,7 @@ describe('the rule editor (r3-1, r3-10)', () => {
     fireEvent.click(await screen.findByRole('button', { name: W.RULE_ADD_CONDITION_TEXT }))
     expect(screen.getByRole('combobox', { name: W.ruleFieldLabel(1, 'what') })).toHaveFocus()
     fireEvent.change(screen.getByRole('combobox', { name: W.ruleFieldLabel(1, 'group') }), { target: { value: 'High' } })
-    expect(screen.getByText('Gain group is “High”')).toBeInTheDocument()
+    expect(screen.getByText('in the group “High”')).toBeInTheDocument()
     // a draft is never evaluated: still the first read only
     expect(api.cases.mock.calls.every(c => c[1].rule == null)).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: W.RULE_SAVE_TEXT }))
@@ -181,7 +181,7 @@ describe('the open construct’s section (r5-1)', () => {
           withholding={false} authorName={() => null} facts={new Map()} factsState="ready"
           results={{ status: 'none', results: new Map(), tables: new Map() } as never} draftKey="k-detail"
           onChange={vi.fn()} onPinRequest={null}
-          cases={{ projectId: 9, scope: displayCoderScope(false, 1), settled: true, noViewer: false, groupBy: 'Gain group' }}
+          cases={{ projectId: 9, scope: displayCoderScope(false, 1), settled: true, noViewer: false }}
           onCasesRequest={onCasesRequest} />
       </QueryClientProvider>,
     )
@@ -199,7 +199,7 @@ describe('the open construct’s section (r5-1)', () => {
   it('a rule and an added case: the sentence, then the count and the case by identifier, from a count-only read', async () => {
     api.cases.mockResolvedValue(resp({ matched: 3, unknown: 2, total: 22, named_cases: [{ participant_id: 11, label: 'T11', group: 'Low' }] }))
     renderDetail({ rule: { conditions: [{ kind: 'group', group: 'High' }] }, added: [{ participant_id: 11, reason: 'Moved' }], removed: [] })
-    expect(screen.getByText(/Gain group is “High”/)).toBeInTheDocument()
+    expect(screen.getByText(/in the group “High”/)).toBeInTheDocument()
     expect(await screen.findByText(W.misfitCountText(3, 22, 2))).toBeInTheDocument()
     expect(screen.getByText('T11 — Moved')).toBeInTheDocument()
     expect(api.cases.mock.calls[0][1]).toMatchObject({ limit: 0, added_participant_ids: [11] })
@@ -220,7 +220,7 @@ describe('the open construct’s section (r5-1)', () => {
           withholding authorName={() => null} facts={new Map()} factsState="ready"
           results={{ status: 'none', results: new Map(), tables: new Map() } as never} draftKey="k-detail-2"
           onChange={vi.fn()} onPinRequest={null}
-          cases={{ projectId: 9, scope: displayCoderScope(true, null), settled: true, noViewer: true, groupBy: 'Gain group' }}
+          cases={{ projectId: 9, scope: displayCoderScope(true, null), settled: true, noViewer: true }}
           onCasesRequest={null} />
       </QueryClientProvider>,
     )

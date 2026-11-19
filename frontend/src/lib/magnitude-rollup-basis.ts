@@ -208,6 +208,19 @@ export function describeExclusion(reason: string): string {
   return (EXCLUSION_WORDS as Record<string, string>)[reason] ?? reason
 }
 
+/**
+ * #1675 D360 — what *Refresh scores* says while blind mode withholds: only that it ran. The
+ * refresh is rightly unscoped (it builds the shared snapshot), so its report counts every
+ * coder's ratings — `participants_scored`, `participants_coded_unrated`, `excluded_ratings` —
+ * the figures #1615 withheld from a blind viewer elsewhere (`total_valid_n`).
+ */
+export const SCORES_REFRESHED_TEXT = 'Scores refreshed.'
+
+/** The refresh's toast: the report's figures, or only `SCORES_REFRESHED_TEXT` while withholding. */
+export function refreshToastText(report: Parameters<typeof describeRefresh>[0], withholding: boolean): string {
+  return withholding ? SCORES_REFRESHED_TEXT : describeRefresh(report)
+}
+
 /** One sentence summarising a refresh, for the toast.
  *
  *  Leads with what LANDED and then with what did not, because both are results:

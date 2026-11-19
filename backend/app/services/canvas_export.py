@@ -69,8 +69,9 @@ class DisplayTable:
     print — `lib/joint-display-report.ts::buildJointDisplayReport` builds it once, from the
     display's LIVE numbers under the viewer's blind scope — so the server writes strings and
     derives nothing (#1406 D5's rule for chart tables, here for the display). Unlike a chart
-    table it carries its ``note`` (the bases, the definitions, the scope, the date — D176's
-    build note: the note must reach Word too) and ``span_rows``: a different-unit result's row
+    table it carries its ``note`` (each basis briefly, the scope, the date — D176's build note:
+    the note must reach Word too), its ``definitions`` (the notice rule, 2026-11-18: the full
+    bases and definitions, printed after the appendix) and ``span_rows``: a different-unit result's row
     beside its construct, one cell merged across the table. ``message`` replaces the table
     when there is nothing to tabulate; ``too_large`` marks one the router refused for size.
     """
@@ -82,6 +83,11 @@ class DisplayTable:
     note: str = ""
     appendix: list[DisplayAppendix] = field(default_factory=list)
     too_large: bool = False
+    #: The notice rule (2026-11-18, rewrite D): the full bases and definitions, the cases that
+    #: don't fit and the citations moved out of ``note``. Printed after the appendix under
+    #: ``definitions_title``, one paragraph each.
+    definitions_title: str = ""
+    definitions: list[str] = field(default_factory=list)
 
 
 # ── Tiptap → docx walker ─────────────────────────────────────────────────────
@@ -323,6 +329,10 @@ def _render_display(doc: Document, table: DisplayTable | None) -> None:
         doc.add_paragraph().add_run(a.title).bold = True
         _write_table(doc, a.headers, a.rows)
         _write_note(doc, a.note)
+    if table.definitions:
+        doc.add_paragraph().add_run(table.definitions_title or "Definitions").bold = True
+        for paragraph in table.definitions:
+            _write_note(doc, paragraph)
 
 
 def _render_node(
@@ -588,6 +598,8 @@ def _clean_display(t: DisplayTable) -> DisplayTable:
             for a in t.appendix
         ],
         too_large=t.too_large,
+        definitions_title=clean(t.definitions_title),
+        definitions=[clean(p) for p in t.definitions],
     )
 
 

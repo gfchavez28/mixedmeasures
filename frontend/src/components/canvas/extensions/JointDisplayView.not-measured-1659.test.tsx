@@ -110,9 +110,9 @@ function mount() {
 beforeEach(() => { api.compute.mockResolvedValue(payload()) })
 afterEach(() => { cleanup(); vi.clearAllMocks() })
 
-/** The not-measured line for a strand: the cell whose tag is the strand's name. */
+/** The not-measured line for a strand: the row header whose tag is the strand's name (#1713, D393). */
 function lineOf(table: HTMLElement, tag: string): HTMLElement {
-  return within(table).getByText(tag, { selector: 'span' }).closest('td')!
+  return within(table).getByText(tag, { selector: 'span' }).closest('th')!
 }
 
 describe('#1659 — the Compact view says why a strand is not measured', () => {
@@ -134,6 +134,15 @@ describe('#1659 — the Compact view says why a strand is not measured', () => {
     mount()
     const table = await screen.findByRole('table')
     expect(lineOf(table, 'Baseline survey')).toHaveTextContent('Not measured: no variable bound')
+  })
+
+  it('#1713 D393: a not-measured line is a ROW HEADER named "<tag>: <why>", never a cell no header names', async () => {
+    mount()
+    const table = await screen.findByRole('table')
+    expect(within(table).getByRole('rowheader', { name: 'Baseline survey: Not measured: no variable bound' })).toBeInTheDocument()
+    expect(within(table).getByRole('rowheader', { name: 'Interviews: Not measured: what it binds is inactive in the codebook' }))
+      .toBeInTheDocument()
+    expect(within(table).queryByRole('cell', { name: /Not measured/ })).toBeNull()
   })
 
   it('the open construct’s strand status gives each strand its own reason, not the shared sentence', async () => {

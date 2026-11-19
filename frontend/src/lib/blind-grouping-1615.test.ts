@@ -59,9 +59,10 @@ describe('#1615 — the wiring (a source scan)', () => {
   })
 
   it("a pin's facts carry the display's blind scope in the request and the key, and wait for it", () => {
-    expect(view).toContain("display.attribution.column_id, scope.coderIds?.join(',') ?? 'every-coder']")
-    expect(view).toContain('coder_ids: scope.coderIds,')
-    expect(view).toContain('enabled: pinIds.length > 0 && scopeReady,')
+    // #1675 D361: the scope is null (no read) for a blind viewer the client cannot name.
+    expect(view).toContain("display.attribution.column_id, scope?.coderIds?.join(',') ?? 'every-coder']")
+    expect(view).toContain('coder_ids: scope!.coderIds,')
+    expect(view).toContain('enabled: pinIds.length > 0 && scopeReady && scope != null,')
   })
 
   it('a withheld strand is told apart from a not-summarisable one on screen and in the report', () => {

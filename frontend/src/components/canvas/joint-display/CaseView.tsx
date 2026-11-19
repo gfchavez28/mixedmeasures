@@ -54,12 +54,11 @@ export interface CaseViewProps {
   projectId: number
   display: JointDisplay
   rowKey: string
-  /** The compute's own scope (D175) — never a second derivation. */
-  scope: DisplayCoderScope
+  /** The compute's own scope (D175) — never a second derivation; null = none (D361). */
+  scope: DisplayCoderScope | null
   /** Withholding with no viewer id (D96): no read. */
   noViewer: boolean
-  /** The grouping variable's name, as the compute answered it — the rule's group clause. */
-  groupBy: string
+  // #1703 (b) (D372): no `groupBy` — a group condition reads by its group alone.
   /** Applies `update` to the LIVE row's misfit (`commitDisplay`); false when the display is gone. */
   onCommit: (update: MisfitUpdate) => boolean
 }
@@ -87,7 +86,7 @@ export default function CaseView(props: CaseViewProps) {
 type Heads = Pick<JointDisplayCasesResponse, 'groups' | 'codes' | 'variables'> & { inactive: JointDisplayInactiveCode[] }
 type Pending = { action: 'add' | 'remove'; participantId: number; label: string; group: string }
 
-function CaseViewBody({ projectId, display, row, rowKey, scope, noViewer, groupBy, onCommit }: CaseViewProps & { row: JointDisplayRow }) {
+function CaseViewBody({ projectId, display, row, rowKey, scope, noViewer, onCommit }: CaseViewProps & { row: JointDisplayRow }) {
   const uid = useId()
   // The misfit as this dialog last WROTE it (each write also goes to the live node).
   const [misfit, setMisfit] = useState<JointDisplayMisfit | null>(row.misfit)
@@ -137,7 +136,7 @@ function CaseViewBody({ projectId, display, row, rowKey, scope, noViewer, groupB
     return true
   }
   const conditions = misfit?.rule?.conditions ?? []
-  const names = heads ? ruleNamesFrom(display, groupBy, heads) : null
+  const names = heads ? ruleNamesFrom(display, heads) : null
 
   // ── The disabled cases first (`list-load-state.md` §7) ──
   if (noViewer) return <p className="text-sm text-mm-text">{W.CASES_NO_VIEWER_TEXT}</p>
@@ -180,7 +179,6 @@ function CaseViewBody({ projectId, display, row, rowKey, scope, noViewer, groupB
         heads={heads}
         display={display}
         row={row}
-        groupBy={groupBy}
         sentence={names && conditions.length ? ruleSentence(conditions, names) : null}
         onSave={next => { if (commit(m => withRule(m, next))) setOffset(0) }}
       />
@@ -442,12 +440,11 @@ function fromDrafts(drafts: Draft[]): { conditions: MisfitCondition[]; missing: 
   return { conditions, missing }
 }
 
-function RuleEditor({ saved, heads, display, row, groupBy, sentence, onSave }: {
+function RuleEditor({ saved, heads, display, row, sentence, onSave }: {
   saved: MisfitCondition[]
   heads: Heads | null
   display: JointDisplay
   row: JointDisplayRow
-  groupBy: string
   /** The SAVED rule's sentence (r3-10), from the read's own names. */
   sentence: string | null
   onSave: (conditions: MisfitCondition[] | null) => void
@@ -477,7 +474,7 @@ function RuleEditor({ saved, heads, display, row, groupBy, sentence, onSave }: {
     .map(c => ({ value: `c:${c.strand_key}:${c.code_id}`, label: `${c.name}${codeStrands.length > 1
       ? ` · ${strandTag(display, codeStrands.find(s => s.key === c.strand_key)!)}` : ''}${W.RULE_INACTIVE_OPTION_SUFFIX}` }))
   const varOptions = (heads?.variables ?? []).filter(v => v.operators.length > 0)
-  const draftNames = heads ? ruleNamesFrom(display, groupBy, heads) : null
+  const draftNames = heads ? ruleNamesFrom(display, heads) : null
   const current = heads ? fromDrafts(drafts) : null
   // #1661: once the lines are drawn, the sentence is the DRAFT's — never the saved rule's, which
   // it fell back to whenever the draft held no finished line (the saved rule above an emptied list).
@@ -523,6 +520,12 @@ function RuleEditor({ saved, heads, display, row, groupBy, sentence, onSave }: {
                     <span className="text-mm-text-secondary">is</span>
                     <select aria-label={W.ruleFieldLabel(i + 1, 'group')} className={cls} value={d.group} onChange={e => set(i, { group: e.target.value })}>
                       <option value="">…</option>
+                      {/* #1703 (c) (D373): a group the condition names that the display does not have
+                          now (a regroup, a relabel) is shown as HELD — disabled and selected — never
+                          as "…" (D346's shape). Choosing a current group replaces it. */}
+                      {d.group !== '' && !heads.groups.includes(d.group) && (
+                        <option value={d.group} disabled>{W.heldGroupOptionText(d.group)}</option>
+                      )}
                       {heads.groups.map(g => <option key={g} value={g}>{g}</option>)}
                     </select>
                   </>

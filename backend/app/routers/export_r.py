@@ -444,8 +444,79 @@ def _get_factor_mapping(
             levels = [_fmt_level_number(v) for v in reflected]
             codes = list(levels)  # what `value_numeric` holds — what .mm_num owes
         codes = [_fmt_level_number(c) for c in codes]
+        # 🔴 #1677 D364 — a stored CODE the declaration does not name (a code-cell import, a
+        # later value-label dictionary: `substitute_code` keeps both on purpose) is a category
+        # everywhere in the app — frequency, groups, the mean — so it is a level here too:
+        # #765's rule for nominal columns, reaching the numeric branch. Its level is the
+        # STORED number (the cell's own space — for a reverse primary, what the apply wrote,
+        # so its reflection is kept), labelled by its stored text, and registered so `.mm_num`
+        # recovers it. Before, `factor(levels = <declared>)` made every such cell NA.
+        known = {float(v) for v in levels if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        named = {str(l) for l in labels}
+        for value, text in _observed_numeric_strays(db, col, known):
+            label = text if text not in named else f"{text} ({_fmt_level_number(value)})"
+            named.add(label)
+            levels.append(_fmt_level_number(value))
+            labels.append(label)
+            codes.append(_fmt_level_number(value))
 
     return {"levels": levels, "labels": labels, "codes": codes}
+
+
+def _observed_numeric_strays(
+    db: Session, column: DatasetColumn, known: set[float],
+) -> list[tuple[float, str]]:
+    """#1677 D364 — the stored numbers of a numeric-cell factor column that no declared level
+    holds, each with its stored text (the first, canonically labelled), in numeric order.
+    A declared-missing cell is never one (its text is judged first, as everywhere)."""
+    rules = column_missing_rules(column)
+    as_label = answer_label_resolver(column)
+    found: dict[float, str] = {}
+    for text, number in (
+        db.query(DatasetValue.value_text, DatasetValue.value_numeric)
+        .filter(DatasetValue.column_id == column.id, DatasetValue.value_numeric != None)  # noqa: E711
+        .distinct()
+    ):
+        if number is None or float(number) in known:
+            continue
+        if text is not None and is_missing(text, rules):
+            continue
+        shown = as_label(text) if text and text.strip() else str(_fmt_level_number(number))
+        found.setdefault(float(number), shown)
+    return sorted(found.items())
+
+
+def _observed_unnumbered_answers(db: Session, column: DatasetColumn) -> list[tuple[str, int]]:
+    """#1677 D365 — answers of a numeric-cell factor column that carry NO number (an
+    ordinal CSV cell matching no label, which the import keeps): the app counts each as a
+    category, while its CSV cell here is blank, so R cannot. Each answer as the app names
+    it (`answer_label_resolver`) with its count, in the app's order; declared-missing and
+    blank cells are not answers."""
+    rules = column_missing_rules(column)
+    as_label = answer_label_resolver(column)
+    counts: dict[str, int] = {}
+    # Grouped by the stored text, so the read is bounded by DISTINCT answers, not rows: a
+    # column whose declared-missing cells hold no number has as many such rows as records.
+    for text, n in (
+        db.query(DatasetValue.value_text, func.count(DatasetValue.id))
+        .filter(DatasetValue.column_id == column.id, DatasetValue.value_numeric == None)  # noqa: E711
+        .group_by(DatasetValue.value_text)
+    ):
+        if text is None or not text.strip() or is_missing(text, rules):
+            continue
+        label = as_label(text)
+        counts[label] = counts.get(label, 0) + n
+    return [(a, counts[a]) for a in order_value_labels(set(counts))]
+
+
+def _unnumbered_answers_note(r_name: str, answers: list[tuple[str, int]]) -> str:
+    """#1677 D365 — the one sentence the script says about a column's answers with no number,
+    as a comment AND a printed line."""
+    total = sum(n for _, n in answers)
+    which = ", ".join(f"“{a}” {n}" for a, n in answers)
+    noun = "answer has" if total == 1 else "answers have"
+    return (f"{r_name}: {total} {noun} no number ({which}); Mixed Measures counts them as a "
+            "category, this script cannot.")
 
 
 def _get_observed_values(db: Session, column: DatasetColumn) -> list[str]:
@@ -957,8 +1028,12 @@ def _build_r_script(
     r_lines.append("# order, for the one test that takes \"the first two\". A saved test passes")
     r_lines.append("# `have_groups` (the fewest and most groups holding a value that it accepts)")
     r_lines.append("# and its name, and outside that range prints the app's refusal.")
+    r_lines.append("# `as_in_app = FALSE` where the grouping variable holds answers with no number,")
+    r_lines.append("# which Mixed Measures counts as groups and this script cannot (named above it).")
     r_lines.append(".mm_testable <- function(y, g, min_n = 2, groups = NULL, take = NULL,")
-    r_lines.append("                         have_groups = NULL, test_name = NULL) {")
+    r_lines.append("                         have_groups = NULL, test_name = NULL, as_in_app = TRUE) {")
+    r_lines.append("  as_app <- if (as_in_app) \"as in Mixed Measures.\" else")
+    r_lines.append("    \"(Mixed Measures also counts this variable's answers that have no number, which this script cannot).\"")
     r_lines.append("  ok <- !is.na(y) & !is.na(g)")
     r_lines.append("  lv <- if (is.null(groups)) levels(factor(g[ok])) else groups")
     r_lines.append("  y <- y[ok]")
@@ -970,7 +1045,7 @@ def _build_r_script(
     r_lines.append("      want <- if (have_groups[1] == have_groups[2]) \"exactly\" else \"at least\"")
     r_lines.append("      cat(\"Not computed:\", test_name, \"requires\", want, have_groups[1],")
     r_lines.append("          \"groups, got\", length(have), paste0(\"(\", paste(have, collapse = \", \"), \"),\"),")
-    r_lines.append("          \"as in Mixed Measures.\\n\")")
+    r_lines.append("          paste0(as_app, \"\\n\"))")
     r_lines.append("      return(invisible(NULL))")
     r_lines.append("    }")
     r_lines.append("  }")
@@ -981,7 +1056,7 @@ def _build_r_script(
     r_lines.append("  if (!is.null(take)) keep <- head(keep, take)")
     r_lines.append("  if (length(keep) < 2) {")
     r_lines.append("    cat(\"Not computed: fewer than two groups have\", min_n,")
-    r_lines.append("        \"or more values, as in Mixed Measures.\\n\")")
+    r_lines.append("        \"or more values,\", paste0(as_app, \"\\n\"))")
     r_lines.append("    return(invisible(NULL))")
     r_lines.append("  }")
     r_lines.append("  sel <- g %in% keep")
@@ -1062,6 +1137,18 @@ def _build_r_script(
             else f'"{_escape_r_string(str(v))}"'
             for v in levels
         )
+
+    # #1677 D365 — the numeric-cell factor columns holding answers with NO number: the script
+    # names them, and a test grouped by one does not claim to match the app's groups.
+    unnumbered_r_names: set[str] = set()
+
+    def _unnumbered_lines(r_name: str, col: DatasetColumn) -> list[str]:
+        answers = _observed_unnumbered_answers(db, col)
+        if not answers:
+            return []
+        unnumbered_r_names.add(r_name)
+        sentence = _unnumbered_answers_note(r_name, answers)
+        return [f"# {_escape_r_string(sentence)}", f'cat("{_escape_r_string(sentence)}\\n")']
 
     for cid, meta in col_meta.items():
         col = meta["col"]
@@ -1151,6 +1238,7 @@ def _build_r_script(
                 ordinal_lines.append(f"  levels = c({levels_str}),")
                 ordinal_lines.append(f"  labels = c({labels_str}),")
                 ordinal_lines.append("  ordered = TRUE)")
+                ordinal_lines += _unnumbered_lines(r_name, col)
                 ordinal_lines.append("")
                 _register_scale_codes(r_name, mapping["codes"])
             else:
@@ -1169,6 +1257,7 @@ def _build_r_script(
                 nominal_lines.append(f"data${r_name} <- factor(data${r_name},")
                 nominal_lines.append(f"  levels = c({levels_str}),")
                 nominal_lines.append(f"  labels = c({labels_str}))")
+                nominal_lines += _unnumbered_lines(r_name, col)
                 nominal_lines.append("")
                 _register_scale_codes(r_name, mapping["codes"])
             else:
@@ -2041,7 +2130,8 @@ def _build_r_script(
                 # raise and halt the script, and the saved ANOVA now leaves such
                 # a group out rather than refusing (D51).
                 st_y = f'.mm_num(data${tm_r}, "{tm_r}")'
-                st_g = f"data${tm_grp_r}"
+                # #1677 D365: a grouping with answers R cannot count never claims the app's groups.
+                st_g = f"data${tm_grp_r}" + (", as_in_app = FALSE" if tm_grp_r in unnumbered_r_names else "")
                 if st.stale:
                     # #1540 D-b: the app shows this test's LAST result until it is
                     # recomputed; the script computes it on the data as it is now.
@@ -2298,7 +2388,8 @@ def _build_r_script(
                 kind = "rank" if nonparam else ("t" if wants_t else "aov")
                 frame = f"cmp_{kind}_{vr}_by_{grp_r}"
                 y_expr = f'.mm_num({data_ref}${vr}, "{vr}")'
-                g_expr = f"{data_ref}${grp_r}"
+                # #1677 D365: a grouping with answers R cannot count never claims the app's groups.
+                g_expr = f"{data_ref}${grp_r}" + (", as_in_app = FALSE" if grp_r in unnumbered_r_names else "")
                 if nonparam:
                     rc_lines.append(
                         f"# Non-parametric test: {vr} by {grp_r}"

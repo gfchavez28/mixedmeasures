@@ -32,6 +32,7 @@ import {
   primaryFit,
   codeCellNote, codeDifferenceNote, effectNote, formatCodeDifference, formatEffect,
   formatObservationCode, formatRatingCell, formatStrandCodeCell, formatVariableCell, ratingCellNote, unresolvedReferenceCount, variableCellNote,
+  pinsOutsideGroups,
   type JointDisplay, type JointDisplayPin, type JointDisplayRow,
 } from '@/lib/joint-display'
 import {
@@ -43,7 +44,9 @@ import {
   META_INFERENCE_CITATION, META_INFERENCE_LEVELS, META_INFERENCE_TYPES, NOT_SUMMARISABLE_TEXT, RATING_WITHHELD_TEXT,
   PIN_ROLES, RATED_LINE_TAG, RATING_BASIS_TEXT, SERVER_VOCABULARY as V, STRAND_NOT_MEASURED_TEXT, fitTerm,
   fitVocabulary, metaInferenceTypeLabel, GROUPING_GONE_TEXT, inactiveCodeText, notMeasuredClause,
-  otherDatasetVariablesText,
+  otherDatasetVariablesText, pinsOutsideGroupsText,
+  NOTE_CODED_TEXT, NOTE_SURVEY_TEXT, NOTE_TEXT_CODES_TEXT, NOTE_RATING_TEXT, NOTE_OBSERVATION_TEXT,
+  CODED_DIFFERENCE_NO_INTERVAL_TEXT, DEFINITIONS_TITLE, DEFINITIONS_WITH_CASES_TITLE,
 } from '@/lib/joint-display-vocabulary'
 import type { DisplayResult } from '@/lib/joint-display-results'
 import {
@@ -90,8 +93,16 @@ export interface JointDisplayReport {
   message: string | null
   headers: string[]
   rows: ReportRow[]
+  /** Under the table: what each cell is, briefly, and what changes how this display reads. */
   note: string
   appendix: ReportAppendix[]
+  /**
+   * The notice rule (2026-11-18, rewrite D): the full bases and definitions, word for word, the
+   * cases that don't fit and the citations — one paragraph each. Every file prints them after the
+   * display under `definitionsTitle`; the Report view keeps them in a closed Details.
+   */
+  definitionsTitle: string
+  definitions: string[]
 }
 
 /** A bound result as the report reads it: what it is, and its own table (null: none shaped). */
@@ -234,7 +245,17 @@ function pinText(
   const meta = [who, role].filter(Boolean).join(', ')
   let text = `“${pin.displayText}”${meta ? ` (${meta})` : ''}`
   if (pin.role === 'discrepant' && pin.purpose.trim()) text += ` — ${pin.purpose.trim()}`
-  return text
+  return pinSentence(text)
+}
+
+/**
+ * #1700 (a) (D380) — each pin ends as a sentence: a cell joins its parts with a space, so a pin
+ * ending on its role or its purpose line ran straight into the next quote (*"…a vague goal
+ * “[Removed at the participant's request]” (discrepant)"*). A pin ending on its own closing
+ * quotation mark has already ended — a full stop after it would read `.”.`.
+ */
+function pinSentence(text: string): string {
+  return /[.!?…”]$/.test(text.trim()) ? text : `${text}.`
 }
 
 /** #1659 — "not measured (<why>)" inside a cell's sentence; the bare words with no reason. */
@@ -455,7 +476,7 @@ export function buildJointDisplayReport(inputs: ReportInputs, ctx: ReportContext
   const { display, data, facts, results } = inputs
   const title = reportTitle(display, data)
   const empty = (message: string): JointDisplayReport =>
-    ({ title, message, headers: [], rows: [], note: '', appendix: [] })
+    ({ title, message, headers: [], rows: [], note: '', appendix: [], definitionsTitle: '', definitions: [] })
   if (!data) return empty(inputs.unavailable ?? NO_GROUPING_TEXT)
   if (data.unavailable_reason) return empty(unavailableGroupsText(data))
 
@@ -501,6 +522,12 @@ export function buildJointDisplayReport(inputs: ReportInputs, ctx: ReportContext
         ...(implication ? [row.implication.trim() || 'Not written.'] : []),
       ],
     })
+    // #1671 D352: pins under a group this display does not have now are placed under none of
+    // its columns — counted and named under the row, so no file loses the researcher's evidence.
+    const outside = pinsOutsideGroups(row, groups.map(g => g.key))
+    if (outside.count > 0) {
+      rows.push({ kind: 'beside', rowKey: row.key, text: pinsOutsideGroupsText(outside.count, outside.groups) })
+    }
     // Joint display slice 2 (r2-6): an observation strand stands beside its construct.
     for (const rs of rowStrands(display, result, data.strands)) {
       if (rs.placement !== 'beside' || !result) continue
@@ -550,8 +577,15 @@ export function buildJointDisplayReport(inputs: ReportInputs, ctx: ReportContext
     }
   }
 
-  // ── The note (D174) ────────────────────────────────────────────────────────────────
+  // ── The note (D174) and its Definitions (the notice rule, 2026-11-18, rewrite D) ──────────
+  // `s` is the note under the table: what each cell is in one short sentence, and the facts that
+  // change how THIS display reads. `d` is the Definitions, one paragraph each: the full bases, the
+  // fit, meta-inference and quote-role definitions word for word, the clip rule, the cases that
+  // don't fit and the citations.
   const s: string[] = []
+  const d: string[] = []
+  const cells: string[] = []
+  let anyMisfitLine = false
   const ds = data.group_by.dataset_name ? ` (${data.group_by.dataset_name})` : ''
   s.push(`Groups: the participants with each value of ${data.group_by.name}${ds}; each heading gives the group's size.`)
   // Joint display slice 2 (r2-2, D174's "each strand and its unit"): the named strands, by kind.
@@ -561,7 +595,8 @@ export function buildJointDisplayReport(inputs: ReportInputs, ctx: ReportContext
     s.push(`${without} ${without === 1 ? 'participant has' : 'participants have'} no ${data.group_by.name} and ${without === 1 ? 'is' : 'are'} in no group.`)
   }
   if (anyCodes) {
-    s.push(CODED_COUNT_BASIS_TEXT)
+    s.push(NOTE_CODED_TEXT)
+    cells.push(CODED_COUNT_BASIS_TEXT)
     // #1626 (D244): who of them has no coding in scope, and what that does to a share —
     // here, so the Report view and every export say it (the one function they read).
     // R3: with two or more code strands, each strand's own denominators, named.
@@ -571,42 +606,54 @@ export function buildJointDisplayReport(inputs: ReportInputs, ctx: ReportContext
     }
   }
   if (anyVariables) {
-    s.push(SURVEY_CELL_BASIS_TEXT)
+    s.push(NOTE_SURVEY_TEXT)
+    cells.push(SURVEY_CELL_BASIS_TEXT)
   }
-  if (anyText) s.push(TEXT_CODES_BASIS_TEXT)
-  if (data.rating) s.push(RATING_BASIS_TEXT)
+  if (anyText) {
+    s.push(NOTE_TEXT_CODES_TEXT)
+    cells.push(TEXT_CODES_BASIS_TEXT)
+  }
+  if (data.rating) {
+    s.push(NOTE_RATING_TEXT)
+    cells.push(RATING_BASIS_TEXT)
+  }
   if (anyObservations) {
-    s.push(OBSERVATION_BASIS_TEXT)
-    if (observationSegmentation.has(V.STRAND_SEGMENTATION_OPEN)) s.push(OBSERVATION_CLIPS_OPEN_TEXT)
-    if (observationSegmentation.has(V.STRAND_SEGMENTATION_AGREED)) s.push(OBSERVATION_CLIPS_AGREED_TEXT)
-    for (const text of mixedClipsTexts) s.push(text)
-    s.push(OBSERVATION_BESIDE_TEXT)
+    s.push(NOTE_OBSERVATION_TEXT)
+    cells.push(OBSERVATION_BASIS_TEXT)
+    if (observationSegmentation.has(V.STRAND_SEGMENTATION_OPEN)) cells.push(OBSERVATION_CLIPS_OPEN_TEXT)
+    if (observationSegmentation.has(V.STRAND_SEGMENTATION_AGREED)) cells.push(OBSERVATION_CLIPS_AGREED_TEXT)
+    for (const text of mixedClipsTexts) cells.push(text)
+    cells.push(OBSERVATION_BESIDE_TEXT)
   }
+  if (cells.length > 0) d.push(cells.map(sentence).join(' '))
   if (anyCodes || anyVariables || anyText) {
     if (two) {
       const coded = display.settings.newcombe
-        ? 'a coded difference is in percentage points, its interval unadjusted, over the participants in these groups'
-        : 'a coded difference is in percentage points with no interval, because coded passages come from a chosen sample, not one built for estimation'
-      s.push(`Differences are ${groups[0].key} − ${groups[1].key}: d is Cohen's d, with its interval labelled beside it; ${coded}. No significance tests are reported.`)
+        ? 'a coded difference is in percentage points, its interval unadjusted'
+        : 'a coded difference is in percentage points, with no interval'
+      s.push(`Differences are ${groups[0].key} − ${groups[1].key}: d is Cohen's d, with its interval labelled beside it; ${coded}. No significance tests are reported for these differences.`)
+      d.push(display.settings.newcombe
+        ? 'A coded difference’s interval is over the participants in these groups.'
+        : CODED_DIFFERENCE_NO_INTERVAL_TEXT)
     } else {
       s.push('A difference is stated between two groups only, so none is shown. No significance tests are reported.')
     }
   }
   if (anyFormed) s.push(FORMED_GROUPS_HELP)
   const vocabulary = fitVocabulary(display.settings.fit_vocabulary)
-  s.push(`Fit, after ${bare(vocabulary.citation)}. ${definitions(vocabulary.terms)}`)
-  if (anyNotMeasured) s.push(STRAND_NOT_MEASURED_TEXT)
+  d.push(`Fit, after ${bare(vocabulary.citation)}. ${definitions(vocabulary.terms)}`
+    + (anyNotMeasured ? ` ${STRAND_NOT_MEASURED_TEXT}` : ''))
   if (levelsUsed.size > 0) {
     // Only the types the display USES — a note defining every term would bury the bases.
     const used = [
       ...META_INFERENCE_LEVELS.filter(t => levelsUsed.has(t.key)),
       ...META_INFERENCE_TYPES.filter(t => typesUsed.has(t.key)),
     ]
-    s.push(`Meta-inference types used here. ${definitions(used)} ${META_INFERENCE_CITATION}`)
+    d.push(`Meta-inference types used here. ${definitions(used)} ${META_INFERENCE_CITATION}`)
   }
   if (anyPins) {
     const by = ATTRIBUTION_MODES.find(m => m.key === display.attribution.label)?.label.toLowerCase() ?? 'participant identifier'
-    s.push(`Quotes are chosen by the researcher and labelled with their role. ${definitions(PIN_ROLES)} Each is attributed by ${by}.`)
+    d.push(`Quotes are chosen by the researcher and labelled with their role. ${definitions(PIN_ROLES)} Each is attributed by ${by}.`)
     // #1615 D286: the value beside each quote was left out while blind — said, never a gap.
     if (inputs.attributionWithheld) s.push(withheldAttributionNote(inputs.attributionWithheld))
     // #1653 (D346): the value beside each quote could not be read — who and where still are.
@@ -618,11 +665,11 @@ export function buildJointDisplayReport(inputs: ReportInputs, ctx: ReportContext
   for (const r of display.rows) {
     if (!hasMisfit(r)) continue
     const facts = inputs.misfits.get(r.key)
-    const { countText, identifier } = misfitNoteInputs(facts)
+    const { countText, identifier, outsideGroups } = misfitNoteInputs(facts)
     const conditions = r.misfit!.rule?.conditions ?? []
     const res = byKey.get(r.key) ?? null
     const strands = rowStrands(display, res)
-    const names = ruleNamesFrom(display, data.group_by.name, {
+    const names = ruleNamesFrom(display, {
       codes: strands.flatMap(rs => rs.result?.codes ?? []),
       variables: strands.flatMap(rs => rs.result?.variables ?? []),
       inactive: res?.inactive_codes,  // #1664 (D333): a rule naming one names it
@@ -630,12 +677,15 @@ export function buildJointDisplayReport(inputs: ReportInputs, ctx: ReportContext
     const line = misfitNoteLine({
       construct: r.construct.trim(), misfit: r.misfit!, attribution: display.attribution.label,
       sentence: conditions.length ? ruleSentence(conditions, names) : undefined, countText, identifier,
+      outsideGroups,  // #1703 (d) (D374): Compact's "(no longer in the display's groups)"
     })
-    if (line) s.push(line)
-    // With no rule there is no count to carry the unread sentence: say it after the cases.
-    if (line && !conditions.length && (facts == null || facts === 'unread')) s.push(countText)
+    if (line) {
+      // With no rule there is no count to carry the unread sentence: say it after the cases.
+      d.push(!conditions.length && (facts == null || facts === 'unread') ? `${sentence(line)} ${countText}` : line)
+      anyMisfitLine = true
+    }
   }
-  if (implication) s.push(IMPLICATION_CITATION)
+  if (implication) d.push(IMPLICATION_CITATION)
   if (ctx.withholding) {
     const me = ctx.self != null ? ctx.coderName(ctx.self) : null
     s.push(`Scope: coders: ${me ?? 'the exporting coder'} (blind mode). Coded counts and ratings are this coder's own, and a colleague's authorship is not named.`)
@@ -658,7 +708,12 @@ export function buildJointDisplayReport(inputs: ReportInputs, ctx: ReportContext
   s.push(`Numbers as computed on ${ctx.asOf}; in the app the display is live.`)
 
   const overview = strandOverview(display, byKey)
-  return { title, message: null, headers, rows, note: s.map(sentence).join(' '), appendix: overview ? [overview, ...appendix] : appendix }
+  return {
+    title, message: null, headers, rows, note: s.map(sentence).join(' '),
+    appendix: overview ? [overview, ...appendix] : appendix,
+    definitionsTitle: anyMisfitLine ? DEFINITIONS_WITH_CASES_TITLE : DEFINITIONS_TITLE,
+    definitions: d.map(sentence),
+  }
 }
 
 // ── Plain renderings (the Markdown and HTML exports) ────────────────────────────────
@@ -692,6 +747,11 @@ export function reportToMarkdown(report: JointDisplayReport): string {
     md += `**${mdCell(a.title)}**\n\n${mdGrid(a.table.headers, a.table.rows)}\n\n`
     if (a.table.note) md += `${mdBlock(a.table.note)}\n\n`
   }
+  // The notice rule (2026-11-18, rewrite D): the Definitions, in full, after the display.
+  if (report.definitions.length > 0) {
+    md += `**${mdCell(report.definitionsTitle)}**\n\n`
+    for (const p of report.definitions) md += `${mdBlock(p)}\n\n`
+  }
   return md
 }
 
@@ -714,6 +774,11 @@ export function reportToHtml(report: JointDisplayReport, esc: (s: unknown) => st
     html += '\n</tbody>\n</table>\n'
     if (a.table.note) html += `<p class="note">${esc(a.table.note)}</p>\n`
   }
+  // The notice rule (2026-11-18, rewrite D): the Definitions, in full, after the display.
+  if (report.definitions.length > 0) {
+    html += `<h5>${esc(report.definitionsTitle)}</h5>\n`
+    for (const p of report.definitions) html += `<p class="note">${esc(p)}</p>\n`
+  }
   return html + '</div>\n'
 }
 
@@ -729,6 +794,9 @@ export interface DocxDisplayTable {
   span_rows: number[]
   note: string
   appendix: { title: string; headers: string[]; rows: string[][]; note: string }[]
+  /** The notice rule (2026-11-18, rewrite D): printed after the appendix under its title. */
+  definitions_title: string
+  definitions: string[]
 }
 
 export function reportToDocx(report: JointDisplayReport): DocxDisplayTable {
@@ -746,5 +814,7 @@ export function reportToDocx(report: JointDisplayReport): DocxDisplayTable {
     span_rows,
     note: report.note,
     appendix: report.appendix.map(a => ({ title: a.title, headers: a.table.headers, rows: a.table.rows, note: a.table.note ?? '' })),
+    definitions_title: report.definitionsTitle,
+    definitions: report.definitions,
   }
 }

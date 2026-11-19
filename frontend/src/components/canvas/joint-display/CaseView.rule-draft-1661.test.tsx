@@ -29,7 +29,7 @@ const DISPLAY = {
 function resp(): JointDisplayCasesResponse {
   return {
     groups: ['High', 'Low'], total: 0, listed: 0, matched: null, unknown: null, rule_unavailable_reason: null,
-    rule_withheld_columns: [], list_size: 0, added_outside: 0,
+    rule_withheld_columns: [], rule_missing_groups: [], list_size: 0, added_outside: 0,
     codes: [{ code_id: 3, name: 'Positive response' }],
     variables: [{ column_id: 8, name: 'Training hours', dataset_id: 1, withheld: false, operators: ['lt', 'le', 'gt', 'ge', 'eq', 'ne', 'missing'] }],
     cases: [], named_cases: [], unavailable_reason: null,
@@ -43,7 +43,7 @@ function renderView(misfit: unknown = null) {
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <CaseView open onOpenChange={vi.fn()} projectId={9} display={display} rowKey="r1"
-        scope={displayCoderScope(false, 1)} noViewer={false} groupBy="Gain group" onCommit={onCommit} />
+        scope={displayCoderScope(false, 1)} noViewer={false} onCommit={onCommit} />
     </QueryClientProvider>,
   )
   return { onCommit }
@@ -89,7 +89,7 @@ describe('#1661 — an unfinished line is counted, never printed as “” and n
     await add()
     await add()
     what(3, 'v:8')
-    expect(await sentence()).toBe('Gain group is “High” (2 conditions not finished)')
+    expect(await sentence()).toBe('in the group “High” (2 conditions not finished)')
   })
 
   it('finishing the line drops the count (the positive control)', async () => {
@@ -98,7 +98,7 @@ describe('#1661 — an unfinished line is counted, never printed as “” and n
     await add()
     expect(await sentence()).toContain('not finished')
     group(1, 'Low')
-    expect(await sentence()).toBe('Gain group is “Low”')
+    expect(await sentence()).toBe('in the group “Low”')
   })
 
   it('Save still refuses an unfinished line, and writes nothing', async () => {
@@ -116,7 +116,7 @@ describe('#1661 — the sentence is the DRAFT’s, never the saved rule’s, onc
     api.cases.mockResolvedValue(resp())
     renderView(SAVED)
     await screen.findByRole('combobox', { name: W.ruleFieldLabel(1, 'group') })
-    expect(await sentence()).toBe('Gain group is “High”')
+    expect(await sentence()).toBe('in the group “High”')
   })
 
   it('removing the saved rule’s only line: "No rule stated", not the saved rule above an empty list', async () => {
@@ -135,8 +135,37 @@ describe('#1661 — the sentence is the DRAFT’s, never the saved rule’s, onc
     expect(await sentence()).toBe(`${W.RULE_NONE_FINISHED_TEXT} (1 condition not finished)`)
     // Discard brings the saved rule back, lines and sentence together
     fireEvent.click(screen.getByRole('button', { name: W.RULE_DISCARD_TEXT }))
-    expect(await sentence()).toBe('Gain group is “High”')
+    expect(await sentence()).toBe('in the group “High”')
     expect(within(screen.getByRole('dialog')).getByRole('combobox', { name: W.ruleFieldLabel(1, 'group') })).toHaveValue('High')
+  })
+})
+
+/**
+ * #1703 (c) (D373) — after a regroup the saved rule names a group the display does not have now.
+ * The select showed "…" (no option matched); it shows the held group, disabled and selected.
+ */
+describe('#1703 (c) (D373) — a held group in the rule editor', () => {
+  const HELD = { rule: { conditions: [{ kind: 'group', group: 'Community Health' }] }, added: [], removed: [] }
+
+  it('is shown selected and disabled, by name — never "…"', async () => {
+    api.cases.mockResolvedValue(resp())
+    renderView(HELD)
+    const select = await screen.findByRole('combobox', { name: W.ruleFieldLabel(1, 'group') }) as HTMLSelectElement
+    expect(select).toHaveValue('Community Health')
+    const held = within(select).getByRole('option', { name: W.heldGroupOptionText('Community Health') }) as HTMLOptionElement
+    expect(held.selected).toBe(true)
+    expect(held).toBeDisabled()
+    expect(select.selectedOptions[0].textContent).not.toBe('…')
+  })
+
+  it('choosing a current group replaces it; CONTROL: a current group is not shown as held', async () => {
+    api.cases.mockResolvedValue(resp())
+    renderView(HELD)
+    await screen.findByRole('combobox', { name: W.ruleFieldLabel(1, 'group') })
+    group(1, 'Low')
+    const select = screen.getByRole('combobox', { name: W.ruleFieldLabel(1, 'group') })
+    expect(select).toHaveValue('Low')
+    expect(within(select).queryByRole('option', { name: /not a group now/ })).toBeNull()
   })
 })
 

@@ -3,7 +3,9 @@
  * and a pin's attribution line. Kept out of the component files so fast refresh stays whole.
  */
 import type { JointDisplayPinFact, JointDisplayRowResult } from '@/lib/api'
-import { rowCells, type JointDisplay, type JointDisplayPin, type JointDisplayRowBaseline } from '@/lib/joint-display'
+import {
+  rowCells, type BaselineScope, type JointDisplay, type JointDisplayPin, type JointDisplayRowBaseline,
+} from '@/lib/joint-display'
 import { fingerprintJointDisplayRow } from '../figure-baseline'
 import { SERVER_VOCABULARY as V, surveyAnswerSourceText } from '@/lib/joint-display-vocabulary'
 
@@ -21,10 +23,14 @@ export function formatWrittenDate(iso: string | null | undefined): string {
     .toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
-/** The baseline a row takes when its meta-inference is saved or its new numbers accepted (D168.5). */
-export function stampBaseline(result: JointDisplayRowResult): JointDisplayRowBaseline {
+/**
+ * The baseline a row takes when its meta-inference is saved or its new numbers accepted (D168.5),
+ * recording the coder view `result` was read under (#1672 D353: `baselineScopeOf(scope)` — the
+ * argument is REQUIRED so no stamp is written without it).
+ */
+export function stampBaseline(result: JointDisplayRowResult, scope: BaselineScope): JointDisplayRowBaseline {
   const cells = rowCells(result)
-  return { hash: fingerprintJointDisplayRow(cells).hash, cells, stamped_at: todayIso() }
+  return { hash: fingerprintJointDisplayRow(cells).hash, cells, stamped_at: todayIso(), scope, cleared: null }
 }
 
 /**

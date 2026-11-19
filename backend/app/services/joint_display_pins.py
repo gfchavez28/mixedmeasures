@@ -37,7 +37,7 @@ from ..models.code_application import CodeApplication
 from ..models.conversation import Conversation
 from ..models.dataset import ColumnType, Dataset, DatasetColumn, DatasetRow, DatasetValue
 from ..models.document import Document
-from ..models.excerpt import Excerpt, answer_source_name
+from ..models.excerpt import Excerpt, answer_source_name, whole_segment_excerpt_filter
 from ..models.observation import Observation
 from ..models.participant import Participant
 from ..models.segment import Segment
@@ -133,7 +133,7 @@ def group_passages(
     # 🔴 An EMPTY participant list is "no filter" to the read below, so a group holding
     # nobody the sources link must answer here — never fall through with [].
     if not ids:
-        return _with_answers(_nothing(code), answer_total, answers, limit=limit, offset=offset)
+        return _with_answers(db, project_id, _nothing(code), answer_total, answers, limit=limit, offset=offset)
     result = get_segments_with_context(
         db,
         project_id,
@@ -161,11 +161,11 @@ def group_passages(
     # The participant filter leaves every clip out; said here so the totals cannot disagree.
     result["observations"] = []
     result["observation_total"] = 0
-    return _with_answers(result, answer_total, answers, limit=limit, offset=offset)
+    return _with_answers(db, project_id, result, answer_total, answers, limit=limit, offset=offset)
 
 
-def _with_answers(result: dict, answer_total: int, answers: list[dict], *,
-                  limit: int, offset: int) -> dict:
+def _with_answers(db: Session, project_id: int, result: dict, answer_total: int,
+                  answers: list[dict], *, limit: int, offset: int) -> dict:
     """The passage list's totals with the answers in (slice 2, r4-1) — ONE place, both exits."""
     result["answer_total"] = answer_total
     result["answers"] = answers
@@ -173,7 +173,28 @@ def _with_answers(result: dict, answer_total: int, answers: list[dict], *,
                                 + answer_total)
     result["has_more"] = (offset + limit) < max(result["conversation_total"],
                                                 result["document_total"], answer_total)
+    _add_whole_quote_ids(db, project_id, result)
     return result
+
+
+def _add_whole_quote_ids(db: Session, project_id: int, result: dict) -> None:
+    """#1704 (b) (D384) — each listed passage's WHOLE quote id: the one `whole-passage` returns.
+
+    A pin IS that quote, and the host refuses a second pin of one quote in a group by its id —
+    so the picker needs the id to say "pinned here" apart from "already a quote" (a quote
+    anywhere) before the press, where it learned it only from the toast. Matching by text
+    instead would mark every identical short answer ("Yes.") as pinned. Bounded by the page
+    (`limit` ≤ 200 per kind), so a plain `IN` is safe (`sql-id-sets.md`).
+    """
+    seg_ids = [s["id"] for grp in (*result.get("conversations", []), *result.get("documents", []))
+               for s in grp["segments"]]
+    dv_ids = [a["dataset_value_id"] for a in result.get("answers", [])]
+    result["segment_quote_ids"] = dict(db.query(Excerpt.segment_id, Excerpt.id).filter(
+        Excerpt.project_id == project_id, Excerpt.segment_id.in_(seg_ids),
+        whole_segment_excerpt_filter())) if seg_ids else {}
+    result["answer_quote_ids"] = dict(db.query(Excerpt.dataset_value_id, Excerpt.id).filter(
+        Excerpt.project_id == project_id, Excerpt.dataset_value_id.in_(dv_ids),
+        Excerpt.start_offset.is_(None))) if dv_ids else {}
 
 
 def _group_answers(

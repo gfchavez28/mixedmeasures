@@ -241,6 +241,10 @@ READERS = {
     ("services/joint_display_cases.py", "_compile_rule"),
     ("routers/export_r.py", "_get_observed_values"),
     ("routers/export_r.py", "export_r_data"),  # `_text_cell`'s per-column labels
+    # #1677 D364–D365: a numeric factor's stray code is a level labelled as the app names its
+    # category, and an answer with no number is named as the app counts it.
+    ("routers/export_r.py", "_observed_numeric_strays"),
+    ("routers/export_r.py", "_observed_unnumbered_answers"),
 }
 
 

@@ -966,7 +966,9 @@
  },
  "GET /api/projects/{project_id}/text-coding/record-context/{dataset_row_id}": {
   "body": null,
-  "query": []
+  "query": [
+   "coder_ids"
+  ]
  },
  "GET /api/projects/{project_id}/text-coding/records": {
   "body": null,

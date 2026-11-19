@@ -12,6 +12,7 @@ import {
 } from '@/lib/joint-display-report'
 import {
   FIT_FARMER, FIT_FETTERS, FORMED_GROUPS_HELP, META_INFERENCE_TYPES, PIN_ROLES, RATING_BASIS_TEXT,
+  NOTE_RATING_TEXT, CODED_DIFFERENCE_NO_INTERVAL_TEXT,
 } from '@/lib/joint-display-vocabulary'
 
 const DATA: JointDisplayComputeResponse = {
@@ -125,8 +126,8 @@ describe('the report table (D174)', () => {
     expect(r.construct).toBe('Training dosage')
     expect(r.cells[0]).toBe(
       'Survey: Training hours 23.90 (SD 9.80), n 11. Survey: Gain (formed the groups) 1.20 (SD 0.10), n 11. '
-      + 'Coded: Adequacy 10 of 11. Rated: Adequacy 2.45 (10 scores). “Maybe 32 hours | total.” (T-04 · FG 1, typical)',
-    )   // #1645: the rating is its own sentence, under no strand's name
+      + 'Coded: Adequacy 10 of 11. Rated: Adequacy 2.45 (10 scores). “Maybe 32 hours | total.” (T-04 · FG 1, typical).',
+    )   // #1645: the rating is its own sentence, under no strand's name; #1700 (a): so is each pin
     // The undefined SD says WHICH number is missing; a rating with no score says why; a withdrawn
     // pin keeps its blanked words and claims no one.
     expect(r.cells[1]).toContain('Survey: Training hours 7.00, n 1 (SD:')
@@ -136,6 +137,20 @@ describe('the report table (D174)', () => {
     expect(r.cells[1]).toContain('“We got 8.” (T-15 · FG 2, discrepant) — The one exception.')
     expect(r.cells[1]).toContain('“[withdrawn]”')
     expect(r.cells[1]).not.toMatch(/\[withdrawn\]” \(/)
+  })
+
+  it('#1700 (a) (D380): each pin ends as a sentence, so a purpose line never runs into the next quote', () => {
+    const [r1] = DISPLAY.rows
+    const display = { ...DISPLAY, rows: [{ ...r1, pins: [
+      { ...r1.pins[1], purpose: 'Ben, with a vague goal' },   // no full stop of its own
+      { ...r1.pins[2] },                                       // the next quote, blanked
+    ] }] }
+    const r = row(build({ display, data: { ...DATA, rows: [DATA.rows[0]] } }), 0)
+    if (r.kind !== 'construct') throw new Error('expected a construct row')
+    expect(r.cells[1]).toContain('— Ben, with a vague goal. “[withdrawn]”')
+    // A pin ending on its own closing quotation mark has already ended: no `.”.`.
+    expect(r.cells[1]).toMatch(/“\[withdrawn\]”$/)
+    expect(r.cells[1]).not.toContain('”.')
   })
 
   it('the difference column: d with its labelled interval, a coded share in pp, and a formed strand’s reason', () => {
@@ -190,31 +205,53 @@ describe('the report table (D174)', () => {
     expect(unplaceable.appendix).toEqual([])
   })
 
-  it('the note: bases, rating basis, the rule for differences, the definitions from the ONE vocabulary module', () => {
-    const n = build().note
+  it('the note: bases, rating basis, the rule for differences; the definitions from the ONE vocabulary module', () => {
+    const r = build()
+    const n = r.note
     expect(n).toMatch(/^Groups: the participants with each value of Gain group \(Roster\); each heading gives the group's size\./)
     expect(n).toContain('2 participants have no Gain group and are in no group.')
-    expect(n).toContain(RATING_BASIS_TEXT)
+    // The notice rule (2026-11-18, rewrite D): each basis short in the note …
+    expect(n).toContain(NOTE_RATING_TEXT)
+    expect(n).not.toContain(RATING_BASIS_TEXT)
     expect(n).toContain('Differences are High − Low')
-    expect(n).toContain('with no interval, because coded passages come from a chosen sample')
+    expect(n).toContain('a coded difference is in percentage points, with no interval. No significance tests are reported for these differences.')
     expect(n).toContain(FORMED_GROUPS_HELP)
     expect(n).toContain('1 bound item is no longer in this project and is left out.')
     // Two: the row's unresolved result id and its unresolved code id (D202, null in place).
     expect(n).toContain('2 references in this display did not travel with the project and are shown as missing.')
     expect(n).toMatch(/Numbers as computed on 12 Nov 2026; in the app the display is live\.$/)
-    // Vocabulary text IDENTICAL in the UI and the export: each definition verbatim from the module
-    // the Compact view shows it from.
-    expect(n).toContain('Fit, after Fetters, Curry & Creswell (2013), with silence after Farmer et al. (2006).')
-    for (const t of FIT_FETTERS.terms) expect(n).toContain(`${t.label}: ${t.definition}`)
-    expect(n).not.toContain(FIT_FARMER.terms.find(t => t.key === 'dissonance')!.label)
+    // … and word for word in the Definitions, with the fit, meta-inference and role definitions:
+    // vocabulary text IDENTICAL in the UI and the export, verbatim from the module the Compact
+    // view shows it from. None of it stays in the note.
+    const d = r.definitions.join(' ')
+    expect(r.definitionsTitle).toBe('Definitions')
+    expect(d).toContain(RATING_BASIS_TEXT)
+    expect(d).toContain(CODED_DIFFERENCE_NO_INTERVAL_TEXT)
+    expect(d).toContain('Fit, after Fetters, Curry & Creswell (2013), with silence after Farmer et al. (2006).')
+    expect(n).not.toContain('Fit, after')
+    for (const t of FIT_FETTERS.terms) expect(d).toContain(`${t.label}: ${t.definition}`)
+    expect(d).not.toContain(FIT_FARMER.terms.find(t => t.key === 'dissonance')!.label)
     const relational = META_INFERENCE_TYPES.find(t => t.key === 'relational')!
-    expect(n).toContain(`Meta-inference types used here. Specific: `)
-    expect(n).toContain(`Relational: ${relational.definition}`)
-    expect(n).not.toContain('Predictive:')  // only the types the display USES are defined
-    for (const role of PIN_ROLES) expect(n).toContain(`${role.label}: ${role.definition}`)
-    expect(n).toContain('Each is attributed by participant identifier.')
-    expect(build({ display: { ...DISPLAY, settings: { ...DISPLAY.settings, newcombe: true } } }).note)
-      .toContain('its interval unadjusted, over the participants in these groups')
+    expect(d).toContain(`Meta-inference types used here. Specific: `)
+    expect(d).toContain(`Relational: ${relational.definition}`)
+    expect(d).not.toContain('Predictive:')  // only the types the display USES are defined
+    for (const role of PIN_ROLES) expect(d).toContain(`${role.label}: ${role.definition}`)
+    expect(d).toContain('Each is attributed by participant identifier.')
+    const newcombe = build({ display: { ...DISPLAY, settings: { ...DISPLAY.settings, newcombe: true } } })
+    expect(newcombe.note).toContain('its interval unadjusted.')
+    expect(newcombe.definitions.join(' ')).toContain('over the participants in these groups')
+  })
+
+  it('the notice rule (2026-11-18, rewrite D): the note is short, and every file prints the Definitions after the display', () => {
+    const r = build()
+    expect(r.note.split(/\s+/).length).toBeLessThan(build().definitions.join(' ').split(/\s+/).length)
+    const md = reportToMarkdown(r)
+    expect(md.indexOf('**Definitions**')).toBeGreaterThan(md.indexOf(r.note.slice(0, 20)))
+    for (const a of r.appendix) expect(md.indexOf('**Definitions**')).toBeGreaterThan(md.indexOf(a.title))
+    const html = reportToHtml(r, s => String(s))
+    expect(html).toContain('<h5>Definitions</h5>')
+    expect(html.indexOf('<h5>Definitions</h5>')).toBeGreaterThan(html.indexOf('</table>'))
+    expect(reportToDocx(r)).toMatchObject({ definitions_title: 'Definitions', definitions: r.definitions })
   })
 
   it('a pin whose facts could not be read says so, never that the quote is gone', () => {

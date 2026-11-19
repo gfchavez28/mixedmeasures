@@ -65,13 +65,13 @@ import { invalidateAfterParticipantLinkChange } from '@/lib/participant-link-cac
 import { TYPE_BADGE_CLASSES } from '@/lib/dataset-constants'
 import {
   describeFreshness,
-  describeRefresh,
+  refreshToastText,
   isManagedColumn,
 } from '@/lib/magnitude-rollup-basis'
 import { isManagedDataset, managedDatasetRefusal } from '@/lib/managed-dataset'
 import { useHistory } from '@/hooks/useHistory'
 import { useBlindScope } from '@/hooks/useBlindScope'
-import { withheldRatingColumnsNotice } from '@/lib/blind-rating-columns'
+import { variablesInDataset, withheldGroupScoresNotice, withheldRatingColumnsNotice } from '@/lib/blind-rating-columns'
 import { focusedElementOwnsKey, focusIsOnAnotherControl } from '@/lib/keyboard-scope'
 import DatasetTabs from '@/components/DatasetTabs'
 
@@ -366,13 +366,16 @@ export default function DatasetView() {
   })
 
   // Domain aggregate scores for virtual columns
+  // #1675 D358: the group scores follow blind mode as the grid does — a variable group holding
+  // a rating score is left out (its scale score averages every coder's ratings) and counted.
   const { data: domainScoresData } = useQuery({
-    queryKey: ['domain-scores', pid, iid],
-    queryFn: () => datasetsApi.getDomainScores(pid, iid),
-    enabled: !!pid && !!iid,
+    queryKey: ['domain-scores', pid, iid, coderScope ?? 'every-coder'],
+    queryFn: () => datasetsApi.getDomainScores(pid, iid, coderScope),
+    enabled: !!pid && !!iid && scopeReady,
     staleTime: 60_000,
   })
   const domainScoreCols = domainScoresData?.domain_scores ?? EMPTY_DOMAIN_SCORES
+  const withheldGroupsNotice = withheldGroupScoresNotice(domainScoresData?.withheld_rating_variables ?? 0)
 
   // Pre-compute domain membership by column ID and equivalence group ID.
   // Phase 4.6: include `domain_id` so ambient pills can navigate into the
@@ -1076,7 +1079,9 @@ export default function DatasetView() {
       queryClient.invalidateQueries({ queryKey: ['dataset-columns', pid, iid] })
       queryClient.invalidateQueries({ queryKey: ['datasets', pid] })
       queryClient.invalidateQueries({ queryKey: ['project-columns', pid] })
-      toast.success(describeRefresh(report))
+      // #1675 D360: while withholding (or before blind mode settles — fail closed) the
+      // every-coder counts are not said; only that the refresh ran.
+      toast.success(refreshToastText(report, coderScope !== undefined || !scopeReady))
     },
     onError: (err: Error) => toast.error(
       extractApiError(err, 'Could not refresh the participant table'),
@@ -1344,7 +1349,9 @@ export default function DatasetView() {
     <div className="h-full flex flex-col overflow-hidden">
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-4 py-2 border-b bg-mm-surface flex-shrink-0">
-        <DatasetTabs projectId={pid} datasetId={iid} variableCount={columnsKnown ? columns.length : undefined} />
+        {/* #1691 (D377): every variable in the dataset — a blind viewer's withheld rating
+            columns are counted back in, as the Variables view lists them. */}
+        <DatasetTabs projectId={pid} datasetId={iid} variableCount={columnsKnown ? variablesInDataset(columns.length, data?.withheld_rating_columns) : undefined} />
         <div className="w-px h-4 bg-mm-border-subtle" aria-hidden="true" />
         <div className="flex items-center gap-2 text-sm text-mm-text-secondary mr-auto">
           {dataset.source && <span>Source: {dataset.source}</span>}
@@ -1742,6 +1749,11 @@ export default function DatasetView() {
           {withheldNotice && (
             <p className="px-1 pt-2 text-xs text-muted-foreground" data-testid="withheld-rating-columns">
               {withheldNotice}
+            </p>
+          )}
+          {withheldGroupsNotice && (
+            <p className="px-1 pt-2 text-xs text-muted-foreground" data-testid="withheld-group-scores">
+              {withheldGroupsNotice}
             </p>
           )}
           {/* #800: the pager. Shown only when there is more than one page, so a

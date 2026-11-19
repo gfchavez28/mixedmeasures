@@ -6,7 +6,9 @@
  * from `quoteRuns`, so it can disagree with it (an oracle, not a mirror).
  */
 import { describe, it, expect } from 'vitest'
-import { quoteRuns, quoteRunClass, quoteLabel, QUOTE_LABEL_MAX, compareQuotesInPassageOrder } from './quote-runs'
+import {
+  quoteRuns, quoteRunClass, quoteLabel, QUOTE_LABEL_MAX, compareQuotesInPassageOrder, wholeQuoteLabel, WHOLE_QUOTE_LABEL_MAX,
+} from './quote-runs'
 import { codePointLength, sliceByCodePoints } from './text-offsets'
 import { mulberry32, randomQuoteSet } from '@/test-support/seeded-random'
 
@@ -164,5 +166,51 @@ describe('quoteLabel — a menu item names ONE quote', () => {
     const label = quoteLabel(text, 0, 50)
     expect(label).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/)
     expect(codePointLength(label)).toBeLessThanOrEqual(QUOTE_LABEL_MAX)
+  })
+})
+
+/**
+ * #1714 (b)/(c), D397–D398 — a WHOLE quote's name in a control (the joint display's pins and
+ * the pin picker's *Pin*). One helper over `quoteLabel`, at 60 code points.
+ */
+describe('wholeQuoteLabel — a pin names its quote', () => {
+  const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
+  it('a quote of up to 60 code points is whole; exactly 60 is not cut; 61 is', () => {
+    expect(wholeQuoteLabel('We plan on Fridays.')).toBe('We plan on Fridays.')
+    const sixty = 'a'.repeat(30) + ' ' + 'b'.repeat(29)
+    expect(codePointLength(sixty)).toBe(WHOLE_QUOTE_LABEL_MAX)
+    expect(wholeQuoteLabel(sixty)).toBe(sixty)
+    expect(wholeQuoteLabel(sixty + 'c')).toContain('…')
+  })
+
+  it('a long quote: head and tail, each cut at a WORD (the sweep’s misquote ended mid-sentence)', () => {
+    expect(wholeQuoteLabel('My line manager rewrote this plan without discussing it with me, and then shared it with the whole team.'))
+      .toBe('My line manager rewrote this…it with the whole team.')
+  })
+
+  it('two quotes sharing their first 60 characters get DIFFERENT names (the review’s stated gap, closed by the tail)', () => {
+    const start = 'My supervisor made time for the course and asked what I had learned '
+    expect(wholeQuoteLabel(start + 'about mentoring.')).not.toBe(wholeQuoteLabel(start + 'about planning.'))
+  })
+
+  it('whitespace is collapsed: a passage’s paragraphs read as one line in a name', () => {
+    expect(wholeQuoteLabel('  First line.\n\nSecond\tline.  ')).toBe('First line. Second line.')
+  })
+
+  it('no space at all: a hard cut by CODE POINTS, never splitting an astral character', () => {
+    const emoji = '😀'.repeat(70)
+    const label = wholeQuoteLabel(emoji)
+    expect(label).toBe(`${'😀'.repeat(29)}…${'😀'.repeat(29)}`)
+    expect(label).not.toMatch(LONE_SURROGATE)
+    // An astral character AT the cut, inside words: still whole.
+    const mixed = `${'word '.repeat(5)}x😀y ${'tail '.repeat(10)}`
+    expect(wholeQuoteLabel(mixed)).not.toMatch(LONE_SURROGATE)
+    expect(codePointLength(wholeQuoteLabel(mixed))).toBeLessThanOrEqual(WHOLE_QUOTE_LABEL_MAX)
+  })
+
+  it('empty or blank text gives "" (the caller says "this quote")', () => {
+    expect(wholeQuoteLabel('')).toBe('')
+    expect(wholeQuoteLabel(' \n ')).toBe('')
   })
 })

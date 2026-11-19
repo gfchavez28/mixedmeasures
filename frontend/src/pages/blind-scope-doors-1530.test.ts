@@ -20,7 +20,7 @@ import { stripComments } from '@/lib/strip-comments'
 import { sourceFiles, srcRel, SOURCE_SCAN_TIMEOUT_MS } from '@/test-support/source-tree'
 
 /** A call of a coding download or a passage read (a declaration is not a call). */
-const DOOR = /(?<!function )\b(exportApi\.[A-Za-z]+|textCodingApi\.exportCoded|textAnalysisApi\.(?:exportCrossAnalysis|filteredFrequencies|crossTabulation|codeDensity)|excerptsApi\.listQuoted|codeAnalysisApi\.(?:segmentsWithContext|textsWithContext|demographicFilters|sourceFrequencies|demographicComparison)|exportCodeFrequenciesCsv|metricsApi\.rowMatrix[A-Za-z]*|datasetsApi\.getData|participantsApi\.getDetail|jointDisplayApi\.(?:compute|passages|pinFacts|cases)|metricsApi\.(?:quickCompute|crossTabulation|analysisColumns)|comparisonsApi\.groupComparison(?:Csv)?|correlationsApi\.(?:correlationMatrix|scatterMatrix|correlationMatrixCsv|scatterDataCsv)|dataQualityApi\.(?:summary|patterns|mcarTest|summaryCsv)|statisticalTestsApi\.(?:list|compute)|recodeApi\.getFrequencies|datasetsApi\.previewComputedColumn)\(/g
+const DOOR = /(?<!function )\b(exportApi\.[A-Za-z]+|textCodingApi\.exportCoded|textAnalysisApi\.(?:exportCrossAnalysis|filteredFrequencies|crossTabulation|codeDensity)|excerptsApi\.listQuoted|codeAnalysisApi\.(?:segmentsWithContext|textsWithContext|demographicFilters|sourceFrequencies|demographicComparison)|exportCodeFrequenciesCsv|metricsApi\.rowMatrix[A-Za-z]*|datasetsApi\.(?:getData|getDomainScores)|participantsApi\.getDetail|textCodingApi\.recordContext|metricsApi\.list|jointDisplayApi\.(?:compute|passages|pinFacts|cases)|metricsApi\.(?:quickCompute|crossTabulation|analysisColumns)|comparisonsApi\.groupComparison(?:Csv)?|correlationsApi\.(?:correlationMatrix|scatterMatrix|correlationMatrixCsv|scatterDataCsv)|dataQualityApi\.(?:summary|patterns|mcarTest|summaryCsv)|statisticalTestsApi\.(?:list|compute)|recodeApi\.getFrequencies|datasetsApi\.previewComputedColumn)\(/g
 
 type Decision =
   | 'withholding: the viewer alone'        // D95/D98/D99/D102 — follows `withholding`
@@ -53,6 +53,23 @@ const DOORS: Record<string, Record<string, Decision>> = {
   // #1608 — the grid and the profile read the participant table's rating columns.
   'pages/DatasetView.tsx': {
     'datasetsApi.getData': 'withholding: the viewer alone',
+    // #1675 D358: the variable-group score columns — a group holding a score averages every
+    // coder's ratings (the audit's R6: Ben's group score less his Age was Bob's rating).
+    'datasetsApi.getDomainScores': 'withholding: the viewer alone',
+  },
+  // #1675 D359: a participant-table record's context shows its rating columns.
+  'components/ByRecordPanel.tsx': {
+    'textCodingApi.recordContext': 'withholding: the viewer alone',
+  },
+  'components/ByTextTable.tsx': {
+    'textCodingApi.recordContext': 'withholding: the viewer alone',
+  },
+  // #1675 D358: the metric list's counts over a rating score (#1615's `total_valid_n`).
+  'pages/CrosswalkView.tsx': {
+    'metricsApi.list': 'withholding: the viewer alone',
+  },
+  'components/crosswalk/useCrosswalkMutations.ts': {
+    'metricsApi.list': 'withholding: the viewer alone',
   },
   'pages/ParticipantsPage.tsx': {
     'participantsApi.getDetail': 'withholding: the viewer alone',
@@ -118,6 +135,7 @@ const DOORS: Record<string, Record<string, Decision>> = {
     'dataQualityApi.mcarTest': 'withholding: the viewer alone',
     'statisticalTestsApi.list': 'withholding: the viewer alone',
     'statisticalTestsApi.compute': 'withholding: the viewer alone',
+    'metricsApi.list': 'withholding: the viewer alone',   // #1675 D358
   },
   'hooks/useQuickCompute.ts': {
     'metricsApi.quickCompute': 'withholding: the viewer alone',   // the scope rides `params.coderIds`
@@ -305,7 +323,9 @@ describe('the wiring a scan can see', () => {
     // The view hands the dialog and the count read the compute's own `scope`, and D96's case.
     const view = read('components/canvas/extensions/JointDisplayView.tsx')
     expect(view).toMatch(/const noViewer = withholding && self == null/)
-    expect(view).toMatch(/kind: 'cases', displayKey, display, rowKey: row\.key,\s*groupBy: [^,]+, scope, noViewer,/)
+    // #1703 (b) (D372): no `groupBy` rides the request any more — a rule's group clause reads by
+    // its group alone; the scope and D96's case are what this door hands on.
+    expect(view).toMatch(/kind: 'cases', displayKey, display, rowKey: row\.key, scope, noViewer,/)
     const dialog = read('components/canvas/joint-display/CaseView.tsx')
     expect(dialog).toMatch(/queryKey: \['joint-display-cases', projectId, request\],/)
     expect(dialog).toMatch(/enabled: request != null && !noViewer,/)
@@ -319,7 +339,11 @@ describe('the wiring a scan can see', () => {
 
   it('the joint display: the viewer alone while withholding, in the key, and nothing before it settles', () => {
     const scope = read('lib/joint-display.ts')
-    expect(scope).toMatch(/if \(withholding\) return \{ coderIds: self != null \? \[self\] : \[\], layerScope: 'human', chipsFollow: true \}/)
+    // #1675 D361: no viewer while withholding is NO scope (null), never `coder_ids: []` — the
+    // server reads an empty list as every coder — and every request builder answers null for it.
+    expect(scope).toMatch(/if \(withholding\) return self != null \? \{ coderIds: \[self\], layerScope: 'human', chipsFollow: true \} : null/)
+    expect(scope).not.toMatch(/coderIds: self != null \? \[self\] : \[\]/)
+    expect(scope).toMatch(/if \(display\.group_by_column_id == null \|\| scope == null\) return null/)
     const view = read('components/canvas/extensions/JointDisplayView.tsx')
     expect(view).toMatch(/displayCoderScope\(withholding, self\)/)
     expect(view).toMatch(/const scopeReady = settled && !\(withholding && self == null\)/)
@@ -336,7 +360,7 @@ describe('the wiring a scan can see', () => {
     // reads while withholding with no viewer to scope to (D96).
     const exporter = read('lib/canvas-export.ts')
     expect(exporter).toMatch(/const scope = displayCoderScope\(timelineLens\.blind, timelineLens\.self\)/)
-    expect(exporter).toMatch(/else if \(timelineLens\.blind && timelineLens\.self == null\) \{/)
+    expect(exporter).toMatch(/if \(scope == null\) \{\s*unavailable = 'The joint display was not computed/)
     expect(exporter).toMatch(/withholding: timelineLens\.blind, self: timelineLens\.self/)
   })
 

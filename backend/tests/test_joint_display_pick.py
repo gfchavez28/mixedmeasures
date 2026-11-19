@@ -172,6 +172,28 @@ def _quote(fx, segment_id, project_id=PID) -> int:
     return e.id
 
 
+class TestEachPassageNamesItsWholeQuote:
+    """#1704 (b) (D384): the picker says "pinned here" apart from "already a quote", and a pin IS
+    the passage's WHOLE quote (the host refuses a second pin of it by id) — so each listed
+    passage carries that quote's id. Never a sub-range quote: it is a different quote."""
+
+    def test_a_whole_quote_is_named_by_id_and_an_unquoted_passage_is_absent(self, fx):
+        turns = [seg["id"] for conv in _passages(fx, "High", PLAN)["conversations"] for seg in conv["segments"]]
+        quoted, unquoted = turns[0], turns[1]
+        whole = _quote(fx, quoted)
+        result = _passages(fx, "High", PLAN)
+        assert result["segment_quote_ids"] == {quoted: whole}
+        assert unquoted not in result["segment_quote_ids"]
+
+    def test_a_sub_range_quote_is_not_the_whole_quote(self, fx):
+        turns = [seg["id"] for conv in _passages(fx, "High", PLAN)["conversations"] for seg in conv["segments"]]
+        part = Excerpt(project_id=PID, segment_id=turns[0], start_offset=0, end_offset=3)
+        fx.db.add(part)
+        fx.db.flush()
+        result = _passages(fx, "High", PLAN)
+        assert turns[0] not in result["segment_quote_ids"], "a char-range quote is a different quote"
+
+
 class TestTheAttributionFacts:
     def test_are_read_from_the_live_quote_never_stored(self, fx):
         """D163.4: identifier, speaker label, source and (optionally) a category — for a turn

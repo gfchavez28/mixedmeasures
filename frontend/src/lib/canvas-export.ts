@@ -444,11 +444,12 @@ export async function fetchDisplayReports(
     const request = computeRequest(display, scope)
     let data: JointDisplayComputeResponse | null = null
     let unavailable: string | null = null
-    if (request == null) unavailable = NO_GROUPING_TEXT
-    else if (timelineLens.blind && timelineLens.self == null) {
-      // `useBlindScope`'s rule (D96): a read with no one to scope it to must not run.
+    if (scope == null) {
+      // `useBlindScope`'s rule (D96): a read with no one to scope it to must not run — and
+      // since D361 there is no scope to build one from (`computeRequest` answers null).
       unavailable = 'The joint display was not computed: the coder could not be identified while blind mode is on.'
-    } else {
+    } else if (request == null) unavailable = NO_GROUPING_TEXT
+    else {
       try {
         data = await jointDisplayApi.compute(projectId, request)
       } catch (e) {
@@ -461,7 +462,7 @@ export async function fetchDisplayReports(
     let attributionWithheld: string | null = null
     let attributionUnusable: string | null = null
     if (pinIds.length > 0) {
-      if (timelineLens.blind && timelineLens.self == null) {
+      if (scope == null) {
         // #1615: D96 — no one to scope the attribution to, so no read (its column may be
         // a rating score); the pins say their attribution could not be read.
         facts = null

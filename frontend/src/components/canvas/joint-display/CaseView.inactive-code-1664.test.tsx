@@ -28,7 +28,7 @@ function resp(over: Partial<JointDisplayCasesResponse> = {}): JointDisplayCasesR
   return {
     groups: ['High', 'Low'], total: 0, listed: 0, matched: null, unknown: null,
     rule_unavailable_reason: W.SERVER_VOCABULARY.MISFIT_RULE_CODE_INACTIVE,
-    rule_withheld_columns: [], list_size: 0, added_outside: 0,
+    rule_withheld_columns: [], rule_missing_groups: [], list_size: 0, added_outside: 0,
     codes: [{ code_id: 5, name: 'Planning time' }], inactive_codes: [INACTIVE],
     variables: [], cases: [], named_cases: [], unavailable_reason: null, ...over,
   }
@@ -43,7 +43,7 @@ function renderView() {
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <CaseView open onOpenChange={vi.fn()} projectId={9} display={display} rowKey="r1"
-        scope={displayCoderScope(false, 1)} noViewer={false} groupBy="Gain group" onCommit={() => true} />
+        scope={displayCoderScope(false, 1)} noViewer={false} onCommit={() => true} />
     </QueryClientProvider>,
   )
 }
@@ -60,7 +60,7 @@ describe('#1664 — an inactive bound code in the case view', () => {
     api.cases.mockResolvedValue(resp())
     renderView()
     const section = (await screen.findByRole('heading', { name: W.RULE_HEADING })).closest('section')!
-    await within(section).findByText('did not use “Workload”')
+    await within(section).findByText('has no passage coded “Workload”')
     expect(section.textContent).not.toContain('no longer binds')
     expect(screen.getByRole('status')).toHaveTextContent(W.MISFIT_RULE_UNAVAILABLE_TEXT.code_inactive)
     // The saved condition still shows what it names: its option, greyed with the reason.
