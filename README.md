@@ -270,6 +270,16 @@ across, leaving the original and its coding untouched.
   **Spatial** modes, rich-text prose (Tiptap), inline embeds of excerpts /
   materials / memos, typed relationships between themes, versioned snapshots, and a
   Convergence Matrix view for triangulating findings.
+- **Joint displays** set a study's strands side by side, construct by construct,
+  across groups of participants formed by a variable you choose: how many in each
+  group have coded material in your interviews, documents or survey comments, what
+  your survey variables say, and what your observations show — live, as the coding
+  and data change. You record how the strands fit (confirmation, expansion,
+  discordance or silence), write a meta-inference that keeps the numbers it was
+  written against and says when they move, pin each group's own quotes, and list
+  the cases that don't fit, each with your reason. The app computes the numbers and
+  never suggests a fit or decides which cases don't fit. A display lives in a
+  Canvas section and exports with it.
 
 ### Export and reproduce
 - **CSV** and **Excel** (`.xlsx`) of data and results.
@@ -287,8 +297,8 @@ across, leaving the original and its coding untouched.
   intervals on means and on agreement, kappa and percent agreement with three or
   more coders, the agreement measures for recordings, the Model comparison
   tab, and the qualitative analysis figures. Unsaved analyses are not exported.
-- **Canvas export** to Word (`.docx`), HTML, and PDF, with charts embedded as
-  images.
+- **Canvas export** to Word (`.docx`), Markdown, HTML, and PDF, with each chart
+  as an image or as its data table, and each joint display as a table.
 - **REFI-QDA codebook** (`.qdc`) — export and import your codebook in the open
   cross-tool standard, so codes, hierarchy, descriptions and colours move between
   Mixed Measures and other QDA tools that read the REFI-QDA codebook format.

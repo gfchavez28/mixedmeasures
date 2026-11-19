@@ -27,7 +27,7 @@ migrations (RELEASING §4c).
 
 Usage (from backend/, venv active, sqlcipher3 installed):
 
-    python scripts/migration_rehearsal.py --from-revision b5d1f7a3c9e2   # v1.5.8
+    python scripts/migration_rehearsal.py --from-revision d4e8a1c7b2f6   # v1.6.0
 
 `--from-revision` is the Alembic head of the PREVIOUS release. Find it with:
 
@@ -39,12 +39,15 @@ Exits 0 on success, 1 on any failure. Writes only to a temp dir; never touches
 """
 import argparse
 import base64
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -102,6 +105,38 @@ def _fks(conn, table: str) -> list[tuple]:
                   for r in conn.execute(f"PRAGMA foreign_key_list({table})"))
 
 
+def _table_sql(conn, table: str) -> str:
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                       (table,)).fetchone()
+    return (row[0] or "") if row else ""
+
+
+def _checks(sql: str) -> list[str]:
+    """Every CHECK constraint in a CREATE TABLE statement, its expression read to the
+    matching parenthesis and whitespace-normalised. A rebuild REGENERATES the statement,
+    so the text as a whole differs; the constraints it carries must not."""
+    out = []
+    for m in re.finditer(r"\bCHECK\s*\(", sql, re.IGNORECASE):
+        j = m.end() - 1                     # the opening parenthesis
+        depth, k = 0, j
+        while k < len(sql):
+            depth += {"(": 1, ")": -1}.get(sql[k], 0)
+            if depth == 0:
+                break
+            k += 1
+        out.append(" ".join(sql[j + 1:k].split()))
+    return sorted(out)
+
+
+def _structure(conn, table: str) -> dict:
+    """What a rebuild must carry across: the columns (name, type, NOT NULL, default, key —
+    in order) and the CHECK constraints."""
+    return {
+        "columns": [tuple(r[1:6]) for r in conn.execute(f"PRAGMA table_xinfo({table})")],
+        "checks": _checks(_table_sql(conn, table)),
+    }
+
+
 def _full_rows(conn, table: str, cols: list[str]) -> list[list[str]]:
     """Every row of `table`, over exactly `cols`, stringified (so 0.0 ≠ None ≠ 0)."""
     sel = ", ".join(f'"{c}"' for c in cols)
@@ -132,30 +167,56 @@ def _expected_after(table: str, cols: list[str], rows: list[list[str]]) -> list[
 # correctness. A DATA-REPAIR migration inverts that — the rows it is supposed to
 # rewrite MUST move, and a corpus on which it no-ops proves nothing while exiting 0.
 #
-# ── 1.6.0 (rehearsed 2026-11-07e) — NO REBUILD: an index and a data REPAIR ──────
+# ── 1.7.0 (rehearsed 2026-11-19) — TEN table REBUILDS, a data REPAIR, a column + an index ──
 #
-# `--from-revision b5d1f7a3c9e2` — v1.5.8's head (`0dac5206`). TWO migrations, and
-# neither rebuilds a table:
+# `--from-revision d4e8a1c7b2f6` — v1.6.0's head (`b72a43c4`). FIVE migrations:
 #
-#   0a5c5d4ceb29  ix_code_applications_code_user on (code_id, user_id), NOT unique (#1463)
-#   d4e8a1c7b2f6  consensus_stale_targets += every turn of a segment group whose
-#                 turns carry codings from two or more coders                     (#1597)
+#   e7b3c5a9d2f4  the joint display's version fence: does nothing, exists to be unknown
+#   f2a6c8d4b1e7  datasets.managed_rater_ids (NULL: no backfill) + ix_code_applications_rated
+#                 on (code_id, user_id, magnitude) WHERE magnitude IS NOT NULL   (#1617/#1623)
+#   b8d4f2a6c0e9  removal_tombstones += each withdrawal's ID in composed (NFC) form and as a
+#                 FOLDED name, rebuilt from the `withdrawn` audit entry           (#1605)
+#   c3a7e1f9b5d8  NINE tables rebuilt with AUTOINCREMENT, each sequence raised to the
+#                 highest id the audit trail names for it                         (#1639)
+#   bdf1ffd93239  `analysis_domains` rebuilt the same way                         (#1678)
 #
-# 🔴 **The repair MUST add rows, so "nothing changed" is the wrong assertion for it**
-# (RELEASING §4c). `QUEUE_EXPECTED` is the set of turns that must arrive queued, and the
-# seed builds each case the predicate decides: a group whose two coders coded DIFFERENT
-# turns (`G_SPLIT`, the state 1.5.8's per-turn rule and 1.6.0's group rule disagree
-# about — queued, both turns), a group ONE coder coded (`G_ONE_CODER` — not queued: no
-# rule reaches consensus there), and an UNGROUPED turn two coders and a stored consensus
-# row sit on (`SEG_UNGROUPED` — not queued: the per-turn rule already decides it). One of
-# `G_SPLIT`'s turns is ALREADY queued (`SEG_ALREADY_QUEUED`), so a repair without its
-# `NOT EXISTS` is refused by the marker table's partial unique index, and that marker's
-# row must come through unchanged. Every `code_applications` row stays as it was BY ID
-# (the full-row comparison): the repair marks, the sweep recomputes, never the revision.
+# 🔴 **The rebuilds are the dangerous half** — the first since the code sets' rebuild of
+# `codes` (`e4a9c7b21f68`, shipped in 1.5.4). A DROP +
+# RENAME with foreign keys ON would CASCADE out of `codes` into the coding, out of the
+# three source tables into every segment and its coding, out of `excerpt` into a note's
+# link (SET NULL), out of `participants` into speakers and dataset rows (SET NULL), and
+# out of `analysis_domains` into its members. Every one of those children is seeded and
+# compared whole, BY ID (`FULL_ROW_TABLES`); each rebuilt table's columns, CHECK
+# constraints, indexes and FKs are compared before and after (`REBUILT_TABLES`); and
+# AUTOINCREMENT must be ABSENT before and PRESENT after, or its arrival proves nothing.
 #
-# The index must not exist BEFORE the upgrade (`NEW_INDEXES` is checked against the
-# seed's own index list), must cover exactly `(code_id, user_id)` in that order, and must
-# NOT be unique — two coders coding one code is the ordinary case.
+# 🔴 **The sequence seed is a claim about NUMBERS, so it is asserted against literals**
+# (`SEQ_EXPECTED`, not the revision's formula): the audit trail names a code, a
+# conversation, a variable group and withdrawn participants ABOVE each table's highest
+# id (a deleted newest row), and a dataset column BELOW it; `materials` has no audit
+# kind. The behavioural checks then insert a code and a variable group with no id and
+# require the id after the seeded sequence — the reuse #1639/#1678 end.
+#
+# 🔴 **The withdrawal repair MUST add rows** (RELEASING §4c). `TOMBSTONES_ADDED` is the
+# set it must add and nothing else: a DECOMPOSED ID (`W_NFD_ID`, which reads the same on
+# screen) gains its composed hash and its folded name; an ASCII ID gains only its folded
+# name (its composed hash IS the stored one); the same ID withdrawn twice adds one row;
+# an unreadable entry, an entry in a project with no uuid and a non-withdrawal entry add
+# nothing. The rows seeded before it must come through unchanged.
+#
+# The new column must arrive NULL on every dataset (`NEW_COLUMNS` — "no record", so the
+# live rule answers), and the new index must not exist before, must cover exactly
+# `(code_id, user_id, magnitude)`, must be PARTIAL on `magnitude IS NOT NULL` and must NOT
+# be unique. The fence has nothing to assert beyond the revision reaching head.
+#
+# ── 1.6.0's fixtures CHANGE SIDES ─────────────────────────────────────────────
+#
+# 🔴 `d4e8a1c7b2f6` IS `--from-revision`, so #1597's queue repair and #1463's index ran
+# BELOW this cut, on the empty database the build makes, and 1.6.0's "QUEUE_EXPECTED
+# arrives queued" would pass VACUOUSLY. The queue is seeded as that repair LEFT it (both
+# of `G_SPLIT`'s turns marked, nothing else) and asserted invariant: 1.7.0 must queue no
+# turn and rewrite no marker. `ix_code_applications_code_user` is compared as an existing
+# index of `code_applications` (`INDEXED_TABLES`).
 #
 # ── 1.5.8's fixtures CHANGE SIDES ─────────────────────────────────────────────
 #
@@ -210,6 +271,7 @@ NOTE_SEQ_INVARIANT = [
     (2, 1),   # document 1, first by id
     (3, 2),   # document 1, second by id
     (4, 1),   # observation clip — its own parent, so numbering restarts
+    (5, 2),   # conversation note on a QUOTE (1.7.0: the canary for the `excerpt` rebuild)
 ]
 
 # `dataset_columns` ids are deliberately NON-CONTIGUOUS: a rebuild that renumbers
@@ -318,37 +380,144 @@ SEG_SPLIT_A, SEG_ALREADY_QUEUED, SEG_ONE_A, SEG_ONE_B, SEG_UNGROUPED = 40, 41, 4
 APP_SPLIT_A, APP_SPLIT_B, APP_ONE_A, APP_ONE_B = 21, 22, 23, 24
 APP_UNGROUPED_LEAD, APP_UNGROUPED_TEAM, APP_UNGROUPED_CONSENSUS = 25, 26, 27
 MARKER_SEEDED = 5
-# The turns that must hold a marker after the upgrade — every turn of G_SPLIT, and nothing
-# else. The seeded marker on SEG_ALREADY_QUEUED is one of them, and must be the SAME row.
+# 1.7.0: the repair is BELOW this cut, so the seed holds what it LEFT — a marker on every
+# turn of G_SPLIT (the one from before it, and the one it added) — and the upgrade must
+# leave exactly these, as the same rows.
+MARKER_SPLIT_A = 6
 QUEUE_EXPECTED = (SEG_SPLIT_A, SEG_ALREADY_QUEUED)
 
-# This cut rebuilds NO table. The tables below are compared before and after anyway:
-# it costs nothing, and they are the parents of data.
+# ── 1.7.0's rebuilds (`c3a7e1f9b5d8` #1639, `bdf1ffd93239` #1678) ──────────────
 #
-# Every index on these is compared with its CREATE statement — a dropped UNIQUE index
-# leaves a constraint unenforced and nothing else looks wrong.
+# The ten tables rebuilt with AUTOINCREMENT, and the sequence each must arrive holding —
+# LITERALS, worked by hand from the seed: the highest id the table holds, raised to the
+# highest id the audit trail names for its kind when that is higher.
+#   codes             ids 1 2 7 12; a code 15 was created and deleted (audit)   → 15
+#   dataset_columns   highest 83; the audit names 50, BELOW it                    → 83
+#   conversations     id 1; conversation 6 was deleted (audit)                    → 6
+#   documents, observations   id 1 each, no audit                                 → 1
+#   datasets          ids 1 5 9                                                    → 9
+#   materials         ids 3 8; materials have no audit kind                       → 8
+#   excerpt           ids 1 2 3                                                    → 3
+#   participants      ids 7 11; withdrawn participants 13 14 16 17 (audit)        → 17
+#   analysis_domains  ids 2 4; variable group 9 was deleted (audit)               → 9
+SEQ_EXPECTED = {
+    "codes": 15, "dataset_columns": 83, "conversations": 6, "documents": 1,
+    "observations": 1, "datasets": 9, "materials": 8, "excerpt": 3, "participants": 17,
+    "analysis_domains": 9,
+}
+REBUILT_TABLES = tuple(SEQ_EXPECTED)
+# The sequences the AUDIT must raise above the table's own highest id: if the seed ever
+# stops putting one above, its check is inert against a revision that seeds nothing.
+SEQ_RAISED_BY_AUDIT = ("codes", "conversations", "participants", "analysis_domains")
+# (id, entity_type, entity_id, action) — create and delete entries as the doors log them.
+SEQ_AUDIT = (
+    (90, "code", 15, "created"), (91, "code", 15, "deleted"),
+    (92, "dataset_column", 50, "deleted"),
+    (93, "conversation", 6, "deleted"),
+    (94, "analysis_domain", 9, "deleted"),
+)
+MATERIAL_COLLECTION, MATERIAL_A, MATERIAL_B = 2, 3, 8
+DOMAIN_A, DOMAIN_B = 2, 4
+SPEAKER_LINKED = 3
+NOTE_ON_EXCERPT, EXCERPT_NOTED = 5, 2
+
+# ── 1.7.0's withdrawal repair (`b8d4f2a6c0e9`, #1605) ──────────────────────────
+#
+# Project 1 carries a uuid (the tombstones are keyed by it); `PROJECT_OTHER` carries none,
+# so its withdrawal cannot be keyed and must be skipped.
+PROJECT_UUID_MAIN = "7b0a7b0a-0000-4000-8000-000000000001"
+# The DECOMPOSED form (an `i` + a combining acute): it reads as "María López" on screen,
+# and 1.6.0 hashed it as written, so a transcript writing the composed form brought her back.
+W_NFD_ID = "María López"
+W_ASCII_ID = "P-014"
+# (audit id, project, participant id, action, details) — `withdrawn` entries as
+# `routers/participants.py` logs them (the outcome's `identifier`, the backup's name).
+WITHDRAWAL_AUDIT = (
+    (101, 1, 13, "withdrawn", json.dumps({"identifier": W_NFD_ID, "backup_filename": "a.mmbackup"})),
+    (102, 1, 14, "withdrawn", json.dumps({"identifier": W_ASCII_ID, "backup_filename": "b.mmbackup"})),
+    # The same ID withdrawn again (re-created, withdrawn a second time): one row, not two.
+    (103, 1, 16, "withdrawn", json.dumps({"identifier": W_ASCII_ID, "backup_filename": "c.mmbackup"})),
+    # Unreadable: skipped, never a failed upgrade.
+    (104, 1, 17, "withdrawn", "{not json"),
+    # A project with no uuid: nothing to key the record by.
+    (105, PROJECT_OTHER, 5, "withdrawn", json.dumps({"identifier": "P-099"})),
+    # Not a withdrawal, though it names an identifier: never read.
+    (106, 1, 11, "created", json.dumps({"identifier": "P-002"})),
+)
+# 1.6.0's writer hashed the ID as written (trimmed), kind `participant`. Rows 7 and 8 are
+# what a 1.6.0 install holds for the two withdrawals above.
+TOMBSTONE_NFD_ID, TOMBSTONE_ASCII_ID = 7, 8
+
+
+def _sha(prefix: str, key: str) -> str:
+    return hashlib.sha256((prefix + key).encode("utf-8")).hexdigest()
+
+
+# The three rules, as `services/tombstones.py` states them in words (written here from that
+# statement, not imported: this script imports nothing from `app.`, and the revision's own
+# copy is held equal to the module by `tests/test_withdrawal_record_upgrade_1605.py`).
+def _id_as_written(ident: str) -> str:          # 1.6.0: trimmed, capitals kept, as encoded
+    return _sha("mm-withdrawn-identifier:v1:", ident.strip())
+
+
+def _id_composed(ident: str) -> str:            # 1.7.0: the same, in composed (NFC) form
+    return _sha("mm-withdrawn-identifier:v1:", unicodedata.normalize("NFC", ident.strip()))
+
+
+def _name_folded(name: str) -> str:             # 1.7.0: spacing, capitals and encoding ignored
+    spaced = " ".join(name.strip().split())
+    return _sha("mm-withdrawn-name:v2:", unicodedata.normalize(
+        "NFD", unicodedata.normalize("NFD", spaced).casefold()))
+
+
+# What the repair must ADD, as (project_uuid, kind, hash) — and nothing else.
+TOMBSTONES_ADDED = {
+    (PROJECT_UUID_MAIN, "participant", _id_composed(W_NFD_ID)),
+    (PROJECT_UUID_MAIN, "participant_name", _name_folded(W_NFD_ID)),
+    (PROJECT_UUID_MAIN, "participant_name", _name_folded(W_ASCII_ID)),
+}
+
+# 1.7.0 rebuilds the ten `REBUILT_TABLES`. Every index on these is compared with its
+# CREATE statement — a dropped UNIQUE index leaves a constraint unenforced and nothing
+# else looks wrong, and batch reflection is what re-creates a rebuilt table's indexes
+# (the partial ones on `datasets`, `dataset_columns` and `excerpt` included).
 INDEXED_TABLES = (
     "codes", "code_applications", "code_category_memberships", "code_sets", "users",
     "documents", "datasets", "dataset_columns", "removal_tombstones",
     "consensus_stale_targets", "segment_groups", "segments",
+    "conversations", "observations", "materials", "excerpt", "participants",
+    "analysis_domains", "analysis_domain_members", "speakers", "notes",
 )
-# `PRAGMA foreign_key_list` before and after.
-FK_TABLES = ("codes", "code_applications", "code_category_memberships", "code_sets")
+# `PRAGMA foreign_key_list` before and after: each rebuilt table's own FKs (the batch
+# re-declares them) and its children's.
+FK_TABLES = (
+    "codes", "code_applications", "code_category_memberships", "code_sets",
+    *REBUILT_TABLES, "segments", "notes", "speakers", "dataset_rows", "dataset_values",
+    "analysis_domain_members", "recode_definitions",
+)
 # Every PRE-EXISTING column of every seeded row, compared whole — against what it must
 # hold AFTER, which is what it held before except `EXPECTED_REWRITES`. Listing columns
 # by hand is how a column added later goes unchecked, so the column list is read from
-# the database at seed time.
+# the database at seed time. 1.7.0: the ten rebuilt tables and every child a CASCADE or
+# SET NULL out of them would reach.
 FULL_ROW_TABLES = (
     "codes", "users", "code_applications", "code_category_memberships",
     "code_categories", "code_equivalence_groups", "code_sets",
     "documents", "datasets", "dataset_columns", "dataset_rows",
     "removal_tombstones", "segment_groups", "segments",
+    "projects", "conversations", "observations", "materials", "material_collections",
+    "excerpt", "participants", "analysis_domains", "analysis_domain_members",
+    "speakers", "notes", "dataset_values", "recode_definitions", "audit_entries",
+    "equivalence_groups",
 )
+# Tables this cut ADDS rows to: the full-row comparison reads only the rows seeded before
+# the upgrade, and what was added is asserted on its own (`TOMBSTONES_ADDED`).
+GROWING_TABLES = ("removal_tombstones",)
 # (table, column) -> {row id: the value the repair must leave there}. The full-row
 # comparison expects these too, so a repair that moved nothing — or moved a row it
-# must not — fails there as well as in its own check below. 1.6.0's repair rewrites no
-# existing row (it only ADDS markers, checked by `QUEUE_EXPECTED`), and #1368 D4's flags
-# are seeded post-repair, so nothing here moves this cut.
+# must not — fails there as well as in its own check below. 1.7.0's repair rewrites no
+# existing row (it only ADDS tombstones), and #1368 D4's flags are seeded post-repair,
+# so nothing here moves this cut.
 EXPECTED_REWRITES = {
     ("dataset_columns", "stale"): {cid: after for cid, (_, _, after) in REPAIR_STALE.items()},
 }
@@ -359,20 +528,29 @@ EXPECTED_REWRITES = {
 # identity — `project_portability._file_coder_uuid` takes a non-empty string of at most
 # 36 characters and treats anything else as NO identity.
 IDENTITY = object()
-# This cut adds no column (1.5.8's `users.uuid` is seeded at real values above).
-NEW_COLUMNS: dict = {}
+# 1.7.0 adds one (`f2a6c8d4b1e7`); 1.5.8's `users.uuid` is seeded at real values above.
+NEW_COLUMNS: dict = {
+    "datasets": {
+        "managed_rater_ids": (
+            None, "it records whose ratings a participant table's snapshot holds, which only "
+            "a refresh can know; NULL is 'no record', so the live rule answers (D222)"),
+    },
+}
 # New tables that must arrive EMPTY, and why. This cut adds none (1.5.8's
 # `removal_tombstones` is seeded with a real withdrawal above).
 NEW_TABLES_EMPTY: dict = {}
 # New FKs: (table, column) -> (referenced table, ON DELETE). This cut adds none.
 NEW_FKS: dict = {}
-# Indexes this cut must CREATE: name -> (table, columns, must it be UNIQUE?, why). Each
-# must also be ABSENT before the upgrade, or its arrival proves nothing.
+# Indexes this cut must CREATE: name -> (table, columns, must it be UNIQUE?, its partial
+# WHERE or None, why). Each must also be ABSENT before the upgrade, or its arrival proves
+# nothing. (1.6.0's `ix_code_applications_code_user` is below this cut: an existing index
+# of `code_applications`, compared by `INDEXED_TABLES`.)
 NEW_INDEXES = {
-    "ix_code_applications_code_user": (
-        "code_applications", ("code_id", "user_id"), False,
-        "two coders applying one code to one passage is the ordinary case, so a unique index "
-        "would refuse the second coder's coding"),
+    "ix_code_applications_rated": (
+        "code_applications", ("code_id", "user_id", "magnitude"), False,
+        "magnitude IS NOT NULL",
+        "many coders rate one code, so a unique index would refuse the second rating; and "
+        "without the predicate it indexes every unrated coding the live rule must skip"),
 }
 
 
@@ -385,9 +563,9 @@ def seed(db_path: Path) -> dict:
     and a machine coder, a category membership, a category and an equivalence
     group it points at), excerpts in both pre-time-range shapes, and
     non-contiguous ids (a rebuild that renumbers instead of preserving ids breaks
-    every child FK). For this cut: three kinds of coder for the identity backfill to
-    reach, a code set at real values, and the computed columns the repair must
-    mark — and must leave alone.
+    every child FK). For this cut (1.7.0): a child under each of the ten tables it
+    rebuilds, audit entries the sequences must be raised to, and the withdrawals the
+    repair rebuilds its records from — beside the older fixtures, all at real values.
 
     Tables absent at the given revision are skipped with a note rather than
     crashing — the seed has to survive a moving "from" revision.
@@ -437,6 +615,12 @@ def seed(db_path: Path) -> dict:
     x("INSERT INTO projects (id, user_id, name, status, created_at, updated_at) "
       "VALUES (1,1,'Rehearsal project','active',?,?), (?,1,'Second study','active',?,?)",
       (NOW, NOW, PROJECT_OTHER, NOW, NOW))
+    # 1.7.0's withdrawal repair keys each record by its project's uuid: project 1 holds one,
+    # the second study none (so its withdrawal must be skipped).
+    if "project_uuid" in _cols(conn, "projects"):
+        x("UPDATE projects SET project_uuid=? WHERE id=1", (PROJECT_UUID_MAIN,))
+    else:
+        skipped.append("project uuid")
     x("INSERT INTO conversations (id, project_id, name, status, created_at, updated_at, "
       "media_offset_seconds) VALUES (1,1,'Interview 01','ready',?,?,0.0)", (NOW, NOW))
 
@@ -449,6 +633,13 @@ def seed(db_path: Path) -> dict:
           "created_at, updated_at) VALUES (?,1,'P-001','Alex Iyer',?,?), "
           "(?,1,'P-002','Sam Okafor',?,?)",
           (PARTICIPANT_LINKED, NOW, NOW, PARTICIPANT_SPARE, NOW, NOW))
+        # 1.7.0 rebuilds `participants`: a speaker linked to one is its SET NULL canary.
+        if "speakers" in have:
+            x("INSERT INTO speakers (id, project_id, name, original_label, is_facilitator, "
+              "color_index, participant_id, created_at) VALUES (?,1,'Alex','SPEAKER_01',0,2,?,?)",
+              (SPEAKER_LINKED, PARTICIPANT_LINKED, NOW))
+        else:
+            skipped.append("speakers")
     else:
         skipped.append("participants")
     if "documents" in have:
@@ -610,6 +801,9 @@ def seed(db_path: Path) -> dict:
               "created_at) VALUES (?,?,2,?,?,?)", (aid, sid, uid, origin, NOW))
         x("INSERT INTO consensus_stale_targets (id, project_id, segment_id, created_at) "
           "VALUES (?,1,?,?)", (MARKER_SEEDED, SEG_ALREADY_QUEUED, NOW))
+        # ...and the marker 1.6.0's first start ADDED (its repair is below this cut).
+        x("INSERT INTO consensus_stale_targets (id, project_id, segment_id, created_at) "
+          "VALUES (?,1,?,?)", (MARKER_SPLIT_A, SEG_SPLIT_A, NOW))
     else:
         skipped.append("1.6.0 consensus queue fixture")
 
@@ -620,8 +814,29 @@ def seed(db_path: Path) -> dict:
           "'withdrawal',?)",
           (TOMBSTONE_SEEDED_ID, "7b0a7b0a-0000-4000-8000-000000000158",
            "9a7e0003-0000-4000-8000-000000000003", NOW))
+        # The two records a 1.6.0 install wrote for `WITHDRAWAL_AUDIT`'s withdrawals in
+        # project 1: the ID hashed as written. 1.7.0 must keep both and add beside them.
+        x("INSERT INTO removal_tombstones (id, project_uuid, entity_type, entity_uuid, "
+          "identifier_hash, reason, created_at) VALUES "
+          "(?,?,'participant',NULL,?,'withdrawal',?), (?,?,'participant',NULL,?,'withdrawal',?)",
+          (TOMBSTONE_NFD_ID, PROJECT_UUID_MAIN, _id_as_written(W_NFD_ID), NOW,
+           TOMBSTONE_ASCII_ID, PROJECT_UUID_MAIN, _id_as_written(W_ASCII_ID), NOW))
     else:
         skipped.append("withdrawal record")
+
+    # The audit trail 1.7.0's revisions READ: the withdrawals the repair rebuilds its rows
+    # from, and the create/delete entries the sequences are raised to.
+    if "audit_entries" in have:
+        for aid, pid, ent, action, details in WITHDRAWAL_AUDIT:
+            x("INSERT INTO audit_entries (id, timestamp, user_id, action, entity_type, "
+              "entity_id, details, project_id) VALUES (?,?,1,?,'participant',?,?,?)",
+              (aid, NOW, action, ent, details, pid))
+        for aid, etype, ent, action in SEQ_AUDIT:
+            x("INSERT INTO audit_entries (id, timestamp, user_id, action, entity_type, "
+              "entity_id, details, project_id) VALUES (?,?,1,?,?,?,NULL,1)",
+              (aid, NOW, action, etype, ent))
+    else:
+        skipped.append("audit trail")
 
     x("INSERT INTO excerpt (id, project_id, segment_id, start_offset, end_offset, "
       "created_at, updated_at) VALUES (1,1,10,NULL,NULL,?,?), (2,1,11,4,18,?,?)",
@@ -640,6 +855,11 @@ def seed(db_path: Path) -> dict:
 
     x("INSERT INTO notes (id, conversation_id, segment_id, content, sequence_number, "
       "is_archived, created_at, updated_at) VALUES (1,1,10,'a note',1,0,?,?)", (NOW, NOW))
+    # 1.7.0 rebuilds `excerpt`: a note ON a quote is its SET NULL canary (the conversation's
+    # second note, so numbered 2).
+    x("INSERT INTO notes (id, conversation_id, segment_id, excerpt_id, content, "
+      "sequence_number, is_archived, created_at, updated_at) "
+      "VALUES (?,1,11,?,'why this quote',2,0,?,?)", (NOTE_ON_EXCERPT, EXCERPT_NOTED, NOW, NOW))
 
     # Notes at their REPAIRED numbering (#747 already ran below --from-revision):
     # two on one document (1 then 2) and one on an observation clip (restarts at 1).
@@ -779,6 +999,34 @@ def seed(db_path: Path) -> dict:
     else:
         skipped.append("dataset_columns")
 
+    # ── 1.7.0: `materials` and `analysis_domains`, two of the ten rebuilt tables ──
+    #
+    # A saved result (a material, in a collection — its parent, CASCADE) whose config names
+    # a variable group by id, as `material_config.ID_KEYS` stores one; and two variable
+    # groups with a member each (`analysis_domain_members`, CASCADE — the canary a DROP of
+    # `analysis_domains` with foreign keys ON would empty). Non-contiguous ids, both tables.
+    if "materials" in have and "material_collections" in have:
+        x("INSERT INTO material_collections (id, project_id, name, display_order, created_at) "
+          "VALUES (?,1,'Saved results',0,?)", (MATERIAL_COLLECTION, NOW))
+        for mid, order in ((MATERIAL_A, 0), (MATERIAL_B, 1)):
+            x("INSERT INTO materials (id, collection_id, material_type, config, auto_name, "
+              "custom_name, display_order, source_tab, created_at) "
+              "VALUES (?,?,'descriptives',?,?,NULL,?,'quantitative',?)",
+              (mid, MATERIAL_COLLECTION, json.dumps({"domain_ids": [DOMAIN_A]}),
+               f"Descriptives {mid}", order, NOW))
+    else:
+        skipped.append("materials")
+    if "analysis_domains" in have and "analysis_domain_members" in have:
+        for did, name, member in ((DOMAIN_A, "Wellbeing", DC_SOURCE),
+                                  (DOMAIN_B, "Burnout", DC_EQUIV)):
+            x("INSERT INTO analysis_domains (id, project_id, name, sequence_order, created_at, "
+              "updated_at) VALUES (?,1,?,?,?,?)", (did, name, did, NOW, NOW))
+            x("INSERT INTO analysis_domain_members (id, domain_id, member_type, member_id, "
+              "sequence_order, created_at) VALUES (?,?,'column',?,1,?)",
+              (did, did, member, NOW))
+    else:
+        skipped.append("analysis domains")
+
     # The fixture has to be what NOTE_SEQ_INVARIANT SAYS it is. Without this the
     # constant is prose: the before/after comparison below would still pass by
     # comparing a drifted seed against itself, and the documented numbering
@@ -805,17 +1053,38 @@ def seed(db_path: Path) -> dict:
         # ⚠️ 1.6.0: #1368 D4's repair is below --from-revision, so REPAIR_STALE is an
         # INVARIANCE fixture this cut and moves no flag by design. The 1.5.8 check that
         # refused an inert fixture here now belongs to the queue fixture (below).
-    # 1.6.0's repair must have work: the expected queue is not what the seed already holds,
-    # and the seed holds exactly the one pre-existing marker it says it does.
+    # 1.6.0's repair is BELOW this cut: the seed holds exactly what it left.
     if "1.6.0 consensus queue fixture" not in skipped:
         queued = [sid for (sid,) in conn.execute(
             "SELECT segment_id FROM consensus_stale_targets ORDER BY segment_id")]
-        if queued != [SEG_ALREADY_QUEUED]:
+        if queued != sorted(QUEUE_EXPECTED):
             raise SystemExit(f"seed drift: consensus_stale_targets holds {queued}, not "
-                             f"[{SEG_ALREADY_QUEUED}] — fix the seed, not this check")
-        if sorted(QUEUE_EXPECTED) == queued:
-            raise SystemExit("QUEUE_EXPECTED is what the seed already holds, so the "
-                             "repair's check is inert against a repair that does nothing")
+                             f"{sorted(QUEUE_EXPECTED)} — fix the seed, not this check")
+
+    # 1.7.0's sequences: every table at or below its literal, and the audit-raised ones
+    # strictly below it — or the seed check passes against a revision that seeds nothing.
+    for t, want in SEQ_EXPECTED.items():
+        if t not in have:
+            skipped.append(f"sequence fixture for {t}")
+            continue
+        top = conn.execute(f"SELECT MAX(id) FROM {t}").fetchone()[0] or 0
+        if top > want or (t in SEQ_RAISED_BY_AUDIT) != (top < want):
+            raise SystemExit(f"seed drift: `{t}`'s highest id is {top} against SEQ_EXPECTED "
+                             f"{want} — fix the seed or the literal, not this check")
+        if "AUTOINCREMENT" in _table_sql(conn, t).upper():
+            raise SystemExit(f"`{t}` already has AUTOINCREMENT at --from-revision, so its "
+                             "arrival proves nothing — is --from-revision 1.6.0's head?")
+    # 1.7.0's withdrawal repair must have work, and the decomposed ID must actually differ
+    # from its composed form, or the composed-hash check is inert.
+    if "withdrawal record" not in skipped and "audit trail" not in skipped:
+        if _id_as_written(W_NFD_ID) == _id_composed(W_NFD_ID):
+            raise SystemExit("W_NFD_ID is already composed, so the repair's composed hash is "
+                             "the stored one and its check proves nothing")
+        held = set(conn.execute("SELECT project_uuid, entity_type, identifier_hash "
+                                "FROM removal_tombstones").fetchall())
+        if held & TOMBSTONES_ADDED:
+            raise SystemExit(f"seed drift: the seed already holds {held & TOMBSTONES_ADDED}, "
+                             "which the repair is meant to add")
 
     conn.commit()
     snap = {
@@ -827,7 +1096,14 @@ def seed(db_path: Path) -> dict:
                        "code_categories", "code_equivalence_groups",
                        "code_category_memberships", "code_sets",
                        "datasets", "dataset_columns", "dataset_rows", "dataset_values",
-                       "recode_definitions", "equivalence_groups"})},
+                       "recode_definitions", "equivalence_groups",
+                       "speakers", "materials", "material_collections", "analysis_domains",
+                       "analysis_domain_members", "audit_entries"})},
+        # 1.7.0: what each rebuilt table must carry across — columns and CHECKs.
+        "structure": {t: _structure(conn, t) for t in REBUILT_TABLES if t in have},
+        # The rows of a table the upgrade ADDS to: the full-row comparison reads these only.
+        "seeded_ids": {t: [r[0] for r in conn.execute(f"SELECT id FROM {t} ORDER BY id")]
+                       for t in GROWING_TABLES if t in have},
         # Every PRE-EXISTING column of every row, read from the database rather than
         # listed, so a column nobody named here is still compared.
         "full_rows": {t: (cols, _full_rows(conn, t, cols))
@@ -980,6 +1256,11 @@ def verify(db_path: Path, before: dict) -> list[str]:
             continue
         want = _expected_after(table, cols, was)
         got = _full_rows(conn, table, cols)
+        if table in before["seeded_ids"]:
+            # Rows the upgrade ADDED are asserted on their own below; these are the
+            # ones that were there before it, and they must be exactly as they were.
+            keep, id_at = {repr(i) for i in before["seeded_ids"][table]}, cols.index("id")
+            got = [r for r in got if r[id_at] in keep]
         if got != want:
             diff = [(w, g) for w, g in zip(want, got) if w != g]
             first = (f"\n     expected={diff[0][0]}\n     after   ={diff[0][1]}"
@@ -987,6 +1268,70 @@ def verify(db_path: Path, before: dict) -> list[str]:
             fails.append(
                 f"`{table}`: {len(diff) or 'the set of'} row(s) differ from what the "
                 f"upgrade must leave (rows {len(want)} -> {len(got)}; columns {cols}){first}")
+
+    # ── 1.7.0's ten REBUILDS: the same table, now with AUTOINCREMENT and a sequence ──
+    #
+    # The rows are compared above. What a DROP + RENAME can change without touching a row:
+    # a column's type, NOT NULL or default, a CHECK the regenerated statement left out —
+    # and the point of the rebuild, AUTOINCREMENT with its counter where it must start.
+    seq = dict(x("SELECT name, seq FROM sqlite_sequence").fetchall()) \
+        if "sqlite_sequence" in _tables(conn) else {}
+    for table, was in before["structure"].items():
+        now = _structure(conn, table)
+        # A column this cut ADDS (`NEW_COLUMNS`) is asserted on its own; the ones that were
+        # there before must come out as they went in, in order.
+        names = {c[0] for c in was["columns"]}
+        now["columns"] = [c for c in now["columns"] if c[0] in names]
+        if now["columns"] != was["columns"]:
+            diff = [(w, n) for w, n in zip(was["columns"], now["columns"]) if w != n]
+            fails.append(f"#1639: `{table}`'s columns changed in its rebuild "
+                         f"({len(was['columns'])} -> {len(now['columns'])}; first difference "
+                         f"{diff[:1] or 'in the count'})")
+        if now["checks"] != was["checks"]:
+            lost = sorted(set(was["checks"]) - set(now["checks"]))
+            fails.append(f"#1639: `{table}`'s rebuild changed its CHECK constraints — "
+                         f"LOST {lost}" if lost else
+                         f"#1639: `{table}`'s rebuild ADDED CHECK constraints "
+                         f"{sorted(set(now['checks']) - set(was['checks']))}")
+        if "AUTOINCREMENT" not in _table_sql(conn, table).upper():
+            fails.append(f"#1639/#1678: `{table}` came out of the upgrade WITHOUT "
+                         "AUTOINCREMENT, so a deleted newest row's id goes to the next row "
+                         "made, and a joint display or saved chart holding it names that row")
+        elif seq.get(table) != SEQ_EXPECTED[table]:
+            fails.append(
+                f"#1639/#1678: `{table}`'s sequence starts at {seq.get(table)!r}, not "
+                f"{SEQ_EXPECTED[table]} — "
+                + ("an id the audit trail says was issued (and deleted) can be issued again"
+                   if (seq.get(table) or 0) < SEQ_EXPECTED[table] else
+                   "it skips ids nothing issued (harmless, but not what the revision says)"))
+
+    # ── 1.7.0's withdrawal REPAIR (#1605, `b8d4f2a6c0e9`): exactly these rows added ──
+    #
+    # A row missing here lets a transcript that writes a withdrawn person's ID in the
+    # other encoding, or her name in other capitals, bring her back as a new participant;
+    # an extra row (from an unreadable entry, a project with no uuid, or a non-withdrawal
+    # entry) records a withdrawal that never happened.
+    if "removal_tombstones" in _tables(conn) and before["seeded_ids"].get("removal_tombstones"):
+        seeded = before["seeded_ids"]["removal_tombstones"]
+        added = x(f"SELECT project_uuid, entity_type, identifier_hash, entity_uuid, reason "
+                  f"FROM removal_tombstones WHERE id NOT IN ({','.join('?' * len(seeded))})",
+                  tuple(seeded)).fetchall()
+        got = {(p, k, h) for p, k, h, _, _ in added}
+        if len(added) != len(got):
+            fails.append(f"#1605: the repair added {len(added)} rows for {len(got)} records "
+                         "— the same ID withdrawn twice was written twice")
+        if missing := TOMBSTONES_ADDED - got:
+            kinds = sorted(k for _, k, _ in missing)
+            fails.append(f"#1605: the repair did NOT add {len(missing)} record(s) ({kinds}) — "
+                         "a withdrawn person can come back under that form of her ID or name")
+        if extra := got - TOMBSTONES_ADDED:
+            fails.append(f"#1605: the repair added {len(extra)} record(s) it must not: "
+                         f"{sorted(extra)}")
+        if bad := [r for r in added if r[3] is not None or r[4] != "withdrawal"]:
+            fails.append(f"#1605: added rows carry an entity uuid or another reason: {bad}")
+    elif "removal_tombstones" in _tables(conn):
+        fails.append("#1605's fixture was not seeded, so its check proves nothing — see the "
+                     "skipped list above")
 
     # ── Foreign keys: `codes`' own, and its two children's ────────────────────
     #
@@ -1076,12 +1421,11 @@ def verify(db_path: Path, before: dict) -> list[str]:
                        "'out of date' about a column that is not")
             fails.append(f"#1368 D4: `{formula}` arrived stale={got[0]!r}, not {want} — {why}")
 
-    # ── 1.6.0's REPAIR (#1597, `d4e8a1c7b2f6`): exactly G_SPLIT's turns queued ─────
+    # ── 1.6.0's REPAIR (#1597, `d4e8a1c7b2f6`, BELOW this cut): G_SPLIT's turns, still ──
     #
-    # The saved consensus layer is recomputed only when a marker asks, so a turn missing
-    # here keeps 1.5.8's per-turn consensus under a screen that calls it current, and an
-    # extra one costs a recompute (and, on a single-coder install, creates the consensus
-    # coder). The pre-existing marker must be the SAME row: the repair adds, never rewrites.
+    # The seed holds what that repair left; 1.7.0 must neither drop a marker (the turn
+    # would keep 1.5.8's per-turn consensus under a screen that calls it current) nor add
+    # one (a recompute nothing asked for). Both seeded markers must be the SAME rows.
     if "consensus_stale_targets" in _tables(conn) and not before["markers"]:
         fails.append("#1597's queue fixture was not seeded, so its check proves nothing — "
                      "see the skipped list above")
@@ -1125,9 +1469,8 @@ def verify(db_path: Path, before: dict) -> list[str]:
     #
     # 🔴 A dropped index leaves a UNIQUE constraint unenforced, and nothing else about
     # the database looks wrong afterwards (a table rebuild is the usual way to lose
-    # one; this cut has none, so this guards against a migration that drops one
-    # outright). A partial one must still carry its `WHERE` — the same name over a
-    # different predicate is a different constraint.
+    # one, and 1.7.0 rebuilds ten). A partial one must still carry its `WHERE` — the
+    # same name over a different predicate is a different constraint.
     for table, was in before["indexes"].items():
         now = _indexes(conn, table)
         for name, sql in was.items():
@@ -1148,12 +1491,13 @@ def verify(db_path: Path, before: dict) -> list[str]:
 
     # What this cut must CREATE: on which columns, and whether it must — or must NOT —
     # be UNIQUE. Read from the pragmas, not the statement's text.
-    for name, (table, columns, unique, why) in NEW_INDEXES.items():
+    for name, (table, columns, unique, where, why) in NEW_INDEXES.items():
         if name in before["indexes"].get(table, {}):
             fails.append(f"index `{name}` on `{table}` existed BEFORE the upgrade, so its "
                          "presence after proves nothing about this cut — is --from-revision "
                          "the previous release's head?")
-        listed = ({r[1]: bool(r[2]) for r in x(f"PRAGMA index_list({table})")}
+        # PRAGMA index_list: (seq, name, unique, origin, partial).
+        listed = ({r[1]: (bool(r[2]), bool(r[4])) for r in x(f"PRAGMA index_list({table})")}
                   if table in _tables(conn) else {})
         if name not in listed:
             fails.append(f"index `{name}` on `{table}` was never created")
@@ -1161,9 +1505,16 @@ def verify(db_path: Path, before: dict) -> list[str]:
         covers = tuple(r[2] for r in x(f"PRAGMA index_info({name})"))
         if covers != columns:
             fails.append(f"index `{name}` covers {covers}, not {columns}")
-        if listed[name] != unique:
-            fails.append(f"index `{name}` is {'UNIQUE' if listed[name] else 'not unique'}, "
+        is_unique, is_partial = listed[name]
+        if is_unique != unique:
+            fails.append(f"index `{name}` is {'UNIQUE' if is_unique else 'not unique'}, "
                          f"and must {'be' if unique else 'NOT be'} — {why}")
+        sql = " ".join(_indexes(conn, table).get(name, "").split())
+        if where is None and is_partial:
+            fails.append(f"index `{name}` is PARTIAL and must not be: {sql}")
+        elif where is not None and not (is_partial and
+                                        sql.upper().endswith(f"WHERE {where}".upper())):
+            fails.append(f"index `{name}` is not partial on `{where}` — {why}: {sql}")
 
     # ══ BEHAVIOURAL: the new constraints actually DO what they declare ═══════
     #
@@ -1171,6 +1522,35 @@ def verify(db_path: Path, before: dict) -> list[str]:
     # checks exercise it instead, with foreign keys ON, as the app runs. ⚠️ **They
     # all MUTATE the database, so every comparison above must already have run.**
     conn.execute("PRAGMA foreign_keys=ON")
+
+    # 1.7.0 (#1639, #1678) — the counter WORKS: a code and a variable group made after the
+    # upgrade take the id after the seeded sequence, never a deleted one's. (Code 15 and
+    # group 9 were deleted before the upgrade; without the seed they would be issued again.)
+    for table, insert in (
+        ("codes", "INSERT INTO codes (project_id, numeric_id, name, is_universal, is_active, "
+                  "created_at, updated_at) VALUES (1, 99, 'Made after the upgrade', 0, 1, ?, ?)"),
+        ("analysis_domains", "INSERT INTO analysis_domains (project_id, name, created_at, "
+                             "updated_at) VALUES (1, 'Made after the upgrade', ?, ?)"),
+    ):
+        if "AUTOINCREMENT" not in _table_sql(conn, table).upper():
+            continue  # already reported above
+        got = x(insert, (NOW, NOW)).lastrowid
+        conn.commit()
+        if got != SEQ_EXPECTED[table] + 1:
+            fails.append(f"#1639/#1678: a new row of `{table}` took id {got}, not "
+                         f"{SEQ_EXPECTED[table] + 1} — "
+                         + ("the id of a row deleted before the upgrade"
+                            if got <= SEQ_EXPECTED[table] else "the counter skipped ids"))
+    # A rebuilt table's CHECK still REFUSES what it declares: a quote with a start and no end.
+    if "excerpt" in _tables(conn):
+        try:
+            x("INSERT INTO excerpt (project_id, segment_id, start_offset, end_offset, "
+              "created_at, updated_at) VALUES (1, 10, 5, NULL, ?, ?)", (NOW, NOW))
+            conn.commit()
+            fails.append("#1639: the rebuilt `excerpt` accepted a quote with a start offset and "
+                         "no end — its CHECK constraints did not survive the rebuild")
+        except Exception:
+            conn.rollback()
 
     # #1352 — `ix_users_uuid` must refuse a second coder holding someone's identity, and
     # still accept coders holding none: NULL stays legal, because a row written around
@@ -1333,6 +1713,17 @@ def verify(db_path: Path, before: dict) -> list[str]:
                              "ON DELETE SET NULL did not survive the `datasets` rebuild")
             elif row[0] is not None:
                 fails.append(f"dataset_rows.participant_id did not degrade: {row[0]}")
+            # 1.7.0 rebuilt `participants`: its speaker must keep their turns and lose
+            # only the link.
+            if "speakers" in _tables(conn):
+                spk = x("SELECT participant_id FROM speakers WHERE id=?",
+                        (SPEAKER_LINKED,)).fetchone()
+                if spk is None:
+                    fails.append("the SPEAKER was deleted with the participant — "
+                                 "`speakers.participant_id`'s ON DELETE SET NULL did not "
+                                 "survive the `participants` rebuild")
+                elif spk[0] is not None:
+                    fails.append(f"speakers.participant_id did not degrade: {spk[0]}")
 
     # Row 45 (i).3: at most one participant dataset PER PROJECT. The index is what
     # makes that structural rather than something a service has to remember, so it
